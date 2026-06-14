@@ -105,15 +105,7 @@ If you want to use Alpaca, configure `.env` from `.env.example` and install the 
 pip install -r requirements-alpaca.txt
 ```
 
-Start with `notebooks/market_data_smoke_test.ipynb` to verify local data access and timing before scaling to the full paper universe.
-
-Build the initial open-data candidate universe with:
-
-```bash
-conda run -n sentiment-ltr-paper python scripts/build_market_universe.py
-```
-
-This creates `data/raw/market/candidate_universe_sp500.csv` and a manifest. The files are intentionally ignored by Git because raw data should be reproducible from scripts rather than committed.
+Start with `notebooks/market_data_smoke_test.ipynb` to verify local Yahoo Finance access and timing. For WRDS/CRSP candidate-universe pulls, validation commands, and output schemas, see `docs/data_pull_validation.md`.
 
 ### 2. News Sentiment Data
 
@@ -359,10 +351,11 @@ Use these statuses while building the replication:
 | Task | Status | Notes |
 | --- | --- | --- |
 | Choose primary market data source | Done | Use WRDS/CRSP as the primary market data source; keep Yahoo Finance for quick public smoke tests and fallback checks. |
-| Verify WRDS connection and CRSP access | In Progress | `wrds_connection.ipynb` is set up and executes safely without credentials; next step is setting `WRDS_USERNAME` locally and running the CRSP smoke query. |
-| Define market data universe candidate list | Pending Review | Added a config and script to build a current S&P 500 candidate list for open-data development. This is survivorship-biased and not the exact Bloomberg top-1000 universe. |
+| Verify WRDS connection and CRSP access | Done | `wrds_connection.ipynb` connected to WRDS, confirmed CRSP access, and returned a tiny CRSP sample query. |
+| Define market data universe candidate list | Done | Added a WRDS/CRSP script that builds the top 1,000 common-stock candidates by average daily volume for 2003-2014. |
+| Validate CRSP candidate universe | Pending Review | `notebooks/crsp_universe_validation.ipynb` checks row counts and filters, then displays the top 20 stocks by average daily volume. |
 | Build raw market data loader | Pending Review | Adapted the Yahoo Finance and Alpaca retrieval helper from `Portfolio_Optimization_2023`; WRDS/CRSP loader still needs to be implemented. |
-| Pull daily OHLCV data for 2003-2014 | To Do | Download adjusted close, close, open, high, low, volume, returns, shares outstanding, and delisting data for eligible CRSP securities. |
+| Pull daily OHLCV data for 2003-2014 | To Do | Next task: download adjusted close, close, open, high, low, volume, returns, shares outstanding, and delisting data for the CRSP candidate securities. |
 | Pull benchmark market data | To Do | Download SPY or S&P 500 benchmark data for the full 2003-2014 window. |
 | Pull or approximate GICS sectors | To Do | Needed for sector-specific sentiment lookback windows and stock-universe diagnostics. |
 | Map identifiers across data sources | To Do | Maintain PERMNO, PERMCO, ticker, RIC, company name, exchange, and sector identifiers so market data can join to news sentiment. |

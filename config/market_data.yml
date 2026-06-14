@@ -3,6 +3,10 @@ market_data:
   end: "2014-12-31"
   primary_source: yahoo
   benchmark_symbol: SPY
+  crsp:
+    candidate_count: 1000
+    share_codes: [10, 11]
+    exchange_codes: [1, 2, 3]
 
 universe:
   # Open-data starting point for development. The paper used Bloomberg to select
