@@ -1,0 +1,45 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Python caches and virtual environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local data and generated research artifacts
+data/raw/
+data/interim/
+data/processed/
+reports/
+artifacts/
+models/
+
+# Large serialized outputs
+*.parquet
+*.feather
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.joblib
+*.pt
+*.pth
+*.onnx
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+
+# OS/editor noise
+.DS_Store
+.vscode/

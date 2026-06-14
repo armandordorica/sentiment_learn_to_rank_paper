@@ -29,6 +29,30 @@ The full backtest period is 2006-2014. The paper reports these annualized result
 
 Use these as sanity-check targets after implementing the pipeline.
 
+## Environment Setup
+
+Use the Conda environment to keep Python and package versions reproducible:
+
+```bash
+conda env create -f environment.yml
+conda activate sentiment-ltr-paper
+python -m ipykernel install --user --name sentiment-ltr-paper --display-name "Python (sentiment-ltr-paper)"
+```
+
+For the exact package versions solved on the original development machine, use:
+
+```bash
+conda env create -f environment.lock.yml
+```
+
+For a lighter pip-only setup, install the base requirements in your active environment:
+
+```bash
+pip install -r requirements.txt
+```
+
+The recommended environment uses Python 3.11 because the optional legacy Alpaca client may not resolve cleanly on Python 3.13.
+
 ## Data Needed
 
 ### 1. Market Data
@@ -47,6 +71,32 @@ Also collect:
 
 - SPY or S&P 500 benchmark returns
 - HFRIEMN index returns, if comparing against hedge fund market neutral performance
+
+This repository includes a market-data helper adapted from `armandordorica/Portfolio_Optimization_2023`. It tries Alpaca first when `ALPACA_API_KEY` and `ALPACA_SECRET_KEY` are configured, then falls back to Yahoo Finance.
+
+```python
+from sentiment_ltr.data import MarketDataClient, MarketDataConfig
+
+config = MarketDataConfig(start="2003-01-01", end="2014-12-31")
+client = MarketDataClient(config)
+
+spy = client.fetch("SPY")
+prices = client.fetch_many(["AAPL", "MSFT", "SPY"])
+```
+
+If you are not using the Conda environment, install the base dependencies with:
+
+```bash
+pip install -r requirements.txt
+```
+
+If you want to use Alpaca, configure `.env` from `.env.example` and install the optional client:
+
+```bash
+pip install -r requirements-alpaca.txt
+```
+
+Start with `notebooks/market_data_smoke_test.ipynb` to verify local data access and timing before scaling to the full paper universe.
 
 ### 2. News Sentiment Data
 
@@ -284,7 +334,7 @@ Use these statuses while building the replication:
 | Obtain market data for 2003-2014 | Blocked | Requires Bloomberg, CRSP/Compustat, Yahoo Finance, or another reliable source. |
 | Obtain company-level news sentiment data | Blocked | Exact replication requires TRNA or an equivalent historical sentiment dataset. |
 | Define data schema and file formats | To Do | Specify columns, date conventions, identifiers, and storage paths under `data/`. |
-| Build raw market data loader | To Do | Load daily prices, returns, volume, GICS sector, benchmark, and optional HFRIEMN data. |
+| Build raw market data loader | Pending Review | Adapted the Yahoo Finance and Alpaca retrieval helper from `Portfolio_Optimization_2023`. Still needs real data access testing. |
 | Build raw news sentiment loader | To Do | Load article timestamps, stock identifiers, `pos`, `obj`, `neg`, and `relevance`. |
 | Aggregate weekly stock sentiment | To Do | Compute `S_sentiment = relevance * (pos - neg)` and average by stock-week. |
 | Construct stock universe | To Do | Filter top 1000 stocks by average volume, then remove stocks with fewer than one news article per week. |
