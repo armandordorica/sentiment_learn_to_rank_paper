@@ -53,6 +53,15 @@ pip install -r requirements.txt
 
 The recommended environment uses Python 3.11 because the optional legacy Alpaca client may not resolve cleanly on Python 3.13.
 
+For WRDS/CRSP access, add your WRDS credentials to a local `.env` file:
+
+```bash
+WRDS_USERNAME=your_wrds_username
+WRDS_PASSWORD=your_wrds_password
+```
+
+Do not commit `.env` to the repository. Start with `wrds_connection.ipynb` to verify authentication and CRSP table access.
+
 ## Data Needed
 
 ### 1. Market Data
@@ -97,6 +106,14 @@ pip install -r requirements-alpaca.txt
 ```
 
 Start with `notebooks/market_data_smoke_test.ipynb` to verify local data access and timing before scaling to the full paper universe.
+
+Build the initial open-data candidate universe with:
+
+```bash
+conda run -n sentiment-ltr-paper python scripts/build_market_universe.py
+```
+
+This creates `data/raw/market/candidate_universe_sp500.csv` and a manifest. The files are intentionally ignored by Git because raw data should be reproducible from scripts rather than committed.
 
 ### 2. News Sentiment Data
 
@@ -329,28 +346,73 @@ Use these statuses while building the replication:
 - Blocked: cannot move forward without external data, access, or a methodological decision.
 - Done: completed and checked.
 
+### Project Setup And Reproducibility
+
 | Task | Status | Notes |
 | --- | --- | --- |
-| Obtain market data for 2003-2014 | Blocked | Requires Bloomberg, CRSP/Compustat, Yahoo Finance, or another reliable source. |
-| Obtain company-level news sentiment data | Blocked | Exact replication requires TRNA or an equivalent historical sentiment dataset. |
 | Define data schema and file formats | To Do | Specify columns, date conventions, identifiers, and storage paths under `data/`. |
-| Build raw market data loader | Pending Review | Adapted the Yahoo Finance and Alpaca retrieval helper from `Portfolio_Optimization_2023`. Still needs real data access testing. |
+| Maintain reproducible environment | Pending Review | Conda environment, lock file, and notebook kernel are in place; update when dependencies change. |
+| Document replication limitations | To Do | Record data substitutions, missing assumptions, and deviations from the paper. |
+
+### Market Data And Universe
+
+| Task | Status | Notes |
+| --- | --- | --- |
+| Choose primary market data source | Done | Use WRDS/CRSP as the primary market data source; keep Yahoo Finance for quick public smoke tests and fallback checks. |
+| Verify WRDS connection and CRSP access | In Progress | `wrds_connection.ipynb` is set up and executes safely without credentials; next step is setting `WRDS_USERNAME` locally and running the CRSP smoke query. |
+| Define market data universe candidate list | Pending Review | Added a config and script to build a current S&P 500 candidate list for open-data development. This is survivorship-biased and not the exact Bloomberg top-1000 universe. |
+| Build raw market data loader | Pending Review | Adapted the Yahoo Finance and Alpaca retrieval helper from `Portfolio_Optimization_2023`; WRDS/CRSP loader still needs to be implemented. |
+| Pull daily OHLCV data for 2003-2014 | To Do | Download adjusted close, close, open, high, low, volume, returns, shares outstanding, and delisting data for eligible CRSP securities. |
+| Pull benchmark market data | To Do | Download SPY or S&P 500 benchmark data for the full 2003-2014 window. |
+| Pull or approximate GICS sectors | To Do | Needed for sector-specific sentiment lookback windows and stock-universe diagnostics. |
+| Map identifiers across data sources | To Do | Maintain PERMNO, PERMCO, ticker, RIC, company name, exchange, and sector identifiers so market data can join to news sentiment. |
+| Validate market data coverage | To Do | Check missing prices, stale symbols, delistings, split/dividend adjustment, and date coverage. |
+| Store raw market data locally | To Do | Save reproducible raw pulls under `data/raw/market/`, which is intentionally ignored by Git. |
+| Create market data manifest | To Do | Track source, pull date, symbols, date range, row counts, failures, and schema version. |
+| Build processed daily market panel | To Do | Produce a clean daily table ready for weekly aggregation and feature generation. |
+
+### News Sentiment Data
+
+| Task | Status | Notes |
+| --- | --- | --- |
+| Obtain company-level news sentiment data | Blocked | Exact replication requires TRNA or an equivalent historical sentiment dataset. |
 | Build raw news sentiment loader | To Do | Load article timestamps, stock identifiers, `pos`, `obj`, `neg`, and `relevance`. |
 | Aggregate weekly stock sentiment | To Do | Compute `S_sentiment = relevance * (pos - neg)` and average by stock-week. |
-| Construct stock universe | To Do | Filter top 1000 stocks by average volume, then remove stocks with fewer than one news article per week. |
+
+### Feature Dataset
+
+| Task | Status | Notes |
+| --- | --- | --- |
+| Construct final stock universe | To Do | Filter top 1000 stocks by average volume, then remove stocks with fewer than one news article per week. |
 | Implement sentiment shock and trend features | To Do | Use the sector-specific lookback windows from the paper. |
 | Generate lagged return and sentiment features | To Do | Add previous 1-week return, previous 1-month return, previous 1-week sentiment, and previous 1-month sentiment. |
 | Generate weekly ranking labels | To Do | Rank following 1-week returns and assign quartile labels from 1 to 4. |
+
+### Learning-To-Rank Models
+
+| Task | Status | Notes |
+| --- | --- | --- |
 | Implement RankNet model | To Do | One hidden layer, 10 hidden nodes, learning rate `0.00005`, 150 iterations. |
 | Implement ListNet model | To Do | One hidden layer, 10 hidden nodes, learning rate `0.00005`, 1500 iterations. |
 | Implement NDCG validation workflow | To Do | Recreate the 2006-2009 70/30 train-validation selection process. |
+
+### Backtesting And Evaluation
+
+| Task | Status | Notes |
+| --- | --- | --- |
 | Implement rolling annual backtest | To Do | Train on three years and test on the following year from 2006 through 2014. |
 | Implement long-only portfolio strategy | To Do | Equal-weight the top 25% of ranked stocks at weekly rebalances. |
 | Implement long-short portfolio strategy | To Do | Long top 25% and short predicted bottom 25%, documenting leverage convention. |
 | Compute performance metrics | To Do | Annualized return, volatility, Sharpe ratio, maximum drawdown, and cumulative return. |
 | Reproduce paper result tables and figures | To Do | Compare against Table 3, Table 4, and cumulative return plots. |
+
+### Quality And Bias Checks
+
+| Task | Status | Notes |
+| --- | --- | --- |
 | Add tests for no look-ahead bias | To Do | Verify features use only information available before each rebalance. |
-| Document replication limitations | To Do | Record data substitutions, missing assumptions, and deviations from the paper. |
+| Validate survivorship-bias handling | To Do | Confirm CRSP delisted securities and name history are handled correctly. |
+| Validate portfolio accounting assumptions | To Do | Check leverage convention, transaction-cost assumptions, shorting assumptions, and benchmark alignment. |
 
 ## Reproducibility Checks
 

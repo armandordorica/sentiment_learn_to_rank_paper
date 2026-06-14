@@ -1,3 +1,8 @@
 pandas
 yfinance
 python-dotenv
+pyyaml
+lxml
+requests
+sqlalchemy
+wrds

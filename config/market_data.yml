@@ -1,0 +1,15 @@
+market_data:
+  start: "2003-01-01"
+  end: "2014-12-31"
+  primary_source: yahoo
+  benchmark_symbol: SPY
+
+universe:
+  # Open-data starting point for development. The paper used Bloomberg to select
+  # the top 1000 stocks by average trading volume, then filtered by news coverage.
+  # This source is survivorship-biased and should be replaced by Bloomberg,
+  # CRSP/Compustat, or another point-in-time universe for closer replication.
+  candidate_source: wikipedia_sp500
+  wikipedia_sp500_url: "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+  yahoo_symbol_normalization:
+    replace_dot_with_dash: true
