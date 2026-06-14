@@ -64,6 +64,15 @@ data/raw/market/crsp_top_volume_universe_manifest.json
 
 These files are intentionally ignored by Git. They should be reproduced from WRDS rather than committed.
 
+The Streamlit app uses tracked aggregated copies under `app_data/`:
+
+```text
+app_data/crsp_top_volume_universe.csv
+app_data/top20_monthly_volume.csv
+```
+
+These are small validation artifacts used only to render the hosted charts. They are not the full raw CRSP daily panel.
+
 ## Validate The Candidate Universe
 
 Run:

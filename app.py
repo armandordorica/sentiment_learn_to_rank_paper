@@ -10,16 +10,24 @@ import streamlit as st
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_UNIVERSE_PATH = PROJECT_ROOT / "data" / "raw" / "market" / "crsp_top_volume_universe.csv"
-DEFAULT_MONTHLY_VOLUME_PATH = PROJECT_ROOT / "data" / "processed" / "validation" / "top20_monthly_volume.csv"
+APP_DATA_DIR = PROJECT_ROOT / "app_data"
+DEFAULT_UNIVERSE_PATHS = [
+    APP_DATA_DIR / "crsp_top_volume_universe.csv",
+    PROJECT_ROOT / "data" / "raw" / "market" / "crsp_top_volume_universe.csv",
+]
+DEFAULT_MONTHLY_VOLUME_PATHS = [
+    APP_DATA_DIR / "top20_monthly_volume.csv",
+    PROJECT_ROOT / "data" / "processed" / "validation" / "top20_monthly_volume.csv",
+]
 
 
-def load_csv(uploaded_file, fallback_path: Path) -> pd.DataFrame | None:
+def load_csv(uploaded_file, fallback_paths: list[Path]) -> pd.DataFrame | None:
     """Load an uploaded CSV, or a local fallback if it exists."""
     if uploaded_file is not None:
         return pd.read_csv(uploaded_file)
-    if fallback_path.exists():
-        return pd.read_csv(fallback_path)
+    for fallback_path in fallback_paths:
+        if fallback_path.exists():
+            return pd.read_csv(fallback_path)
     return None
 
 
@@ -161,9 +169,9 @@ st.caption(
     "sentiment learning-to-rank paper replication."
 )
 
-st.warning(
-    "CRSP/WRDS data is licensed and is not bundled with this app. Upload locally generated CSVs "
-    "from the validation pipeline, or run the app locally where ignored data files exist."
+st.info(
+    "This app bundles small aggregated validation CSVs so the charts render immediately. "
+    "Raw CRSP/WRDS daily data and credentials are not included."
 )
 
 with st.sidebar:
@@ -182,7 +190,7 @@ with st.sidebar:
         ),
     )
 
-universe = load_csv(universe_upload, DEFAULT_UNIVERSE_PATH)
+universe = load_csv(universe_upload, DEFAULT_UNIVERSE_PATHS)
 if universe is None:
     st.info(
         "Upload `crsp_top_volume_universe.csv` to render the validation charts. "
@@ -219,7 +227,7 @@ display_cols = [
 st.dataframe(top20[display_cols], use_container_width=True)
 
 st.subheader("Top 20 Trading Volume Over Time")
-monthly_volume = load_csv(monthly_volume_upload, DEFAULT_MONTHLY_VOLUME_PATH)
+monthly_volume = load_csv(monthly_volume_upload, DEFAULT_MONTHLY_VOLUME_PATHS)
 if monthly_volume is None:
     st.info(
         "Upload a monthly or daily volume CSV to render the over-time chart. "
