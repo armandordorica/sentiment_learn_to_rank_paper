@@ -69,9 +69,19 @@ The Streamlit app uses tracked aggregated copies under `app_data/`:
 ```text
 app_data/crsp_top_volume_universe.csv
 app_data/top20_monthly_volume.csv
+app_data/top20_monthly_prices.csv
 ```
 
 These are small validation artifacts used only to render the hosted charts. They are not the full raw CRSP daily panel.
+
+To refresh the top-20 monthly validation artifacts, run:
+
+```bash
+conda run -n sentiment-ltr-paper python scripts/export_top20_monthly_volume.py
+conda run -n sentiment-ltr-paper python scripts/export_top20_monthly_prices.py
+cp data/processed/validation/top20_monthly_volume.csv app_data/top20_monthly_volume.csv
+cp data/processed/validation/top20_monthly_prices.csv app_data/top20_monthly_prices.csv
+```
 
 ## Validate The Candidate Universe
 
@@ -97,6 +107,7 @@ The validation notebook checks:
 - The top 20 stocks are plotted as an interactive Plotly horizontal bar chart.
 - CRSP daily volume for the top 20 stocks is queried over 2003-2014.
 - Daily volume is aggregated to monthly average daily volume and plotted over time with an interactive Plotly line chart.
+- CRSP daily `openprc` and `prc` for the top 20 stocks are aggregated into monthly open, close, and average price series for the Streamlit validation app.
 
 Current validation result:
 
@@ -106,6 +117,7 @@ Current validation result:
 - Spot checks found: `MSFT`, `GE`, `AAPL`, `XOM`
 - `SPY` is not included, as expected, because ETFs are excluded by the common-stock filter.
 - Top-20 over-time volume query returned 49,121 daily CRSP rows.
+- Top-20 monthly price export produced 2,344 monthly stock rows.
 
 ## Output Schema
 
@@ -146,6 +158,18 @@ Current validation result:
 | `output_file` | Relative path to the candidate CSV. |
 | `ranking_rule` | Human-readable description of the ranking rule. |
 | `note` | Important limitation: this is only the market-side candidate universe and does not apply the TRNA news filter. |
+
+### `top20_monthly_prices.csv`
+
+| Column | Description |
+| --- | --- |
+| `month` | Month bucket for the CRSP daily observations. |
+| `ticker` | CRSP ticker for the selected top-20 security. |
+| `comnam` | Company name for the selected top-20 security. |
+| `open_price` | First available absolute CRSP `openprc` value in the month. |
+| `close_price` | Last available absolute CRSP `prc` value in the month. |
+| `avg_price` | Average absolute CRSP closing price, computed from daily `prc`, during the month. |
+| `trading_days` | Number of daily CRSP observations used for that monthly stock row. |
 
 ## Interpretation Notes
 

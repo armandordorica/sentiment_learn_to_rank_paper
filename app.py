@@ -19,6 +19,10 @@ DEFAULT_MONTHLY_VOLUME_PATHS = [
     APP_DATA_DIR / "top20_monthly_volume.csv",
     PROJECT_ROOT / "data" / "processed" / "validation" / "top20_monthly_volume.csv",
 ]
+DEFAULT_MONTHLY_PRICE_PATHS = [
+    APP_DATA_DIR / "top20_monthly_prices.csv",
+    PROJECT_ROOT / "data" / "processed" / "validation" / "top20_monthly_prices.csv",
+]
 
 
 def load_csv(uploaded_file, fallback_paths: list[Path]) -> pd.DataFrame | None:
@@ -158,6 +162,62 @@ def make_monthly_volume_chart(monthly_volume: pd.DataFrame):
     return fig
 
 
+def prepare_monthly_prices(price_data: pd.DataFrame) -> pd.DataFrame:
+    """Prepare monthly top-20 price data for plotting."""
+    data = price_data.copy()
+    required = {"month", "ticker", "comnam", "open_price", "close_price", "avg_price"}
+    missing = required.difference(data.columns)
+    if missing:
+        raise ValueError(f"Monthly price CSV is missing required columns: {sorted(missing)}")
+    data["month"] = pd.to_datetime(data["month"], errors="coerce")
+    return data.sort_values(["ticker", "month"])
+
+
+def make_monthly_price_chart(monthly_prices: pd.DataFrame, ticker: str):
+    """Build an interactive monthly open/close/average price chart for one ticker."""
+    stock_prices = monthly_prices[monthly_prices["ticker"] == ticker].copy()
+    if stock_prices.empty:
+        raise ValueError(f"No monthly price data found for {ticker}.")
+
+    company_name = stock_prices["comnam"].iloc[0]
+    long_prices = stock_prices.melt(
+        id_vars=["month", "ticker", "comnam", "trading_days"],
+        value_vars=["open_price", "close_price", "avg_price"],
+        var_name="price_type",
+        value_name="price",
+    )
+    price_labels = {
+        "open_price": "Open Price",
+        "close_price": "Close Price",
+        "avg_price": "Average Price",
+    }
+    long_prices["price_type"] = long_prices["price_type"].map(price_labels)
+
+    fig = px.line(
+        long_prices,
+        x="month",
+        y="price",
+        color="price_type",
+        title=f"Monthly Open, Close, and Average Price For {ticker} - {company_name.title()}",
+        labels={
+            "month": "Month",
+            "price": "Price, USD",
+            "price_type": "Series",
+        },
+        hover_data={
+            "ticker": True,
+            "comnam": True,
+            "month": "|%Y-%m",
+            "price_type": True,
+            "price": ":,.2f",
+            "trading_days": True,
+        },
+    )
+    fig.update_traces(mode="lines+markers", line={"width": 2}, marker={"size": 5})
+    fig.update_layout(height=650, hovermode="closest")
+    return fig
+
+
 st.set_page_config(
     page_title="Sentiment LTR Paper: CRSP Universe Validation",
     layout="wide",
@@ -237,5 +297,24 @@ else:
     try:
         monthly_volume = prepare_monthly_volume(monthly_volume, top20)
         st.plotly_chart(make_monthly_volume_chart(monthly_volume), use_container_width=True)
+    except ValueError as exc:
+        st.error(str(exc))
+
+st.subheader("Top 20 Monthly Open, Close, And Average Price")
+monthly_prices = load_csv(None, DEFAULT_MONTHLY_PRICE_PATHS)
+if monthly_prices is None:
+    st.info(
+        "Monthly price data is unavailable. Generate it locally with "
+        "`python scripts/export_top20_monthly_prices.py`."
+    )
+else:
+    try:
+        monthly_prices = prepare_monthly_prices(monthly_prices)
+        ticker_options = top20["ticker"].dropna().tolist()
+        selected_ticker = st.selectbox("Select a top-20 ticker", ticker_options)
+        st.plotly_chart(
+            make_monthly_price_chart(monthly_prices, selected_ticker),
+            use_container_width=True,
+        )
     except ValueError as exc:
         st.error(str(exc))
