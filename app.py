@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from dotenv import load_dotenv
+
+try:
+    import wrds
+except ImportError:  # pragma: no cover - handled in the Streamlit UI
+    wrds = None
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -23,6 +30,11 @@ DEFAULT_MONTHLY_PRICE_PATHS = [
     APP_DATA_DIR / "top20_monthly_prices.csv",
     PROJECT_ROOT / "data" / "processed" / "validation" / "top20_monthly_prices.csv",
 ]
+DEFAULT_LOOKUP_START = "2003-01-01"
+DEFAULT_LOOKUP_END = "2014-12-31"
+
+
+load_dotenv(PROJECT_ROOT / ".env")
 
 
 def load_csv(uploaded_file, fallback_paths: list[Path]) -> pd.DataFrame | None:
@@ -33,6 +45,126 @@ def load_csv(uploaded_file, fallback_paths: list[Path]) -> pd.DataFrame | None:
         if fallback_path.exists():
             return pd.read_csv(fallback_path)
     return None
+
+
+def get_secret_or_env(name: str) -> str | None:
+    """Read a value from Streamlit secrets first, then environment variables."""
+    try:
+        value = st.secrets.get(name)
+    except Exception:
+        value = None
+    return value or os.environ.get(name)
+
+
+def wrds_credentials_available() -> bool:
+    """Return whether the app has enough configuration for live WRDS queries."""
+    return bool(get_secret_or_env("WRDS_USERNAME") and get_secret_or_env("WRDS_PASSWORD"))
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def query_wrds_ticker_data(ticker: str, start_date: str, end_date: str, row_limit: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Query CRSP name history and daily stock data for a ticker."""
+    if wrds is None:
+        raise RuntimeError("The `wrds` package is not installed in this environment.")
+
+    wrds_username = get_secret_or_env("WRDS_USERNAME")
+    wrds_password = get_secret_or_env("WRDS_PASSWORD")
+    if not wrds_username or not wrds_password:
+        raise RuntimeError("WRDS credentials are not configured.")
+
+    clean_ticker = "".join(char for char in ticker.upper().strip() if char.isalnum() or char in {".", "-"})
+    if not clean_ticker:
+        raise ValueError("Enter a valid ticker.")
+
+    db = wrds.Connection(wrds_username=wrds_username, wrds_password=wrds_password)
+    try:
+        names_query = f"""
+        select
+            permno,
+            permco,
+            namedt,
+            nameendt,
+            ticker,
+            comnam,
+            shrcd,
+            exchcd
+        from crsp.msenames
+        where ticker = '{clean_ticker}'
+          and namedt <= '{end_date}'
+          and nameendt >= '{start_date}'
+        order by namedt, permno
+        """
+        names = db.raw_sql(names_query, date_cols=["namedt", "nameendt"])
+
+        if names.empty:
+            return names, pd.DataFrame()
+
+        permno_sql = ", ".join(str(int(permno)) for permno in sorted(names["permno"].dropna().unique()))
+        daily_query = f"""
+        select
+            d.permno,
+            n.permco,
+            d.date,
+            n.ticker,
+            n.comnam,
+            n.shrcd,
+            n.exchcd,
+            d.openprc,
+            d.prc,
+            d.ret,
+            d.retx,
+            d.vol,
+            d.shrout,
+            d.cfacpr,
+            d.cfacshr,
+            d.bidlo,
+            d.askhi
+        from crsp.dsf as d
+        join crsp.msenames as n
+          on d.permno = n.permno
+         and d.date between n.namedt and n.nameendt
+        where d.date between '{start_date}' and '{end_date}'
+          and d.permno in ({permno_sql})
+          and n.ticker = '{clean_ticker}'
+        order by d.date desc, d.permno
+        limit {int(row_limit)}
+        """
+        daily = db.raw_sql(daily_query, date_cols=["date"])
+    finally:
+        db.close()
+
+    for column in ["openprc", "prc", "bidlo", "askhi"]:
+        if column in daily.columns:
+            daily[f"abs_{column}"] = daily[column].abs()
+    return names, daily
+
+
+def make_lookup_price_chart(daily_data: pd.DataFrame, ticker: str):
+    """Build a close-price chart for an arbitrary WRDS ticker lookup."""
+    if daily_data.empty:
+        raise ValueError("No daily rows available to plot.")
+    plot_data = daily_data.sort_values("date").copy()
+    plot_data["close_price"] = plot_data["prc"].abs()
+    fig = px.line(
+        plot_data,
+        x="date",
+        y="close_price",
+        color="permno",
+        title=f"CRSP Daily Close Price For {ticker.upper()}",
+        labels={"date": "Date", "close_price": "Absolute CRSP close price, USD", "permno": "PERMNO"},
+        hover_data={
+            "ticker": True,
+            "comnam": True,
+            "permno": True,
+            "date": "|%Y-%m-%d",
+            "close_price": ":,.2f",
+            "ret": ":.4f",
+            "vol": ":,",
+        },
+    )
+    fig.update_traces(mode="lines+markers", marker={"size": 4})
+    fig.update_layout(height=550, hovermode="closest")
+    return fig
 
 
 def prepare_universe(universe: pd.DataFrame) -> pd.DataFrame:
@@ -299,6 +431,61 @@ else:
         st.plotly_chart(make_monthly_volume_chart(monthly_volume), use_container_width=True)
     except ValueError as exc:
         st.error(str(exc))
+
+st.subheader("Look Up Any CRSP Ticker From WRDS")
+st.caption(
+    "Enter a ticker to query WRDS/CRSP live. This requires `WRDS_USERNAME` and "
+    "`WRDS_PASSWORD` as local environment variables or Hugging Face Space secrets."
+)
+st.warning(
+    "Only enable WRDS credentials on deployments where sharing returned CRSP data is permitted "
+    "under your WRDS data-use terms."
+)
+
+lookup_cols = st.columns([1, 1, 1, 1])
+lookup_ticker = lookup_cols[0].text_input("Ticker", value="AAPL", max_chars=12).strip().upper()
+lookup_start = lookup_cols[1].date_input("Start date", value=pd.Timestamp(DEFAULT_LOOKUP_START))
+lookup_end = lookup_cols[2].date_input("End date", value=pd.Timestamp(DEFAULT_LOOKUP_END))
+lookup_limit = lookup_cols[3].number_input("Max rows", min_value=100, max_value=10000, value=3000, step=100)
+
+if not wrds_credentials_available():
+    st.info(
+        "WRDS credentials are not configured for this app runtime. Add `WRDS_USERNAME` and "
+        "`WRDS_PASSWORD` as Hugging Face Space secrets, or run locally with those values in `.env`."
+    )
+elif st.button("Query WRDS For Ticker"):
+    if lookup_start > lookup_end:
+        st.error("Start date must be before end date.")
+    else:
+        with st.spinner(f"Querying WRDS/CRSP for {lookup_ticker}..."):
+            try:
+                name_history, daily_lookup = query_wrds_ticker_data(
+                    lookup_ticker,
+                    lookup_start.isoformat(),
+                    lookup_end.isoformat(),
+                    int(lookup_limit),
+                )
+            except Exception as exc:
+                st.error(f"WRDS query failed: {exc}")
+            else:
+                if name_history.empty:
+                    st.warning(f"No CRSP name-history rows found for `{lookup_ticker}` in that date range.")
+                else:
+                    st.write("CRSP name-history matches")
+                    st.dataframe(name_history, use_container_width=True)
+
+                    if daily_lookup.empty:
+                        st.warning(f"No CRSP daily rows found for `{lookup_ticker}` in that date range.")
+                    else:
+                        st.write(f"Returned {len(daily_lookup):,} CRSP daily rows")
+                        st.plotly_chart(make_lookup_price_chart(daily_lookup, lookup_ticker), use_container_width=True)
+                        st.dataframe(daily_lookup, use_container_width=True)
+                        st.download_button(
+                            "Download returned CRSP rows as CSV",
+                            data=daily_lookup.to_csv(index=False),
+                            file_name=f"{lookup_ticker.lower()}_crsp_daily_{lookup_start}_{lookup_end}.csv",
+                            mime="text/csv",
+                        )
 
 st.subheader("Top 20 Monthly Open, Close, And Average Price")
 monthly_prices = load_csv(None, DEFAULT_MONTHLY_PRICE_PATHS)

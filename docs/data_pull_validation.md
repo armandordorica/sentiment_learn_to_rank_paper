@@ -22,6 +22,8 @@ WRDS_PASSWORD=your_wrds_password
 
 Do not commit `.env`. It is ignored by Git.
 
+For the Hugging Face Streamlit app's live ticker lookup, add the same values as Space secrets named `WRDS_USERNAME` and `WRDS_PASSWORD`. The app does not print or store these credentials; it only uses them to open a WRDS connection when the lookup button is clicked.
+
 Before pulling data, verify WRDS and CRSP access:
 
 ```bash
@@ -108,6 +110,7 @@ The validation notebook checks:
 - CRSP daily volume for the top 20 stocks is queried over 2003-2014.
 - Daily volume is aggregated to monthly average daily volume and plotted over time with an interactive Plotly line chart.
 - CRSP daily `openprc` and `prc` for the top 20 stocks are aggregated into monthly open, close, and average price series for the Streamlit validation app.
+- The Streamlit app can optionally query WRDS live for an arbitrary ticker and selected date range, returning CRSP name-history matches and daily rows from `crsp.dsf`.
 
 Current validation result:
 
@@ -170,6 +173,33 @@ Current validation result:
 | `close_price` | Last available absolute CRSP `prc` value in the month. |
 | `avg_price` | Average absolute CRSP closing price, computed from daily `prc`, during the month. |
 | `trading_days` | Number of daily CRSP observations used for that monthly stock row. |
+
+### Live Streamlit Ticker Lookup
+
+The app's arbitrary ticker lookup queries `crsp.msenames` first to find matching CRSP securities whose name records overlap the selected date range. It then joins those PERMNO values to `crsp.dsf` and returns the daily rows WRDS provides for that ticker/date range.
+
+Returned daily fields include:
+
+| Column | Description |
+| --- | --- |
+| `permno` | CRSP permanent security identifier. |
+| `permco` | CRSP permanent company identifier from the matching name record. |
+| `date` | CRSP daily observation date. |
+| `ticker` | Ticker from the matching CRSP name-history record. |
+| `comnam` | Company name from the matching CRSP name-history record. |
+| `shrcd` | CRSP share code. |
+| `exchcd` | CRSP exchange code. |
+| `openprc` | CRSP daily opening price, when available. |
+| `prc` | CRSP daily closing price. Negative values can indicate bid/ask averages, so the app also computes absolute-price columns. |
+| `ret` | CRSP daily return including distributions. |
+| `retx` | CRSP daily return excluding distributions. |
+| `vol` | CRSP daily trading volume. |
+| `shrout` | CRSP shares outstanding. |
+| `cfacpr` | CRSP cumulative price adjustment factor. |
+| `cfacshr` | CRSP cumulative share adjustment factor. |
+| `bidlo` | CRSP daily low/bid-low field. |
+| `askhi` | CRSP daily high/ask-high field. |
+| `abs_openprc`, `abs_prc`, `abs_bidlo`, `abs_askhi` | Absolute-value helper columns for easier plotting and interpretation. |
 
 ## Interpretation Notes
 
