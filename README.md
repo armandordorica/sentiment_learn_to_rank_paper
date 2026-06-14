@@ -1,3 +1,14 @@
+---
+title: Sentiment Learn To Rank Paper
+emoji: 📈
+colorFrom: blue
+colorTo: indigo
+sdk: streamlit
+sdk_version: 1.51.0
+app_file: app.py
+pinned: false
+---
+
 # Reproducing "Stock Portfolio Selection Using Learning-to-Rank Algorithms With News Sentiment"
 
 This repository is intended to recreate the experiments from:

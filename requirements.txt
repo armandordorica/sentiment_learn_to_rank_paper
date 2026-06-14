@@ -1,4 +1,4 @@
-pandas
+pandas>=2.2,<2.3
 yfinance
 python-dotenv
 pyyaml
@@ -7,3 +7,4 @@ requests
 sqlalchemy
 wrds
 plotly
+streamlit
