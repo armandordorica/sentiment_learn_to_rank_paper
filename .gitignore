@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+lseg-data.config.json
 
 # Python caches and virtual environments
 __pycache__/

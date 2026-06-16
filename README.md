@@ -138,6 +138,21 @@ S_sentiment = relevance * (pos - neg)
 
 Aggregate to weekly stock-level sentiment by averaging all article-level sentiment scores for each stock within each calendar week.
 
+For a starter Refinitiv/LSEG Workspace API workflow, install the optional client and run `notebooks/refinitiv_news_smoke_test.ipynb` while Workspace is open and signed in:
+
+```bash
+pip install -r requirements-refinitiv.txt
+cp lseg-data.config.example.json lseg-data.config.json
+```
+
+Generate an App Key in Workspace with the App Key Generator (`APPKEY`), paste it into the ignored local `lseg-data.config.json`, and keep Workspace running in the background. The helper loads that key and applies it with `get_config().set_param(...)` before opening the session. Test the desktop session with:
+
+```bash
+python scripts/test_refinitiv_connection.py
+```
+
+The notebook pulls sample headlines and story text, checks whether returned fields include TRNA-style sentiment/relevance columns, and exports raw samples under `data/raw/news/refinitiv/`.
+
 ## Stock Universe Construction
 
 Follow the paper's two filters:

@@ -1,0 +1,10 @@
+{
+  "sessions": {
+    "default": "desktop.workspace",
+    "desktop": {
+      "workspace": {
+        "app-key": "PASTE_YOUR_APP_KEY_HERE"
+      }
+    }
+  }
+}
