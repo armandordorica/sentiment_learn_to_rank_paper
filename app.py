@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -397,22 +398,8 @@ def to_query_date(value: pd.Timestamp | str) -> str:
     return pd.Timestamp(value).strftime("%Y-%m-%d")
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_yahoo_daily(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """Fetch daily Yahoo Finance prices for a public cross-check."""
-    if yf is None:
-        raise RuntimeError("The `yfinance` package is not installed in this environment.")
-
-    start_date = to_query_date(start_date)
-    end_date = to_query_date(end_date)
-    end_exclusive = (pd.Timestamp(end_date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-    data = yf.download(
-        ticker.upper().strip(),
-        start=start_date,
-        end=end_exclusive,
-        auto_adjust=False,
-        progress=False,
-    )
+def _standardize_yahoo_daily(data: pd.DataFrame, ticker: str) -> pd.DataFrame:
+    """Normalize a Yahoo Finance OHLCV frame to the app's daily schema."""
     if data is None or data.empty:
         raise ValueError(f"Yahoo Finance returned no rows for {ticker}.")
 
@@ -434,6 +421,74 @@ def fetch_yahoo_daily(ticker: str, start_date: str, end_date: str) -> pd.DataFra
     if "yahoo_close" not in keep_cols:
         raise ValueError(f"Yahoo Finance response for {ticker} did not include a Close column.")
     return result[keep_cols].sort_values("date")
+
+
+def _yahoo_rate_limited(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "rate limit" in message or "too many requests" in message
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_yahoo_daily(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """Fetch daily Yahoo Finance prices for a public cross-check."""
+    if yf is None:
+        raise RuntimeError("The `yfinance` package is not installed in this environment.")
+
+    start_date = to_query_date(start_date)
+    end_date = to_query_date(end_date)
+    end_exclusive = (pd.Timestamp(end_date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    symbol = ticker.upper().strip()
+    last_exc: Exception | None = None
+
+    for attempt in range(3):
+        try:
+            from yfinance._http import new_session
+
+            session = new_session()
+            data = yf.download(
+                symbol,
+                start=start_date,
+                end=end_exclusive,
+                auto_adjust=False,
+                progress=False,
+                session=session,
+            )
+            if data is None or data.empty:
+                history = yf.Ticker(symbol, session=session).history(
+                    start=start_date,
+                    end=end_exclusive,
+                    auto_adjust=False,
+                )
+                data = history
+            return _standardize_yahoo_daily(data, ticker)
+        except Exception as exc:
+            last_exc = exc
+            if _yahoo_rate_limited(exc) and attempt < 2:
+                time.sleep(2**attempt)
+                continue
+            break
+
+    if last_exc is not None and _yahoo_rate_limited(last_exc):
+        hosted_note = (
+            " Yahoo often blocks or rate-limits shared cloud IPs on hosted apps; "
+            "try again later or use the local app for Yahoo checks."
+            if is_huggingface_space()
+            else ""
+        )
+        raise RuntimeError(f"Yahoo Finance rate-limited this request.{hosted_note}") from last_exc
+    if last_exc is not None:
+        raise last_exc
+
+    try:
+        from yfinance._http import HAS_CURL_CFFI
+    except ImportError:
+        HAS_CURL_CFFI = False
+    if not HAS_CURL_CFFI:
+        raise RuntimeError(
+            "Yahoo Finance requests need curl_cffi for browser TLS impersonation. "
+            "Install curl_cffi>=0.15 and restart the app."
+        )
+    raise ValueError(f"Yahoo Finance returned no rows for {ticker}.")
 
 
 def compare_crsp_with_yahoo(crsp_daily: pd.DataFrame, yahoo_daily: pd.DataFrame) -> pd.DataFrame:
@@ -1106,6 +1161,10 @@ def render_live_api_test_tab() -> None:
     )
 
     if is_huggingface_space():
+        st.caption(
+            "Yahoo Finance is best-effort on this hosted Space. Yahoo may rate-limit shared cloud IPs, "
+            "so WRDS and Refinitiv are the more reliable live providers here."
+        )
         if refinitiv_configured(PROJECT_ROOT):
             st.info(
                 "Refinitiv cloud credentials are configured on this Space. "

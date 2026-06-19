@@ -1,5 +1,6 @@
 pandas>=2.2,<2.3
-yfinance
+yfinance>=1.0
+curl_cffi>=0.15
 python-dotenv
 pyyaml
 lxml
