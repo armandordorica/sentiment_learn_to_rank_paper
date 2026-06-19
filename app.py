@@ -28,41 +28,67 @@ SRC_PATH = PROJECT_ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
-try:
-    from sentiment_ltr.data.refinitiv_queries import (
-        fetch_refinitiv_story,
-        query_refinitiv_news,
-        query_refinitiv_prices,
-        refinitiv_configured,
-        refinitiv_setup_message,
-        ticker_to_ric_candidates,
-        is_huggingface_space,
-    )
-except ImportError:  # pragma: no cover - handled in the Streamlit UI
-    query_refinitiv_news = None
-    query_refinitiv_prices = None
-    fetch_refinitiv_story = None
+REFINITIV_IMPORT_ERROR: str | None = None
 
-    def is_huggingface_space() -> bool:
-        return bool(os.environ.get("SPACE_ID")) or os.environ.get("SYSTEM") == "spaces"
 
-    def refinitiv_configured(_project_root: Path) -> bool:
+def _bind_refinitiv_helpers() -> bool:
+    """Import or reload Refinitiv helpers, avoiding stale Streamlit module cache."""
+    global REFINITIV_IMPORT_ERROR
+    global query_refinitiv_news, query_refinitiv_prices, fetch_refinitiv_story
+    global refinitiv_configured, refinitiv_setup_message, ticker_to_ric_candidates
+
+    try:
+        import importlib
+
+        from sentiment_ltr.data import refinitiv_queries
+
+        refinitiv_queries = importlib.reload(refinitiv_queries)
+        query_refinitiv_news = refinitiv_queries.query_refinitiv_news
+        query_refinitiv_prices = refinitiv_queries.query_refinitiv_prices
+        fetch_refinitiv_story = refinitiv_queries.fetch_refinitiv_story
+        refinitiv_configured = refinitiv_queries.refinitiv_configured
+        refinitiv_setup_message = refinitiv_queries.refinitiv_setup_message
+        ticker_to_ric_candidates = refinitiv_queries.ticker_to_ric_candidates
+        REFINITIV_IMPORT_ERROR = None
+        return True
+    except ImportError as exc:
+        query_refinitiv_news = None
+        query_refinitiv_prices = None
+        fetch_refinitiv_story = None
+        REFINITIV_IMPORT_ERROR = str(exc)
+
+        def refinitiv_configured(_project_root: Path) -> bool:
+            return False
+
+        def refinitiv_setup_message(_project_root: Path) -> str:
+            if is_huggingface_space():
+                return (
+                    "Refinitiv is not available on Hugging Face Spaces. It requires LSEG Workspace "
+                    "running on your local machine with an App Key in `.env`. "
+                    "Use WRDS and Yahoo here, or run `streamlit run app.py` locally for Refinitiv."
+                )
+            if REFINITIV_IMPORT_ERROR:
+                return (
+                    "Refinitiv helpers failed to import. Restart Streamlit after "
+                    f"`pip install -r requirements-refinitiv.txt`. Details: {REFINITIV_IMPORT_ERROR}"
+                )
+            return (
+                "Install the Refinitiv SDK with "
+                "`pip install -r requirements-refinitiv.txt`, then restart the Streamlit app."
+            )
+
+        def ticker_to_ric_candidates(_ticker: str) -> list[str]:
+            return []
+
         return False
 
-    def refinitiv_setup_message(_project_root: Path) -> str:
-        if is_huggingface_space():
-            return (
-                "Refinitiv is not available on Hugging Face Spaces. It requires LSEG Workspace "
-                "running on your local machine with an App Key in `.env`. "
-                "Use WRDS and Yahoo here, or run `streamlit run app.py` locally for Refinitiv."
-            )
-        return (
-            "Install the Refinitiv SDK with "
-            "`pip install -r requirements-refinitiv.txt`, then restart the Streamlit app."
-        )
 
-    def ticker_to_ric_candidates(_ticker: str) -> list[str]:
-        return []
+def is_huggingface_space() -> bool:
+    """Return whether the app is running on a Hugging Face Space."""
+    return bool(os.environ.get("SPACE_ID")) or os.environ.get("SYSTEM") == "spaces"
+
+
+_bind_refinitiv_helpers()
 
 APP_DATA_DIR = PROJECT_ROOT / "app_data"
 DEFAULT_UNIVERSE_PATHS = [
@@ -757,6 +783,7 @@ def run_live_api_query(
     }
 
     if query_refinitiv:
+        _bind_refinitiv_helpers()
         if query_refinitiv_prices is not None and refinitiv_configured(PROJECT_ROOT):
             try:
                 refinitiv_prices, ric = query_refinitiv_prices(PROJECT_ROOT, clean_ticker, start_s, end_s)
