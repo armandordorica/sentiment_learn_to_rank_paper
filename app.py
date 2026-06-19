@@ -35,7 +35,7 @@ def _bind_refinitiv_helpers() -> bool:
     """Import or reload Refinitiv helpers, avoiding stale Streamlit module cache."""
     global REFINITIV_IMPORT_ERROR
     global query_refinitiv_news, query_refinitiv_prices, fetch_refinitiv_story
-    global refinitiv_configured, refinitiv_setup_message, ticker_to_ric_candidates
+    global refinitiv_configured, refinitiv_setup_message, ticker_to_ric_candidates, refinitiv_session_mode
 
     try:
         import importlib
@@ -49,6 +49,7 @@ def _bind_refinitiv_helpers() -> bool:
         refinitiv_configured = refinitiv_queries.refinitiv_configured
         refinitiv_setup_message = refinitiv_queries.refinitiv_setup_message
         ticker_to_ric_candidates = refinitiv_queries.ticker_to_ric_candidates
+        refinitiv_session_mode = refinitiv_queries.refinitiv_session_mode
         REFINITIV_IMPORT_ERROR = None
         return True
     except ImportError as exc:
@@ -63,9 +64,8 @@ def _bind_refinitiv_helpers() -> bool:
         def refinitiv_setup_message(_project_root: Path) -> str:
             if is_huggingface_space():
                 return (
-                    "Refinitiv is not available on Hugging Face Spaces. It requires LSEG Workspace "
-                    "running on your local machine with an App Key in `.env`. "
-                    "Use WRDS and Yahoo here, or run `streamlit run app.py` locally for Refinitiv."
+                    "Hosted Refinitiv needs LSEG Data Platform credentials. Add Space secrets "
+                    "`LSEG_APP_KEY`, `LSEG_USERNAME`, and `LSEG_PASSWORD`."
                 )
             if REFINITIV_IMPORT_ERROR:
                 return (
@@ -80,7 +80,23 @@ def _bind_refinitiv_helpers() -> bool:
         def ticker_to_ric_candidates(_ticker: str) -> list[str]:
             return []
 
+        def refinitiv_session_mode(_project_root: Path) -> str | None:
+            return None
+
         return False
+
+
+def refinitiv_status_label(project_root: Path) -> str:
+    """Return a short Refinitiv readiness label for the status metric."""
+    _bind_refinitiv_helpers()
+    if not refinitiv_configured(project_root):
+        return "Not configured"
+    mode = refinitiv_session_mode(project_root)
+    if mode == "platform":
+        return "Cloud ready"
+    if mode == "desktop":
+        return "Workspace ready"
+    return "Ready"
 
 
 def is_huggingface_space() -> bool:
@@ -1085,31 +1101,34 @@ def render_live_api_test_tab() -> None:
         "Use the Google Finance link below for manual checks; Yahoo Finance is the free public benchmark in this app."
     )
     st.warning(
-        "Refinitiv requires LSEG Workspace on your local machine and only works when you run this app locally. "
+        "Refinitiv can use either local LSEG Workspace or LSEG Data Platform cloud credentials. "
         "WRDS credentials should only be enabled where sharing returned CRSP data is permitted under your data-use terms."
     )
 
     if is_huggingface_space():
-        st.info(
-            "This hosted Space supports **Paper Validation**, **WRDS/CRSP**, and **Yahoo Finance**. "
-            "Refinitiv news and prices are available only in a local run with Workspace open."
-        )
+        if refinitiv_configured(PROJECT_ROOT):
+            st.info(
+                "Refinitiv cloud credentials are configured on this Space. "
+                "Queries use the LSEG Data Platform API (no local Workspace required)."
+            )
+        else:
+            st.info(
+                "To enable Refinitiv on this hosted Space, add secrets "
+                "`LSEG_APP_KEY`, `LSEG_USERNAME`, and `LSEG_PASSWORD` from U of T's RDP cloud API access."
+            )
 
     status_cols = st.columns(3)
-    refinitiv_status = "Local only" if is_huggingface_space() else (
-        "Ready" if refinitiv_configured(PROJECT_ROOT) else "Not configured"
-    )
-    status_cols[0].metric("Refinitiv", refinitiv_status)
+    status_cols[0].metric("Refinitiv", refinitiv_status_label(PROJECT_ROOT))
     status_cols[1].metric(
         "WRDS",
         "Ready" if wrds_credentials_available() else "Not configured",
     )
     status_cols[2].metric("Yahoo", "Ready")
 
-    if not refinitiv_configured(PROJECT_ROOT) and not is_huggingface_space():
+    if not refinitiv_configured(PROJECT_ROOT):
         st.caption(
-            "Refinitiv requires Workspace plus `lseg-data.config.json` or `LSEG_APP_KEY`. "
-            "You can still compare WRDS and Yahoo in parallel."
+            "Local runs need `LSEG_APP_KEY` plus Workspace open. "
+            "Hosted runs need `LSEG_APP_KEY`, `LSEG_USERNAME`, and `LSEG_PASSWORD` as Space secrets."
         )
 
     latest_crsp_date: pd.Timestamp | None = None
@@ -1176,12 +1195,12 @@ def render_live_api_test_tab() -> None:
         )
         include_news = st.checkbox(
             "Include Refinitiv news headlines",
-            value=not is_huggingface_space(),
+            value=refinitiv_configured(PROJECT_ROOT),
         )
         provider_cols = st.columns(3)
         query_refinitiv = provider_cols[0].checkbox(
             "Query Refinitiv",
-            value=not is_huggingface_space(),
+            value=refinitiv_configured(PROJECT_ROOT),
         )
         query_wrds = provider_cols[1].checkbox(
             "Query WRDS/CRSP",

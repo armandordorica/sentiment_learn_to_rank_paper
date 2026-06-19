@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
-from sentiment_ltr.data.refinitiv_session import load_app_key, open_workspace_session
-
-
-def is_huggingface_space() -> bool:
-    """Return whether the app is running on a Hugging Face Space."""
-    return bool(os.environ.get("SPACE_ID")) or os.environ.get("SYSTEM") == "spaces"
+from sentiment_ltr.data.refinitiv_session import (
+    is_huggingface_space,
+    load_app_key,
+    open_refinitiv_session,
+    refinitiv_session_mode,
+)
 
 
 def refinitiv_package_available() -> bool:
@@ -27,17 +26,24 @@ def refinitiv_package_available() -> bool:
 
 def refinitiv_setup_message(project_root: Path) -> str:
     """Return a user-facing setup message when Refinitiv is unavailable."""
-    if is_huggingface_space():
-        return (
-            "Refinitiv is not available on Hugging Face Spaces. It requires LSEG Workspace "
-            "running on your local machine with an App Key in `.env`. "
-            "Use WRDS and Yahoo here, or run `streamlit run app.py` locally for Refinitiv."
-        )
-
     if not refinitiv_package_available():
         return (
             "Install the Refinitiv SDK with "
             "`pip install -r requirements-refinitiv.txt`, then restart the Streamlit app."
+        )
+
+    mode = refinitiv_session_mode(project_root)
+    if mode == "platform":
+        return (
+            "Refinitiv cloud credentials are configured. "
+            "If queries fail, confirm your U of T RDP username, password, and App Key."
+        )
+
+    if is_huggingface_space():
+        return (
+            "Hosted Refinitiv needs LSEG Data Platform credentials, not just an App Key. "
+            "Add Hugging Face Space secrets: `LSEG_APP_KEY`, `LSEG_USERNAME`, and `LSEG_PASSWORD`. "
+            "Ask Rotman/Map & Data Library for RDP cloud API access if you do not have them yet."
         )
 
     try:
@@ -50,8 +56,8 @@ def refinitiv_setup_message(project_root: Path) -> str:
         return f"Could not read the LSEG config file: {exc}"
 
     return (
-        "Refinitiv credentials look configured. Keep LSEG Workspace running and signed in, "
-        "then click **Run parallel query** again."
+        "Refinitiv credentials look configured for local Workspace. Keep LSEG Workspace running "
+        "and signed in, then click **Run parallel query** again."
     )
 
 
@@ -59,11 +65,7 @@ def refinitiv_configured(project_root: Path) -> bool:
     """Return whether Refinitiv can be queried from this environment."""
     if not refinitiv_package_available():
         return False
-    try:
-        load_app_key(project_root)
-        return True
-    except (FileNotFoundError, ValueError, OSError):
-        return False
+    return refinitiv_session_mode(project_root) is not None
 
 
 def ticker_to_ric_candidates(ticker: str) -> list[str]:
@@ -164,7 +166,7 @@ def fetch_refinitiv_story(
     if ld is None:
         import lseg.data as ld  # type: ignore
 
-        open_workspace_session(project_root, ld)
+        open_refinitiv_session(project_root, ld)
         opened_here = True
 
     try:
@@ -192,7 +194,7 @@ def query_refinitiv_prices(
     if ld is None:
         import lseg.data as ld  # type: ignore
 
-        open_workspace_session(project_root, ld)
+        open_refinitiv_session(project_root, ld)
         opened_here = True
 
     errors: list[str] = []
@@ -235,7 +237,7 @@ def query_refinitiv_news(
     if ld is None:
         import lseg.data as ld  # type: ignore
 
-        open_workspace_session(project_root, ld)
+        open_refinitiv_session(project_root, ld)
         opened_here = True
 
     start_ts = pd.Timestamp(start_date).to_pydatetime()

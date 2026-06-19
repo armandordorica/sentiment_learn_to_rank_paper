@@ -1,4 +1,4 @@
-"""Smoke-test a local LSEG/Refinitiv Workspace desktop session."""
+"""Smoke-test a local or cloud LSEG/Refinitiv session."""
 
 from __future__ import annotations
 
@@ -14,17 +14,18 @@ if str(SRC_PATH) not in sys.path:
 
 import lseg.data as ld
 
-from sentiment_ltr.data.refinitiv_session import open_workspace_session, resolve_config_path
+from sentiment_ltr.data.refinitiv_session import open_refinitiv_session, refinitiv_session_mode, resolve_config_path
 
 
 def main() -> None:
     load_dotenv(PROJECT_ROOT / ".env")
 
     config_path = resolve_config_path(PROJECT_ROOT)
-    print("Opening LSEG desktop session...")
+    mode = refinitiv_session_mode(PROJECT_ROOT)
+    print(f"Opening LSEG session ({mode or 'unconfigured'})...")
     print(f"Using config: {config_path}")
 
-    open_workspace_session(PROJECT_ROOT, ld)
+    open_refinitiv_session(PROJECT_ROOT, ld)
 
     try:
         data = ld.get_data(

@@ -1,15 +1,23 @@
-"""Helpers for opening a local LSEG/Refinitiv Workspace desktop session."""
+"""Helpers for opening LSEG/Refinitiv desktop or cloud platform sessions."""
 
 from __future__ import annotations
 
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+
+from sentiment_ltr.data.secrets import get_env_or_secret
 
 
 DEFAULT_CONFIG_FILENAME = "lseg-data.config.json"
 PLACEHOLDER_APP_KEY = "PASTE_YOUR_APP_KEY_HERE"
+SessionMode = Literal["platform", "desktop"]
+
+
+def is_huggingface_space() -> bool:
+    """Return whether the app is running on a Hugging Face Space."""
+    return bool(os.environ.get("SPACE_ID")) or os.environ.get("SYSTEM") == "spaces"
 
 
 def resolve_config_path(project_root: Path, config_path: str | Path | None = None) -> Path:
@@ -17,7 +25,7 @@ def resolve_config_path(project_root: Path, config_path: str | Path | None = Non
     if config_path is not None:
         return Path(config_path).expanduser().resolve()
 
-    env_path = os.environ.get("LSEG_CONFIG_PATH")
+    env_path = get_env_or_secret("LSEG_CONFIG_PATH")
     if env_path:
         return Path(env_path).expanduser().resolve()
 
@@ -25,16 +33,17 @@ def resolve_config_path(project_root: Path, config_path: str | Path | None = Non
 
 
 def load_app_key(project_root: Path, config_path: str | Path | None = None) -> str:
-    """Load the Workspace App Key from env or the local JSON config file."""
-    env_key = os.environ.get("LSEG_APP_KEY")
-    if env_key and env_key.strip():
-        return env_key.strip()
+    """Load the LSEG App Key from env, Streamlit secrets, or the local JSON config file."""
+    env_key = get_env_or_secret("LSEG_APP_KEY")
+    if env_key:
+        return env_key
 
     path = resolve_config_path(project_root, config_path)
     if not path.exists():
         raise FileNotFoundError(
             f"LSEG app key config not found at {path}. "
-            "Copy lseg-data.config.example.json to lseg-data.config.json and paste your App Key."
+            "Copy lseg-data.config.example.json to lseg-data.config.json and paste your App Key, "
+            "or set LSEG_APP_KEY."
         )
 
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -51,6 +60,55 @@ def load_app_key(project_root: Path, config_path: str | Path | None = None) -> s
     return app_key
 
 
+def load_platform_credentials(project_root: Path, config_path: str | Path | None = None) -> tuple[str, str, str]:
+    """Load username, password, and app key for the LSEG cloud platform session."""
+    username = get_env_or_secret("LSEG_USERNAME") or get_env_or_secret("RDP_USERNAME")
+    password = get_env_or_secret("LSEG_PASSWORD") or get_env_or_secret("RDP_PASSWORD")
+    app_key = load_app_key(project_root, config_path)
+
+    missing = [name for name, value in [("LSEG_USERNAME", username), ("LSEG_PASSWORD", password)] if not value]
+    if missing:
+        raise ValueError(
+            "Cloud Refinitiv access requires "
+            + " and ".join(missing)
+            + ". Ask U of T for LSEG Data Platform (RDP) credentials."
+        )
+    return str(username), str(password), app_key
+
+
+def refinitiv_session_mode(project_root: Path, config_path: str | Path | None = None) -> SessionMode | None:
+    """Choose desktop Workspace or cloud platform session based on runtime environment."""
+    forced_mode = (get_env_or_secret("LSEG_SESSION_MODE") or "").lower()
+    if forced_mode in {"desktop", "platform"}:
+        try:
+            if forced_mode == "platform":
+                load_platform_credentials(project_root, config_path)
+            else:
+                load_app_key(project_root, config_path)
+            return forced_mode  # type: ignore[return-value]
+        except (FileNotFoundError, ValueError, OSError):
+            return None
+
+    if is_huggingface_space():
+        try:
+            load_platform_credentials(project_root, config_path)
+            return "platform"
+        except (FileNotFoundError, ValueError, OSError):
+            return None
+
+    try:
+        load_platform_credentials(project_root, config_path)
+        return "platform"
+    except (FileNotFoundError, ValueError, OSError):
+        pass
+
+    try:
+        load_app_key(project_root, config_path)
+        return "desktop"
+    except (FileNotFoundError, ValueError, OSError):
+        return None
+
+
 def configure_workspace_app_key(
     project_root: Path,
     ld_module: Any,
@@ -61,6 +119,31 @@ def configure_workspace_app_key(
     config = ld_module.get_config()
     config.set_param("sessions.desktop.workspace.app-key", app_key)
     return app_key
+
+
+def open_platform_session(
+    project_root: Path,
+    ld_module: Any,
+    config_path: str | Path | None = None,
+):
+    """Open an LSEG Data Platform cloud session using RDP credentials."""
+    username, password, app_key = load_platform_credentials(project_root, config_path)
+    definition = ld_module.session.platform.Definition(
+        app_key=app_key,
+        grant=ld_module.session.platform.GrantPassword(username=username, password=password),
+        signon_control=False,
+    )
+    session = definition.get_session()
+    session.open()
+    ld_module.session.set_default(session)
+
+    session_state = str(getattr(session, "state", "")).lower()
+    if session_state and "closed" in session_state:
+        raise RuntimeError(
+            "LSEG cloud session did not open. Confirm your RDP username, password, and App Key "
+            "are valid for the LSEG Data Platform."
+        )
+    return session
 
 
 def open_workspace_session(
@@ -78,3 +161,25 @@ def open_workspace_session(
             "and your App Key is valid."
         )
     return session
+
+
+def open_refinitiv_session(
+    project_root: Path,
+    ld_module: Any,
+    config_path: str | Path | None = None,
+):
+    """Open the best available Refinitiv session for the current runtime."""
+    mode = refinitiv_session_mode(project_root, config_path)
+    if mode == "platform":
+        return open_platform_session(project_root, ld_module, config_path)
+    if mode == "desktop":
+        return open_workspace_session(project_root, ld_module, config_path)
+    if is_huggingface_space():
+        raise RuntimeError(
+            "Hosted Refinitiv requires LSEG cloud credentials. Add LSEG_APP_KEY, "
+            "LSEG_USERNAME, and LSEG_PASSWORD as Hugging Face Space secrets."
+        )
+    raise RuntimeError(
+        "Refinitiv is not configured. Set LSEG_APP_KEY for local Workspace access, "
+        "or add LSEG_USERNAME and LSEG_PASSWORD for cloud platform access."
+    )
