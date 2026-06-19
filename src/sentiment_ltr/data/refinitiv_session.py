@@ -131,7 +131,7 @@ def open_platform_session(
     definition = ld_module.session.platform.Definition(
         app_key=app_key,
         grant=ld_module.session.platform.GrantPassword(username=username, password=password),
-        signon_control=False,
+        signon_control=True,
     )
     session = definition.get_session()
     session.open()
