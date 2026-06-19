@@ -37,13 +37,15 @@ def _bind_refinitiv_helpers() -> bool:
     global REFINITIV_IMPORT_ERROR
     global query_refinitiv_news, query_refinitiv_prices, fetch_refinitiv_story
     global refinitiv_configured, refinitiv_setup_message, ticker_to_ric_candidates, refinitiv_session_mode
+    global open_refinitiv_session, get_last_refinitiv_session_info
 
     try:
         import importlib
 
-        from sentiment_ltr.data import refinitiv_queries
+        from sentiment_ltr.data import refinitiv_queries, refinitiv_session
 
         refinitiv_queries = importlib.reload(refinitiv_queries)
+        refinitiv_session = importlib.reload(refinitiv_session)
         query_refinitiv_news = refinitiv_queries.query_refinitiv_news
         query_refinitiv_prices = refinitiv_queries.query_refinitiv_prices
         fetch_refinitiv_story = refinitiv_queries.fetch_refinitiv_story
@@ -51,12 +53,16 @@ def _bind_refinitiv_helpers() -> bool:
         refinitiv_setup_message = refinitiv_queries.refinitiv_setup_message
         ticker_to_ric_candidates = refinitiv_queries.ticker_to_ric_candidates
         refinitiv_session_mode = refinitiv_queries.refinitiv_session_mode
+        open_refinitiv_session = refinitiv_session.open_refinitiv_session
+        get_last_refinitiv_session_info = refinitiv_session.get_last_refinitiv_session_info
         REFINITIV_IMPORT_ERROR = None
         return True
     except ImportError as exc:
         query_refinitiv_news = None
         query_refinitiv_prices = None
         fetch_refinitiv_story = None
+        open_refinitiv_session = None
+        get_last_refinitiv_session_info = None
         REFINITIV_IMPORT_ERROR = str(exc)
 
         def refinitiv_configured(_project_root: Path) -> bool:
@@ -103,6 +109,35 @@ def refinitiv_status_label(project_root: Path) -> str:
 def is_huggingface_space() -> bool:
     """Return whether the app is running on a Hugging Face Space."""
     return bool(os.environ.get("SPACE_ID")) or os.environ.get("SYSTEM") == "spaces"
+
+
+def format_refinitiv_news_error(error: str | None, session_info: object | None = None) -> str:
+    """Turn verbose LSEG scope errors into a short, actionable message."""
+    if not error:
+        return "Refinitiv news is unavailable for this session."
+
+    lowered = error.lower()
+    used_cloud_fallback = isinstance(session_info, dict) and bool(session_info.get("fallback"))
+
+    if "trapi.data.news.read" in error or "insufficient scope" in lowered:
+        if used_cloud_fallback:
+            return (
+                "News is unavailable on the LSEG cloud fallback session. Your U of T cloud credentials "
+                "do not include the `trapi.data.news.read` scope. Prices still work via cloud; news needs "
+                "either a working local Workspace desktop session or a scope upgrade from U of T Rotman Library."
+            )
+        return (
+            "News is unavailable on the current LSEG cloud session because the account is missing "
+            "the `trapi.data.news.read` scope. Ask U of T Rotman Library to enable Refinitiv news access."
+        )
+
+    if used_cloud_fallback and ("session is not opened" in lowered or "application key" in lowered):
+        return (
+            "News requires a working local Workspace desktop session, but the app fell back to cloud "
+            f"after desktop failed. Details: {error}"
+        )
+
+    return error
 
 
 _bind_refinitiv_helpers()
@@ -856,19 +891,37 @@ def run_live_api_query(
     if query_refinitiv:
         _bind_refinitiv_helpers()
         if query_refinitiv_prices is not None and refinitiv_configured(PROJECT_ROOT):
+            import lseg.data as ld  # type: ignore
+
+            from sentiment_ltr.data.news_coverage import build_news_coverage_result
+
+            open_refinitiv_session(PROJECT_ROOT, ld)
+            session_info = get_last_refinitiv_session_info()
             try:
-                refinitiv_prices, ric = query_refinitiv_prices(PROJECT_ROOT, clean_ticker, start_s, end_s)
+                refinitiv_prices, ric = query_refinitiv_prices(
+                    PROJECT_ROOT,
+                    clean_ticker,
+                    start_s,
+                    end_s,
+                    ld_module=ld,
+                )
                 refinitiv_news = pd.DataFrame()
+                news_daily_counts = pd.DataFrame()
+                news_summary: dict[str, object] | None = None
                 news_error = None
-                if query_refinitiv_news is not None and news_count > 0:
+                if news_count > 0:
                     try:
-                        refinitiv_news, _ = query_refinitiv_news(
+                        coverage_news, news_daily_counts, summary_obj, news_ric = build_news_coverage_result(
                             PROJECT_ROOT,
                             clean_ticker,
                             start_s,
                             end_s,
-                            count=news_count,
+                            ld_module=ld,
                         )
+                        refinitiv_news = coverage_news
+                        news_summary = summary_obj.__dict__
+                        if ric is None:
+                            ric = news_ric
                     except Exception as exc:
                         news_error = str(exc)
                 providers["refinitiv"] = {
@@ -876,7 +929,10 @@ def run_live_api_query(
                     "error": news_error if not refinitiv_prices.empty else "No Refinitiv price history returned.",
                     "prices": refinitiv_prices,
                     "news": refinitiv_news,
+                    "news_daily_counts": news_daily_counts,
+                    "news_summary": news_summary,
                     "ric": ric,
+                    "session_info": session_info,
                 }
             except Exception as exc:
                 providers["refinitiv"] = {
@@ -884,14 +940,23 @@ def run_live_api_query(
                     "error": str(exc),
                     "prices": pd.DataFrame(),
                     "news": pd.DataFrame(),
+                    "news_daily_counts": pd.DataFrame(),
+                    "news_summary": None,
                     "ric": None,
                 }
+            finally:
+                try:
+                    ld.close_session()
+                except Exception:
+                    pass
         else:
             providers["refinitiv"] = {
                 "status": "unavailable",
                 "error": refinitiv_setup_message(PROJECT_ROOT),
                 "prices": pd.DataFrame(),
                 "news": pd.DataFrame(),
+                "news_daily_counts": pd.DataFrame(),
+                "news_summary": None,
                 "ric": None,
             }
 
@@ -1014,16 +1079,152 @@ def render_provider_price_column(
             st.warning(str(provider_result.get("error") or provider_result.get("status")))
 
 
-def render_refinitiv_news_headlines(news_df: pd.DataFrame) -> None:
+def make_news_daily_count_chart(daily: pd.DataFrame, ticker: str):
+    """Build a bar chart of non-zero daily Refinitiv article counts."""
+    plot_data = daily.copy()
+    plot_data["date"] = pd.to_datetime(plot_data["date"])
+    plot_data = plot_data[plot_data["article_count"] > 0].sort_values("date")
+    if plot_data.empty:
+        raise ValueError("No Refinitiv articles were found on any day in the selected range.")
+
+    fig = px.bar(
+        plot_data,
+        x="date",
+        y="article_count",
+        title=f"{ticker.upper()} Refinitiv Articles Per Day",
+        labels={"date": "Date", "article_count": "Articles"},
+        hover_data={"date": "|%Y-%m-%d", "article_count": True},
+    )
+    fig.update_layout(hovermode="closest", height=420)
+    return fig
+
+
+def _selected_date_from_plotly(selection: object | None) -> pd.Timestamp | None:
+    """Parse a selected bar date from a Streamlit Plotly selection event."""
+    if selection is None or not hasattr(selection, "selection"):
+        return None
+    points = getattr(selection.selection, "points", None) or []
+    if not points:
+        return None
+    x_value = points[0].get("x")
+    if x_value is None:
+        return None
+    return pd.Timestamp(x_value).normalize()
+
+
+def render_refinitiv_news_coverage_section(
+    news_df: pd.DataFrame,
+    daily_counts: pd.DataFrame,
+    news_summary: dict[str, object] | None,
+    ticker: str,
+) -> None:
+    """Render daily news counts with drill-down into headline rows for one day."""
+    st.markdown("#### Refinitiv News Coverage")
+    st.caption(
+        "Daily counts use deduplicated Refinitiv headline `storyId` values. "
+        "Click a bar or daily-count row to inspect the exact headlines included in that day's total."
+    )
+
+    if news_summary:
+        metric_cols = st.columns(4)
+        metric_cols[0].metric("Total articles", f"{int(news_summary.get('total_articles', 0)):,}")
+        metric_cols[1].metric(
+            "Avg articles / week",
+            f"{float(news_summary.get('avg_articles_per_week', 0.0)):.2f}",
+        )
+        metric_cols[2].metric(
+            "Days with news",
+            f"{int(news_summary.get('calendar_days_with_news', 0)):,}",
+        )
+        threshold_label = "Pass" if news_summary.get("passes_paper_weekly_threshold") else "Fail"
+        metric_cols[3].metric("Paper weekly rule", threshold_label)
+
+    version = st.session_state.get("refinitiv_news_version", 0)
+    nonzero_daily = daily_counts.copy()
+    nonzero_daily["date"] = pd.to_datetime(nonzero_daily["date"])
+    nonzero_daily = nonzero_daily[nonzero_daily["article_count"] > 0].sort_values("date", ascending=False)
+
+    try:
+        fig = make_news_daily_count_chart(daily_counts, ticker)
+    except ValueError as exc:
+        st.info(str(exc))
+        return
+
+    chart_selection = st.plotly_chart(
+        fig,
+        use_container_width=True,
+        on_select="rerun",
+        selection_mode="points",
+        key=f"refinitiv_news_daily_chart_{version}",
+    )
+    chart_date = _selected_date_from_plotly(chart_selection)
+    if chart_date is not None:
+        st.session_state.news_coverage_selected_date = chart_date
+
+    daily_display = nonzero_daily.copy()
+    daily_display["date_label"] = daily_display["date"].dt.strftime("%Y-%m-%d")
+    daily_table = st.dataframe(
+        daily_display[["date_label", "article_count"]].rename(
+            columns={"date_label": "date", "article_count": "articles"}
+        ),
+        use_container_width=True,
+        hide_index=True,
+        height=220,
+        on_select="rerun",
+        selection_mode="single-row",
+        key=f"refinitiv_news_daily_table_{version}",
+    )
+    if daily_table is not None and hasattr(daily_table, "selection") and daily_table.selection.rows:
+        row_idx = int(daily_table.selection.rows[0])
+        if 0 <= row_idx < len(daily_display):
+            st.session_state.news_coverage_selected_date = pd.Timestamp(daily_display.iloc[row_idx]["date"]).normalize()
+
+    selected_date = st.session_state.get("news_coverage_selected_date")
+    if selected_date is not None:
+        selected_date = pd.Timestamp(selected_date).normalize()
+        if selected_date < pd.Timestamp(daily_counts["date"].min()) or selected_date > pd.Timestamp(
+            daily_counts["date"].max()
+        ):
+            selected_date = None
+
+    if selected_date is None:
+        st.info("Select a day from the chart or the daily counts table to inspect headline rows.")
+        return
+
+    from sentiment_ltr.data.news_coverage import filter_headlines_by_date
+
+    day_news = filter_headlines_by_date(news_df, selected_date)
+    st.markdown(f"##### Headlines on **{selected_date.strftime('%Y-%m-%d')}**")
+    st.caption(f"{len(day_news):,} headline(s) counted on this day.")
+    if day_news.empty:
+        st.warning("No headline rows matched the selected day.")
+        return
+
+    render_refinitiv_news_headlines(
+        day_news,
+        table_key_suffix=f"_{selected_date.strftime('%Y%m%d')}",
+        show_section_title=False,
+    )
+
+
+def render_refinitiv_news_headlines(
+    news_df: pd.DataFrame,
+    *,
+    table_key_suffix: str = "",
+    show_section_title: bool = True,
+) -> None:
     """Render Refinitiv headlines with row selection to read full stories."""
     if news_df.empty:
         return
 
-    st.markdown("#### Refinitiv News Headlines")
-    st.caption(
-        "Select a headline row to load the full story from Refinitiv Workspace. "
-        "These stories are not available as public web links."
-    )
+    if show_section_title:
+        st.markdown("#### Refinitiv News Headlines")
+        st.caption(
+            "Select a headline row to load the full story from Refinitiv Workspace. "
+            "These stories are not available as public web links."
+        )
+    elif fetch_refinitiv_story is not None:
+        st.caption("Select a headline row below to load the full story text.")
 
     if "storyId" not in news_df.columns:
         summary_cols = [col for col in ["date", "headline", "sourceCode"] if col in news_df.columns]
@@ -1042,7 +1243,7 @@ def render_refinitiv_news_headlines(news_df: pd.DataFrame) -> None:
     story_ids = display_df["storyId"].astype(str).tolist()
     table_columns = [col for col in ["date", "headline", "sourceCode"] if col in display_df.columns]
     table_df = display_df[table_columns]
-    table_key = f"refinitiv_news_table_{st.session_state.get('refinitiv_news_version', 0)}"
+    table_key = f"refinitiv_news_table_{st.session_state.get('refinitiv_news_version', 0)}{table_key_suffix}"
 
     selection = st.dataframe(
         table_df,
@@ -1107,16 +1308,24 @@ def render_live_api_results(query_result: dict[str, object]) -> None:
         )
 
     refinitiv = providers["refinitiv"]
+    session_info = refinitiv.get("session_info")
+    if isinstance(session_info, dict) and session_info.get("fallback"):
+        st.info(str(session_info.get("message") or "Using LSEG cloud API after desktop Workspace failed."))
     refinitiv_news = refinitiv.get("news")
+    news_daily_counts = refinitiv.get("news_daily_counts")
+    news_summary = refinitiv.get("news_summary")
     selected = query_result.get("selected_providers", {})
-    if (
-        selected.get("refinitiv", True)
-        and isinstance(refinitiv_news, pd.DataFrame)
-        and not refinitiv_news.empty
-    ):
-        render_refinitiv_news_headlines(refinitiv_news)
+    if selected.get("refinitiv", True) and isinstance(news_summary, dict):
+        render_refinitiv_news_coverage_section(
+            refinitiv_news if isinstance(refinitiv_news, pd.DataFrame) else pd.DataFrame(),
+            news_daily_counts if isinstance(news_daily_counts, pd.DataFrame) else pd.DataFrame(),
+            news_summary,
+            ticker,
+        )
     elif refinitiv.get("error") and refinitiv.get("status") == "ok":
-        st.caption(f"Refinitiv news note: {refinitiv['error']}")
+        st.warning(format_refinitiv_news_error(str(refinitiv["error"]), session_info))
+        with st.expander("Technical details"):
+            st.code(str(refinitiv["error"]))
 
     if len(price_frames) >= 2:
         st.markdown("#### Combined Close Price Comparison")
@@ -1230,7 +1439,7 @@ def render_live_api_test_tab() -> None:
     ric_hint = ", ".join(ticker_to_ric_candidates(st.session_state.api_test_ticker)[:2])
 
     with st.form("live_api_query", clear_on_submit=False):
-        control_cols = st.columns([1, 1, 1, 1])
+        control_cols = st.columns([1, 1, 1])
         lookup_ticker = (
             control_cols[0]
             .text_input("Ticker or RIC", key="api_test_ticker", max_chars=16)
@@ -1247,13 +1456,12 @@ def render_live_api_test_tab() -> None:
             key="api_end_date",
             max_value=default_live_api_end().date(),
         )
-        news_count = control_cols[3].number_input("Max news rows", min_value=5, max_value=200, value=25, step=5)
         st.caption(
             f"Refinitiv will try RIC candidates such as **{ric_hint}**. "
-            "Use a full RIC like `AAPL.O` when needed."
+            "News coverage pulls all headlines in the selected date range and may take longer for the paper window."
         )
         include_news = st.checkbox(
-            "Include Refinitiv news headlines",
+            "Include Refinitiv news coverage (daily counts + drill-down headlines)",
             value=refinitiv_configured(PROJECT_ROOT),
         )
         provider_cols = st.columns(3)
@@ -1291,10 +1499,11 @@ def render_live_api_test_tab() -> None:
                 query_refinitiv=query_refinitiv,
                 query_wrds=query_wrds,
                 query_yahoo=query_yahoo,
-                news_count=0 if not include_news else int(news_count),
+                news_count=1 if include_news else 0,
                 latest_crsp_date=latest_crsp_date,
             )
         st.session_state.refinitiv_news_version = st.session_state.get("refinitiv_news_version", 0) + 1
+        st.session_state.pop("news_coverage_selected_date", None)
         st.session_state.live_api_query_result = query_result
 
     if "live_api_query_result" in st.session_state:
