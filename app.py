@@ -23,23 +23,33 @@ except ImportError:  # pragma: no cover - handled in the Streamlit UI
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+load_dotenv(PROJECT_ROOT / ".env")
 SRC_PATH = PROJECT_ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
 try:
     from sentiment_ltr.data.refinitiv_queries import (
+        fetch_refinitiv_story,
         query_refinitiv_news,
         query_refinitiv_prices,
         refinitiv_configured,
+        refinitiv_setup_message,
         ticker_to_ric_candidates,
     )
 except ImportError:  # pragma: no cover - handled in the Streamlit UI
     query_refinitiv_news = None
     query_refinitiv_prices = None
+    fetch_refinitiv_story = None
 
     def refinitiv_configured(_project_root: Path) -> bool:
         return False
+
+    def refinitiv_setup_message(_project_root: Path) -> str:
+        return (
+            "Install the Refinitiv SDK with "
+            "`pip install -r requirements-refinitiv.txt`, then restart the Streamlit app."
+        )
 
     def ticker_to_ric_candidates(_ticker: str) -> list[str]:
         return []
@@ -71,9 +81,6 @@ DATE_RANGE_PRESETS = {
     "Latest 1 CRSP year": {"mode": "crsp", "days": 365},
     "Paper window (2003-2014)": {"mode": "paper"},
 }
-
-
-load_dotenv(PROJECT_ROOT / ".env")
 
 
 def load_csv(uploaded_file, fallback_paths: list[Path]) -> pd.DataFrame | None:
@@ -292,6 +299,14 @@ def google_finance_url(ticker: str) -> str:
     """Build a Google Finance quote URL for manual cross-checks."""
     clean_ticker = ticker.upper().strip()
     return f"https://www.google.com/finance/quote/{clean_ticker}"
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_refinitiv_story_text(story_id: str) -> str:
+    """Fetch and cache a Refinitiv news story body by storyId."""
+    if fetch_refinitiv_story is None:
+        raise RuntimeError("Refinitiv story loading is unavailable in this environment.")
+    return fetch_refinitiv_story(PROJECT_ROOT, story_id)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -667,16 +682,63 @@ def make_provider_price_chart(price_data: pd.DataFrame, ticker: str, provider: s
     return fig
 
 
+def make_combined_price_chart(price_frames: dict[str, pd.DataFrame], ticker: str):
+    """Overlay close prices from multiple providers on one chart."""
+    parts: list[pd.DataFrame] = []
+    for provider, frame in price_frames.items():
+        if frame.empty:
+            continue
+        part = frame[["date", "close_price"]].copy()
+        part["provider"] = provider.title()
+        parts.append(part)
+    if not parts:
+        raise ValueError("No provider price rows available to plot.")
+
+    plot_data = pd.concat(parts, ignore_index=True).sort_values(["provider", "date"])
+    fig = px.line(
+        plot_data,
+        x="date",
+        y="close_price",
+        color="provider",
+        title=f"Provider Close Price Comparison For {ticker.upper()}",
+        labels={"date": "Date", "close_price": "Close price, USD", "provider": "Provider"},
+        hover_data={"date": "|%Y-%m-%d", "close_price": ":,.2f"},
+    )
+    fig.update_traces(mode="lines+markers", marker={"size": 4})
+    fig.update_layout(height=550, hovermode="closest")
+    return fig
+
+
+def build_cross_provider_comparison(price_frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Merge provider close prices onto one date index for side-by-side comparison."""
+    merged: pd.DataFrame | None = None
+    for provider, frame in price_frames.items():
+        if frame.empty:
+            continue
+        part = frame[["date", "close_price"]].copy()
+        part["date"] = pd.to_datetime(part["date"]).dt.normalize()
+        part = part.sort_values("date").drop_duplicates("date", keep="last")
+        part = part.rename(columns={"close_price": f"{provider}_close"})
+        merged = part if merged is None else merged.merge(part, on="date", how="outer")
+
+    if merged is None or merged.empty:
+        return pd.DataFrame()
+    return merged.sort_values("date", ascending=False)
+
+
 def run_live_api_query(
     ticker: str,
     start_date: str,
     end_date: str,
     *,
+    query_refinitiv: bool = True,
+    query_wrds: bool = True,
+    query_yahoo: bool = True,
     news_count: int = 50,
     wrds_limit: int = 500,
     latest_crsp_date: pd.Timestamp | None = None,
 ) -> dict[str, object]:
-    """Query Refinitiv first, then WRDS and Yahoo as backups."""
+    """Query selected market-data providers in parallel for the same ticker and date range."""
     clean_ticker = ticker.upper().strip()
     start_s = to_query_date(start_date)
     end_s = to_query_date(end_date)
@@ -685,96 +747,95 @@ def run_live_api_query(
         "wrds": {"status": "skipped", "error": None, "prices": pd.DataFrame(), "names": pd.DataFrame()},
         "yahoo": {"status": "skipped", "error": None, "prices": pd.DataFrame()},
     }
-    primary_prices = pd.DataFrame()
 
-    if query_refinitiv_prices is not None and refinitiv_configured(PROJECT_ROOT):
-        try:
-            refinitiv_prices, ric = query_refinitiv_prices(PROJECT_ROOT, clean_ticker, start_s, end_s)
-            refinitiv_news = pd.DataFrame()
-            news_error = None
-            if query_refinitiv_news is not None and news_count > 0:
-                try:
-                    refinitiv_news, _ = query_refinitiv_news(
-                        PROJECT_ROOT,
-                        clean_ticker,
-                        start_s,
-                        end_s,
-                        count=news_count,
-                    )
-                except Exception as exc:
-                    news_error = str(exc)
+    if query_refinitiv:
+        if query_refinitiv_prices is not None and refinitiv_configured(PROJECT_ROOT):
+            try:
+                refinitiv_prices, ric = query_refinitiv_prices(PROJECT_ROOT, clean_ticker, start_s, end_s)
+                refinitiv_news = pd.DataFrame()
+                news_error = None
+                if query_refinitiv_news is not None and news_count > 0:
+                    try:
+                        refinitiv_news, _ = query_refinitiv_news(
+                            PROJECT_ROOT,
+                            clean_ticker,
+                            start_s,
+                            end_s,
+                            count=news_count,
+                        )
+                    except Exception as exc:
+                        news_error = str(exc)
+                providers["refinitiv"] = {
+                    "status": "ok" if not refinitiv_prices.empty else "empty",
+                    "error": news_error if not refinitiv_prices.empty else "No Refinitiv price history returned.",
+                    "prices": refinitiv_prices,
+                    "news": refinitiv_news,
+                    "ric": ric,
+                }
+            except Exception as exc:
+                providers["refinitiv"] = {
+                    "status": "failed",
+                    "error": str(exc),
+                    "prices": pd.DataFrame(),
+                    "news": pd.DataFrame(),
+                    "ric": None,
+                }
+        else:
             providers["refinitiv"] = {
-                "status": "ok",
-                "error": news_error,
-                "prices": refinitiv_prices,
-                "news": refinitiv_news,
-                "ric": ric,
-            }
-            primary_prices = refinitiv_prices
-        except Exception as exc:
-            providers["refinitiv"] = {
-                "status": "failed",
-                "error": str(exc),
+                "status": "unavailable",
+                "error": refinitiv_setup_message(PROJECT_ROOT),
                 "prices": pd.DataFrame(),
                 "news": pd.DataFrame(),
                 "ric": None,
             }
-    else:
-        providers["refinitiv"] = {
-            "status": "unavailable",
-            "error": "Install lseg-data, keep Workspace running, and configure lseg-data.config.json or LSEG_APP_KEY.",
-            "prices": pd.DataFrame(),
-            "news": pd.DataFrame(),
-            "ric": None,
-        }
 
-    if primary_prices.empty and wrds_credentials_available():
-        wrds_start = pd.Timestamp(start_s)
-        wrds_end = pd.Timestamp(end_s)
-        if latest_crsp_date is not None:
-            crsp_end = min(pd.Timestamp.today().normalize(), pd.Timestamp(latest_crsp_date).normalize())
-            wrds_end = min(wrds_end, crsp_end)
-        if wrds_start <= wrds_end:
-            try:
-                name_history, daily_lookup = query_wrds_ticker_data(
-                    clean_ticker,
-                    to_query_date(wrds_start),
-                    to_query_date(wrds_end),
-                    int(wrds_limit),
-                )
-                wrds_prices = wrds_price_frame(daily_lookup)
+    if query_wrds:
+        if wrds_credentials_available():
+            wrds_start = pd.Timestamp(start_s)
+            wrds_end = pd.Timestamp(end_s)
+            if latest_crsp_date is not None:
+                crsp_end = min(pd.Timestamp.today().normalize(), pd.Timestamp(latest_crsp_date).normalize())
+                wrds_end = min(wrds_end, crsp_end)
+            if wrds_start <= wrds_end:
+                try:
+                    name_history, daily_lookup = query_wrds_ticker_data(
+                        clean_ticker,
+                        to_query_date(wrds_start),
+                        to_query_date(wrds_end),
+                        int(wrds_limit),
+                    )
+                    wrds_prices = wrds_price_frame(daily_lookup)
+                    providers["wrds"] = {
+                        "status": "ok" if not wrds_prices.empty else "empty",
+                        "error": None if not wrds_prices.empty else "No CRSP rows in the selected date range.",
+                        "prices": wrds_prices,
+                        "names": name_history,
+                        "query_start": wrds_start,
+                        "query_end": wrds_end,
+                    }
+                except Exception as exc:
+                    providers["wrds"] = {
+                        "status": "failed",
+                        "error": str(exc),
+                        "prices": pd.DataFrame(),
+                        "names": pd.DataFrame(),
+                    }
+            else:
                 providers["wrds"] = {
-                    "status": "ok" if not wrds_prices.empty else "empty",
-                    "error": None if not wrds_prices.empty else "No CRSP rows in the selected date range.",
-                    "prices": wrds_prices,
-                    "names": name_history,
-                    "query_start": wrds_start,
-                    "query_end": wrds_end,
-                }
-                primary_prices = wrds_prices
-            except Exception as exc:
-                providers["wrds"] = {
-                    "status": "failed",
-                    "error": str(exc),
+                    "status": "empty",
+                    "error": "Selected range is entirely after the latest CRSP date available in WRDS.",
                     "prices": pd.DataFrame(),
                     "names": pd.DataFrame(),
                 }
         else:
             providers["wrds"] = {
-                "status": "empty",
-                "error": "Selected range is entirely after the latest CRSP date available in WRDS.",
+                "status": "unavailable",
+                "error": "WRDS credentials are not configured.",
                 "prices": pd.DataFrame(),
                 "names": pd.DataFrame(),
             }
-    elif primary_prices.empty:
-        providers["wrds"] = {
-            "status": "unavailable",
-            "error": "WRDS credentials are not configured.",
-            "prices": pd.DataFrame(),
-            "names": pd.DataFrame(),
-        }
 
-    if primary_prices.empty:
+    if query_yahoo:
         try:
             yahoo_daily = fetch_yahoo_daily(clean_ticker, start_s, end_s)
             yahoo_prices = yahoo_price_frame(yahoo_daily)
@@ -783,7 +844,6 @@ def run_live_api_query(
                 "error": None if not yahoo_prices.empty else "Yahoo Finance returned no rows.",
                 "prices": yahoo_prices,
             }
-            primary_prices = yahoo_prices
         except Exception as exc:
             providers["yahoo"] = {
                 "status": "failed",
@@ -791,72 +851,203 @@ def run_live_api_query(
                 "prices": pd.DataFrame(),
             }
 
+    price_frames = {
+        provider: result["prices"]
+        for provider, result in providers.items()
+        if isinstance(result.get("prices"), pd.DataFrame) and not result["prices"].empty
+    }
+
     return {
         "ticker": clean_ticker,
         "start_date": start_s,
         "end_date": end_s,
         "providers": providers,
-        "primary_prices": primary_prices,
+        "price_frames": price_frames,
+        "selected_providers": {
+            "refinitiv": query_refinitiv,
+            "wrds": query_wrds,
+            "yahoo": query_yahoo,
+        },
     }
 
 
+def _provider_status_label(result: dict[str, object]) -> str:
+    """Return a short status label for a provider result block."""
+    status = str(result.get("status", "unknown"))
+    if status == "ok":
+        prices = result.get("prices")
+        row_count = len(prices) if isinstance(prices, pd.DataFrame) else 0
+        return f"OK ({row_count:,} rows)"
+    if status == "empty":
+        return "No rows"
+    if status == "unavailable":
+        return "Unavailable"
+    if status == "skipped":
+        return "Skipped"
+    return "Failed"
+
+
+def render_provider_price_column(
+    column,
+    provider_name: str,
+    provider_result: dict[str, object],
+    ticker: str,
+) -> None:
+    """Render one provider's price panel inside a Streamlit column."""
+    with column:
+        st.markdown(f"#### {provider_name}")
+        st.caption(_provider_status_label(provider_result))
+        prices = provider_result.get("prices")
+        if provider_result.get("status") == "ok" and isinstance(prices, pd.DataFrame) and not prices.empty:
+            st.plotly_chart(
+                make_provider_price_chart(prices, ticker, provider_name.lower()),
+                use_container_width=True,
+            )
+            st.dataframe(prices.sort_values("date", ascending=False), use_container_width=True, height=250)
+        else:
+            st.warning(str(provider_result.get("error") or provider_result.get("status")))
+
+
+def render_refinitiv_news_headlines(news_df: pd.DataFrame) -> None:
+    """Render Refinitiv headlines with row selection to read full stories."""
+    if news_df.empty:
+        return
+
+    st.markdown("#### Refinitiv News Headlines")
+    st.caption(
+        "Select a headline row to load the full story from Refinitiv Workspace. "
+        "These stories are not available as public web links."
+    )
+
+    if "storyId" not in news_df.columns:
+        summary_cols = [col for col in ["date", "headline", "sourceCode"] if col in news_df.columns]
+        st.dataframe(news_df[summary_cols], use_container_width=True, hide_index=True)
+        st.warning("Headline rows did not include a `storyId`, so full stories cannot be opened.")
+        return
+
+    if fetch_refinitiv_story is None:
+        st.warning("Refinitiv story loading is unavailable in this environment.")
+        return
+
+    display_df = news_df.copy().reset_index(drop=True)
+    if "date" in display_df.columns:
+        display_df["date"] = pd.to_datetime(display_df["date"]).dt.strftime("%Y-%m-%d %H:%M")
+
+    story_ids = display_df["storyId"].astype(str).tolist()
+    table_columns = [col for col in ["date", "headline", "sourceCode"] if col in display_df.columns]
+    table_df = display_df[table_columns]
+    table_key = f"refinitiv_news_table_{st.session_state.get('refinitiv_news_version', 0)}"
+
+    selection = st.dataframe(
+        table_df,
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key=table_key,
+    )
+
+    selected_rows: list[int] = []
+    if selection is not None and hasattr(selection, "selection") and selection.selection.rows:
+        selected_rows = list(selection.selection.rows)
+
+    if not selected_rows:
+        st.info("Click a headline row above to read the full story.")
+        return
+
+    row_idx = int(selected_rows[0])
+    if row_idx < 0 or row_idx >= len(story_ids):
+        st.warning("Could not resolve the selected headline.")
+        return
+
+    story_id = story_ids[row_idx]
+    headline = str(table_df.iloc[row_idx].get("headline", "Selected headline"))
+
+    st.markdown("---")
+    st.markdown(f"**Reading:** {headline}")
+    with st.spinner("Loading full Refinitiv story..."):
+        try:
+            story_text = load_refinitiv_story_text(story_id)
+        except Exception as exc:
+            st.error(f"Could not load story: {exc}")
+        else:
+            st.text_area(
+                "Full story",
+                value=story_text,
+                height=420,
+                label_visibility="collapsed",
+            )
+
+
 def render_live_api_results(query_result: dict[str, object]) -> None:
-    """Render multi-provider API query results."""
+    """Render parallel multi-provider API query results side by side."""
     ticker = str(query_result["ticker"])
     providers = query_result["providers"]
+    price_frames = query_result["price_frames"]
     start_date = query_result["start_date"]
     end_date = query_result["end_date"]
 
     st.caption(f"Requested window: **{start_date}** to **{end_date}** for **{ticker}**")
 
+    status_cols = st.columns(3)
+    status_cols[0].metric("Refinitiv", _provider_status_label(providers["refinitiv"]))
+    status_cols[1].metric("WRDS/CRSP", _provider_status_label(providers["wrds"]))
+    status_cols[2].metric("Yahoo Finance", _provider_status_label(providers["yahoo"]))
+
+    if providers["refinitiv"].get("status") == "unavailable" and refinitiv_configured(PROJECT_ROOT):
+        st.info(
+            "Refinitiv looks configured now, but this panel still shows an older unavailable result. "
+            "Click **Run parallel query** to refresh."
+        )
+
     refinitiv = providers["refinitiv"]
-    if refinitiv["status"] == "ok":
-        ric = refinitiv.get("ric")
-        st.success(f"Refinitiv primary query succeeded{' for ' + str(ric) if ric else ''}.")
-        if not refinitiv["prices"].empty:
-            st.markdown("#### Refinitiv Prices")
-            st.plotly_chart(
-                make_provider_price_chart(refinitiv["prices"], ticker, "refinitiv"),
-                use_container_width=True,
-            )
-            st.dataframe(refinitiv["prices"].sort_values("date", ascending=False), use_container_width=True)
-        if not refinitiv["news"].empty:
-            st.markdown("#### Refinitiv News Headlines")
-            st.dataframe(refinitiv["news"], use_container_width=True)
-        elif refinitiv.get("error"):
-            st.caption(f"Refinitiv news note: {refinitiv['error']}")
-    else:
-        st.warning(f"Refinitiv primary query unavailable: {refinitiv.get('error') or refinitiv['status']}")
+    refinitiv_news = refinitiv.get("news")
+    selected = query_result.get("selected_providers", {})
+    if (
+        selected.get("refinitiv", True)
+        and isinstance(refinitiv_news, pd.DataFrame)
+        and not refinitiv_news.empty
+    ):
+        render_refinitiv_news_headlines(refinitiv_news)
+    elif refinitiv.get("error") and refinitiv.get("status") == "ok":
+        st.caption(f"Refinitiv news note: {refinitiv['error']}")
 
-    wrds = providers["wrds"]
-    if wrds["status"] == "ok":
-        st.info("WRDS backup returned CRSP rows because Refinitiv did not provide prices.")
-        if not wrds["names"].empty:
-            st.dataframe(wrds["names"], use_container_width=True)
-        st.plotly_chart(make_provider_price_chart(wrds["prices"], ticker, "wrds"), use_container_width=True)
-        st.dataframe(wrds["prices"].sort_values("date", ascending=False), use_container_width=True)
-    elif wrds["status"] in {"failed", "empty", "unavailable"} and refinitiv["status"] != "ok":
-        st.caption(f"WRDS backup: {wrds.get('error') or wrds['status']}")
+    if len(price_frames) >= 2:
+        st.markdown("#### Combined Close Price Comparison")
+        st.plotly_chart(make_combined_price_chart(price_frames, ticker), use_container_width=True)
+        comparison = build_cross_provider_comparison(price_frames)
+        if not comparison.empty:
+            st.dataframe(comparison.head(30), use_container_width=True)
 
-    yahoo = providers["yahoo"]
-    if yahoo["status"] == "ok":
-        st.info("Yahoo Finance backup returned rows because earlier providers did not provide prices.")
-        st.plotly_chart(make_provider_price_chart(yahoo["prices"], ticker, "yahoo"), use_container_width=True)
-        st.dataframe(yahoo["prices"].sort_values("date", ascending=False), use_container_width=True)
-    elif yahoo["status"] in {"failed", "empty"}:
-        st.caption(f"Yahoo backup: {yahoo.get('error') or yahoo['status']}")
+    active_panels = [
+        ("Refinitiv", providers["refinitiv"]),
+        ("WRDS/CRSP", providers["wrds"]),
+        ("Yahoo Finance", providers["yahoo"]),
+    ]
+    visible_panels = [
+        (name, result)
+        for (name, result), key in zip(active_panels, ["refinitiv", "wrds", "yahoo"])
+        if selected.get(key, True)
+    ]
+    if visible_panels:
+        panel_cols = st.columns(len(visible_panels))
+        for column, (name, result) in zip(panel_cols, visible_panels):
+            render_provider_price_column(column, name, result, ticker)
 
-    primary = query_result["primary_prices"]
-    if isinstance(primary, pd.DataFrame) and primary.empty:
-        st.error("No price data returned from Refinitiv, WRDS, or Yahoo for that ticker and date range.")
+    if not price_frames:
+        st.error("No price data returned from the selected providers for that ticker and date range.")
 
 
 def render_live_api_test_tab() -> None:
-    """Render the live API smoke-test tab with Refinitiv primary and WRDS/Yahoo backups."""
+    """Render the live API smoke-test tab with parallel multi-provider queries."""
     st.subheader("Live API Test")
     st.caption(
-        "Refinitiv/LSEG Workspace is the default data source. WRDS/CRSP and Yahoo Finance are used "
-        "automatically as backups if Refinitiv cannot return prices for your ticker and date range."
+        "Query Refinitiv, WRDS/CRSP, and Yahoo Finance in parallel for the same ticker and calendar dates. "
+        "Results render side by side so you can compare providers directly."
+    )
+    st.info(
+        "There is no official Google Finance API for programmatic price pulls. "
+        "Use the Google Finance link below for manual checks; Yahoo Finance is the free public benchmark in this app."
     )
     st.warning(
         "Refinitiv requires Workspace to be running locally. WRDS credentials should only be enabled "
@@ -875,9 +1066,9 @@ def render_live_api_test_tab() -> None:
     status_cols[2].metric("Yahoo", "Ready")
 
     if not refinitiv_configured(PROJECT_ROOT):
-        st.info(
-            "Refinitiv requires Workspace to be running locally plus `lseg-data.config.json` or `LSEG_APP_KEY`. "
-            "Until then, the app will fall back to WRDS and Yahoo automatically."
+        st.caption(
+            "Refinitiv requires Workspace plus `lseg-data.config.json` or `LSEG_APP_KEY`. "
+            "You can still compare WRDS and Yahoo in parallel."
         )
 
     latest_crsp_date: pd.Timestamp | None = None
@@ -943,7 +1134,14 @@ def render_live_api_test_tab() -> None:
             "Use a full RIC like `AAPL.O` when needed."
         )
         include_news = st.checkbox("Include Refinitiv news headlines", value=True)
-        submitted = st.form_submit_button("Query APIs", type="primary")
+        provider_cols = st.columns(3)
+        query_refinitiv = provider_cols[0].checkbox("Query Refinitiv", value=True)
+        query_wrds = provider_cols[1].checkbox(
+            "Query WRDS/CRSP",
+            value=wrds_credentials_available(),
+        )
+        query_yahoo = provider_cols[2].checkbox("Query Yahoo Finance", value=True)
+        submitted = st.form_submit_button("Query Selected APIs", type="primary")
 
     link_cols = st.columns(2)
     link_cols[0].markdown(f"[Open {lookup_ticker} on Google Finance]({google_finance_url(lookup_ticker)})")
@@ -956,14 +1154,22 @@ def render_live_api_test_tab() -> None:
             st.error("Start date must be on or before end date.")
             return
 
-        with st.spinner(f"Querying Refinitiv, then backups, for {lookup_ticker}..."):
+        if not any([query_refinitiv, query_wrds, query_yahoo]):
+            st.error("Select at least one provider to query.")
+            return
+
+        with st.spinner(f"Querying selected APIs in parallel for {lookup_ticker}..."):
             query_result = run_live_api_query(
                 lookup_ticker,
                 to_query_date(start_date),
                 to_query_date(end_date),
+                query_refinitiv=query_refinitiv,
+                query_wrds=query_wrds,
+                query_yahoo=query_yahoo,
                 news_count=0 if not include_news else int(news_count),
                 latest_crsp_date=latest_crsp_date,
             )
+        st.session_state.refinitiv_news_version = st.session_state.get("refinitiv_news_version", 0) + 1
         st.session_state.live_api_query_result = query_result
 
     if "live_api_query_result" in st.session_state:
@@ -977,12 +1183,12 @@ st.set_page_config(
 
 st.title("CRSP Universe Validation")
 st.caption(
-    "Paper-replication validation charts plus a live API test tab (Refinitiv primary, WRDS/Yahoo backups)."
+    "Paper-replication validation charts plus a live API test tab for parallel Refinitiv, WRDS, and Yahoo comparisons."
 )
 
 st.info(
     "The **Paper Validation** tab uses bundled 2003-2014 CSVs for the replication universe. "
-    "The **Live API Test** tab pulls any ticker and date range from Refinitiv first, with WRDS and Yahoo as backups."
+    "The **Live API Test** tab queries selected providers simultaneously and renders them side by side."
 )
 
 with st.sidebar:

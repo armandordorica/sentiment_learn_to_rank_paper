@@ -10,8 +10,42 @@ import pandas as pd
 from sentiment_ltr.data.refinitiv_session import load_app_key, open_workspace_session
 
 
+def refinitiv_package_available() -> bool:
+    """Return whether the lseg-data package is importable."""
+    try:
+        import lseg.data  # type: ignore  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def refinitiv_setup_message(project_root: Path) -> str:
+    """Return a user-facing setup message when Refinitiv is unavailable."""
+    if not refinitiv_package_available():
+        return (
+            "Install the Refinitiv SDK with "
+            "`pip install -r requirements-refinitiv.txt`, then restart the Streamlit app."
+        )
+
+    try:
+        load_app_key(project_root)
+    except FileNotFoundError as exc:
+        return str(exc)
+    except ValueError as exc:
+        return str(exc)
+    except OSError as exc:
+        return f"Could not read the LSEG config file: {exc}"
+
+    return (
+        "Refinitiv credentials look configured. Keep LSEG Workspace running and signed in, "
+        "then click **Run parallel query** again."
+    )
+
+
 def refinitiv_configured(project_root: Path) -> bool:
-    """Return whether a Workspace App Key is available locally."""
+    """Return whether Refinitiv can be queried from this environment."""
+    if not refinitiv_package_available():
+        return False
     try:
         load_app_key(project_root)
         return True
@@ -89,7 +123,47 @@ def _normalize_headlines_frame(headlines: Any) -> pd.DataFrame:
                 break
 
     result["provider"] = "refinitiv"
+    if "storyId" not in result.columns:
+        for column in result.columns:
+            if str(column).lower() == "storyid":
+                result = result.rename(columns={column: "storyId"})
+                break
+
+    keep_cols = [col for col in ["date", "headline", "storyId", "sourceCode", "provider"] if col in result.columns]
+    if keep_cols:
+        result = result[keep_cols]
     return result.sort_values("date", ascending=False) if "date" in result.columns else result
+
+
+def fetch_refinitiv_story(
+    project_root: Path,
+    story_id: str,
+    *,
+    as_text: bool = True,
+    ld_module: Any | None = None,
+) -> str:
+    """Fetch the full Refinitiv news story body for a headline storyId."""
+    if not story_id or not str(story_id).strip():
+        raise ValueError("A Refinitiv storyId is required.")
+
+    ld = ld_module
+    opened_here = False
+    if ld is None:
+        import lseg.data as ld  # type: ignore
+
+        open_workspace_session(project_root, ld)
+        opened_here = True
+
+    try:
+        story_format = ld.news.Format.TEXT if as_text else ld.news.Format.HTML
+        story = ld.news.get_story(str(story_id).strip(), format=story_format)
+    finally:
+        if opened_here:
+            ld.close_session()
+
+    if story is None:
+        raise ValueError(f"No story content returned for {story_id}.")
+    return str(story)
 
 
 def query_refinitiv_prices(
