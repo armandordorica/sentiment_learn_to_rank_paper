@@ -164,6 +164,62 @@ The paper obtains 512 stocks across the 10 GICS sectors. Treat this number as a 
 
 Important implementation choice: avoid look-ahead bias. Ideally, construct the universe using only information available at each point in time. The paper describes a fixed filtered universe, but a production-quality replication should document whether the universe is static or point-in-time.
 
+### Market-Side Candidate Universe Artifact
+
+**What it is:** `app_data/crsp_top_volume_universe.csv` — the top 1,000 US common stocks ranked by average daily share volume over the full paper window (2003-01-01 to 2014-12-31). This is the market-side candidate pool before the news-coverage filter is applied.
+
+**How it was constructed:** `notebooks/build_top1k_volume_universe.ipynb` queries WRDS CRSP using a server-side SQL aggregation over `crsp.dsf` joined to `crsp.msenames`:
+
+- Date range: 2003-01-01 to 2014-12-31
+- Share codes: `shrcd IN (10, 11)` — ordinary common shares only (no ETFs, ADRs, REITs, preferred)
+- Exchanges: `exchcd IN (1, 2, 3)` — NYSE (1), AMEX/ARCA (2), NASDAQ (3)
+- Non-null daily volume observations only
+- Ranked by `AVG(vol)` (average daily share volume) descending; top 1,000 taken
+- Each PERMNO is joined to its most recent name record from `crsp.msenames` for ticker, company name, share code, and exchange code
+
+The result is written to `data/raw/market/crsp_top_volume_universe.csv` (gitignored) and synced to the git-tracked copy at `app_data/crsp_top_volume_universe.csv`.
+
+**Schema:**
+
+| Column | Description |
+| --- | --- |
+| `volume_rank` | Integer rank 1–1000, 1 = highest average volume |
+| `permno` | CRSP permanent security identifier |
+| `permco` | CRSP permanent company identifier |
+| `ticker` | Most recent ticker symbol during the window |
+| `comnam` | Most recent company name during the window |
+| `shrcd` | CRSP share code (10 or 11) |
+| `exchcd` | CRSP exchange code (1 = NYSE, 2 = AMEX/ARCA, 3 = NASDAQ) |
+| `trading_days` | Number of days with non-null volume in the window |
+| `first_trade_date` | First trading day observed for the security |
+| `last_trade_date` | Last trading day observed for the security |
+| `avg_volume` | Average daily share volume over all eligible trading days |
+| `avg_dollar_volume` | Average daily dollar volume (shares × price) |
+| `avg_abs_price` | Average absolute daily closing price |
+| `avg_shares_outstanding` | Average daily shares outstanding (thousands) |
+| `latest_name_start` | Start date of the most recent name record |
+| `latest_name_end` | End date of the most recent name record |
+| `avg_volume_millions` | `avg_volume / 1,000,000` |
+| `avg_dollar_volume_billions` | `avg_dollar_volume / 1,000,000,000` |
+
+**How to load in another notebook:**
+
+```python
+from pathlib import Path
+import pandas as pd
+
+PROJECT_ROOT = Path().resolve()
+if PROJECT_ROOT.name == "notebooks":
+    PROJECT_ROOT = PROJECT_ROOT.parent
+
+universe = pd.read_csv(
+    PROJECT_ROOT / "app_data" / "crsp_top_volume_universe.csv",
+    parse_dates=["first_trade_date", "last_trade_date"],
+)
+```
+
+No WRDS connection is required — the file is committed to the repository. To regenerate it from WRDS, run `notebooks/build_top1k_volume_universe.ipynb` with valid `WRDS_USERNAME` and `WRDS_PASSWORD` credentials in `.env`.
+
 ## Weekly Feature Engineering
 
 Each week is one learning-to-rank query. Each stock in the universe is an item in that query.
