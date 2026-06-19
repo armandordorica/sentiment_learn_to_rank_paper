@@ -74,6 +74,47 @@ def _headlines_to_frame(headlines: Any) -> pd.DataFrame:
     return result.sort_values("article_time")
 
 
+def _period_chunks(
+    start_date: str,
+    end_date: str,
+    offset: pd.DateOffset,
+) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    """Split a closed date range into fixed-size period chunks."""
+    start = pd.Timestamp(start_date).normalize()
+    end   = pd.Timestamp(end_date).normalize()
+    if end < start:
+        raise ValueError(f"end_date {end_date} is before start_date {start_date}")
+    chunks: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    cursor = start
+    while cursor <= end:
+        chunk_end = min(cursor + offset - pd.Timedelta(days=1), end)
+        chunks.append((cursor, chunk_end))
+        cursor = cursor + offset
+    return chunks
+
+
+def year_chunks(start_date: str, end_date: str) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    """Split a closed date range into calendar-year chunks."""
+    start = pd.Timestamp(start_date).normalize()
+    end   = pd.Timestamp(end_date).normalize()
+    if end < start:
+        raise ValueError(f"end_date {end_date} is before start_date {start_date}")
+    chunks: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    cursor = start.replace(month=1, day=1)
+    while cursor <= end:
+        year_end = pd.Timestamp(year=cursor.year, month=12, day=31)
+        chunk_start = max(cursor, start)
+        chunk_end   = min(year_end, end)
+        chunks.append((chunk_start, chunk_end))
+        cursor = pd.Timestamp(year=cursor.year + 1, month=1, day=1)
+    return chunks
+
+
+def quarter_chunks(start_date: str, end_date: str) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    """Split a closed date range into calendar-quarter chunks."""
+    return _period_chunks(start_date, end_date, pd.DateOffset(months=3))
+
+
 def month_chunks(start_date: str, end_date: str) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
     """Split a closed date range into calendar-month chunks."""
     start = pd.Timestamp(start_date).normalize()
