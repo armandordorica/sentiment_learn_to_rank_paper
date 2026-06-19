@@ -8,3 +8,5 @@ sqlalchemy
 wrds
 plotly
 streamlit
+
+# Optional: install with `pip install -r requirements-refinitiv.txt` for Refinitiv/LSEG Workspace
