@@ -83,10 +83,8 @@ DATE_RANGE_PRESETS = {
 }
 
 
-def load_csv(uploaded_file, fallback_paths: list[Path]) -> pd.DataFrame | None:
-    """Load an uploaded CSV, or a local fallback if it exists."""
-    if uploaded_file is not None:
-        return pd.read_csv(uploaded_file)
+def load_bundled_csv(fallback_paths: list[Path]) -> pd.DataFrame | None:
+    """Load the first bundled CSV available from the fallback paths."""
     for fallback_path in fallback_paths:
         if fallback_path.exists():
             return pd.read_csv(fallback_path)
@@ -1187,25 +1185,9 @@ st.caption(
 )
 
 st.info(
-    "The **Paper Validation** tab uses bundled 2003-2014 CSVs for the replication universe. "
+    "The **Paper Validation** tab uses bundled 2003-2014 CSVs from `app_data/`. "
     "The **Live API Test** tab queries selected providers simultaneously and renders them side by side."
 )
-
-with st.sidebar:
-    st.header("Data Inputs")
-    universe_upload = st.file_uploader(
-        "CRSP top-volume universe CSV",
-        type=["csv"],
-        help="Expected file: data/raw/market/crsp_top_volume_universe.csv",
-    )
-    monthly_volume_upload = st.file_uploader(
-        "Optional top-20 monthly or daily volume CSV",
-        type=["csv"],
-        help=(
-            "Use monthly columns month/ticker/avg_daily_volume_millions/trading_days, "
-            "or daily CRSP-style date/permno/vol columns."
-        ),
-    )
 
 tab_validation, tab_live_api = st.tabs(["Paper Validation (2003-2014)", "Live API Test"])
 
@@ -1213,11 +1195,11 @@ with tab_live_api:
     render_live_api_test_tab()
 
 with tab_validation:
-    universe = load_csv(universe_upload, DEFAULT_UNIVERSE_PATHS)
+    universe = load_bundled_csv(DEFAULT_UNIVERSE_PATHS)
     if universe is None:
         st.info(
-            "Upload `crsp_top_volume_universe.csv` to render the validation charts. "
-            "Generate it locally with `python scripts/build_crsp_market_universe.py`."
+            "Bundled validation CSVs were not found in `app_data/`. "
+            "Generate them locally with `python scripts/build_crsp_market_universe.py`."
         )
     else:
         universe = prepare_universe(universe)
@@ -1249,10 +1231,10 @@ with tab_validation:
         st.dataframe(top20[display_cols], use_container_width=True)
 
         st.subheader("Top 20 Trading Volume Over Time")
-        monthly_volume = load_csv(monthly_volume_upload, DEFAULT_MONTHLY_VOLUME_PATHS)
+        monthly_volume = load_bundled_csv(DEFAULT_MONTHLY_VOLUME_PATHS)
         if monthly_volume is None:
             st.info(
-                "Upload a monthly or daily volume CSV to render the over-time chart. "
+                "Bundled monthly volume data is unavailable. "
                 "The validation notebook shows how to query and aggregate the top-20 CRSP volume series."
             )
         else:
@@ -1263,7 +1245,7 @@ with tab_validation:
                 st.error(str(exc))
 
         st.subheader("Top 20 Monthly Open, Close, And Average Price")
-        monthly_prices = load_csv(None, DEFAULT_MONTHLY_PRICE_PATHS)
+        monthly_prices = load_bundled_csv(DEFAULT_MONTHLY_PRICE_PATHS)
         if monthly_prices is None:
             st.info(
                 "Monthly price data is unavailable. Generate it locally with "
