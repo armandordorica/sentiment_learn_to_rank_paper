@@ -36,16 +36,26 @@ try:
         refinitiv_configured,
         refinitiv_setup_message,
         ticker_to_ric_candidates,
+        is_huggingface_space,
     )
 except ImportError:  # pragma: no cover - handled in the Streamlit UI
     query_refinitiv_news = None
     query_refinitiv_prices = None
     fetch_refinitiv_story = None
 
+    def is_huggingface_space() -> bool:
+        return bool(os.environ.get("SPACE_ID")) or os.environ.get("SYSTEM") == "spaces"
+
     def refinitiv_configured(_project_root: Path) -> bool:
         return False
 
     def refinitiv_setup_message(_project_root: Path) -> str:
+        if is_huggingface_space():
+            return (
+                "Refinitiv is not available on Hugging Face Spaces. It requires LSEG Workspace "
+                "running on your local machine with an App Key in `.env`. "
+                "Use WRDS and Yahoo here, or run `streamlit run app.py` locally for Refinitiv."
+            )
         return (
             "Install the Refinitiv SDK with "
             "`pip install -r requirements-refinitiv.txt`, then restart the Streamlit app."
@@ -1048,22 +1058,28 @@ def render_live_api_test_tab() -> None:
         "Use the Google Finance link below for manual checks; Yahoo Finance is the free public benchmark in this app."
     )
     st.warning(
-        "Refinitiv requires Workspace to be running locally. WRDS credentials should only be enabled "
-        "where sharing returned CRSP data is permitted under your data-use terms."
+        "Refinitiv requires LSEG Workspace on your local machine and only works when you run this app locally. "
+        "WRDS credentials should only be enabled where sharing returned CRSP data is permitted under your data-use terms."
     )
 
+    if is_huggingface_space():
+        st.info(
+            "This hosted Space supports **Paper Validation**, **WRDS/CRSP**, and **Yahoo Finance**. "
+            "Refinitiv news and prices are available only in a local run with Workspace open."
+        )
+
     status_cols = st.columns(3)
-    status_cols[0].metric(
-        "Refinitiv",
-        "Ready" if refinitiv_configured(PROJECT_ROOT) else "Not configured",
+    refinitiv_status = "Local only" if is_huggingface_space() else (
+        "Ready" if refinitiv_configured(PROJECT_ROOT) else "Not configured"
     )
+    status_cols[0].metric("Refinitiv", refinitiv_status)
     status_cols[1].metric(
         "WRDS",
         "Ready" if wrds_credentials_available() else "Not configured",
     )
     status_cols[2].metric("Yahoo", "Ready")
 
-    if not refinitiv_configured(PROJECT_ROOT):
+    if not refinitiv_configured(PROJECT_ROOT) and not is_huggingface_space():
         st.caption(
             "Refinitiv requires Workspace plus `lseg-data.config.json` or `LSEG_APP_KEY`. "
             "You can still compare WRDS and Yahoo in parallel."
@@ -1131,9 +1147,15 @@ def render_live_api_test_tab() -> None:
             f"Refinitiv will try RIC candidates such as **{ric_hint}**. "
             "Use a full RIC like `AAPL.O` when needed."
         )
-        include_news = st.checkbox("Include Refinitiv news headlines", value=True)
+        include_news = st.checkbox(
+            "Include Refinitiv news headlines",
+            value=not is_huggingface_space(),
+        )
         provider_cols = st.columns(3)
-        query_refinitiv = provider_cols[0].checkbox("Query Refinitiv", value=True)
+        query_refinitiv = provider_cols[0].checkbox(
+            "Query Refinitiv",
+            value=not is_huggingface_space(),
+        )
         query_wrds = provider_cols[1].checkbox(
             "Query WRDS/CRSP",
             value=wrds_credentials_available(),

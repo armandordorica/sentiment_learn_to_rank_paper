@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
 from sentiment_ltr.data.refinitiv_session import load_app_key, open_workspace_session
+
+
+def is_huggingface_space() -> bool:
+    """Return whether the app is running on a Hugging Face Space."""
+    return bool(os.environ.get("SPACE_ID")) or os.environ.get("SYSTEM") == "spaces"
 
 
 def refinitiv_package_available() -> bool:
@@ -21,6 +27,13 @@ def refinitiv_package_available() -> bool:
 
 def refinitiv_setup_message(project_root: Path) -> str:
     """Return a user-facing setup message when Refinitiv is unavailable."""
+    if is_huggingface_space():
+        return (
+            "Refinitiv is not available on Hugging Face Spaces. It requires LSEG Workspace "
+            "running on your local machine with an App Key in `.env`. "
+            "Use WRDS and Yahoo here, or run `streamlit run app.py` locally for Refinitiv."
+        )
+
     if not refinitiv_package_available():
         return (
             "Install the Refinitiv SDK with "
