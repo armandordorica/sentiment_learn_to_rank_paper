@@ -1112,6 +1112,32 @@ def _selected_date_from_plotly(selection: object | None) -> pd.Timestamp | None:
     return pd.Timestamp(x_value).normalize()
 
 
+def render_refinitiv_story_body(story_id: str, headline: str | None = None, *, close_key: str) -> None:
+    """Render the full Refinitiv story text for one storyId."""
+    st.markdown("---")
+    st.markdown(f"**{headline or 'Selected headline'}**")
+    with st.spinner("Loading full Refinitiv story..."):
+        try:
+            story_text = load_refinitiv_story_text(story_id)
+        except Exception as exc:
+            st.error(f"Could not load story: {exc}")
+            return
+
+    st.text_area(
+        "Full story",
+        value=story_text,
+        height=420,
+        disabled=True,
+        label_visibility="collapsed",
+    )
+    if st.button("Close story", key=close_key):
+        st.session_state.pop("refinitiv_open_story_id", None)
+        st.session_state.pop("refinitiv_open_story_headline", None)
+        st.query_params.pop("refinitiv_story", None)
+        st.query_params.pop("news_date", None)
+        st.rerun()
+
+
 def render_refinitiv_news_coverage_section(
     news_df: pd.DataFrame,
     daily_counts: pd.DataFrame,
@@ -1119,6 +1145,10 @@ def render_refinitiv_news_coverage_section(
     ticker: str,
 ) -> None:
     """Render daily news counts with drill-down into headline rows for one day."""
+    news_date_param = st.query_params.get("news_date")
+    if news_date_param:
+        st.session_state.news_coverage_selected_date = pd.Timestamp(news_date_param).normalize()
+
     st.markdown("#### Refinitiv News Coverage")
     st.caption(
         "Daily counts use deduplicated Refinitiv headline `storyId` values. "
@@ -1195,7 +1225,7 @@ def render_refinitiv_news_coverage_section(
 
     day_news = filter_headlines_by_date(news_df, selected_date)
     st.markdown(f"##### Headlines on **{selected_date.strftime('%Y-%m-%d')}**")
-    st.caption(f"{len(day_news):,} headline(s) counted on this day.")
+    st.caption(f"{len(day_news):,} headline(s) counted on this day. The `#` column runs 1–{len(day_news):,} for verification.")
     if day_news.empty:
         st.warning("No headline rows matched the selected day.")
         return
@@ -1213,22 +1243,24 @@ def render_refinitiv_news_headlines(
     table_key_suffix: str = "",
     show_section_title: bool = True,
 ) -> None:
-    """Render Refinitiv headlines with row selection to read full stories."""
+    """Render Refinitiv headlines with clickable links to read full stories."""
     if news_df.empty:
         return
 
     if show_section_title:
         st.markdown("#### Refinitiv News Headlines")
         st.caption(
-            "Select a headline row to load the full story from Refinitiv Workspace. "
-            "These stories are not available as public web links."
+            "Click a headline link to load the full story from Refinitiv Workspace. "
+            "These stories are licensed content, not public web pages."
         )
     elif fetch_refinitiv_story is not None:
-        st.caption("Select a headline row below to load the full story text.")
+        st.caption("Click a headline link below to load the full story text.")
 
     if "storyId" not in news_df.columns:
-        summary_cols = [col for col in ["date", "headline", "sourceCode"] if col in news_df.columns]
-        st.dataframe(news_df[summary_cols], use_container_width=True, hide_index=True)
+        indexed_df = news_df.copy().reset_index(drop=True)
+        indexed_df.insert(0, "#", range(1, len(indexed_df) + 1))
+        summary_cols = ["#"] + [col for col in ["date", "headline", "sourceCode"] if col in indexed_df.columns]
+        st.dataframe(indexed_df[summary_cols], use_container_width=True, hide_index=True)
         st.warning("Headline rows did not include a `storyId`, so full stories cannot be opened.")
         return
 
@@ -1237,53 +1269,45 @@ def render_refinitiv_news_headlines(
         return
 
     display_df = news_df.copy().reset_index(drop=True)
+    display_df.insert(0, "#", range(1, len(display_df) + 1))
     if "date" in display_df.columns:
         display_df["date"] = pd.to_datetime(display_df["date"]).dt.strftime("%Y-%m-%d %H:%M")
 
-    story_ids = display_df["storyId"].astype(str).tolist()
-    table_columns = [col for col in ["date", "headline", "sourceCode"] if col in display_df.columns]
-    table_df = display_df[table_columns]
-    table_key = f"refinitiv_news_table_{st.session_state.get('refinitiv_news_version', 0)}{table_key_suffix}"
+    header = st.columns([0.5, 1.4, 6.3, 1.2])
+    header[0].markdown("**#**")
+    header[1].markdown("**Date**")
+    header[2].markdown("**Headline**")
+    header[3].markdown("**Source**")
 
-    selection = st.dataframe(
-        table_df,
-        use_container_width=True,
-        hide_index=True,
-        on_select="rerun",
-        selection_mode="single-row",
-        key=table_key,
-    )
+    for _, row in display_df.iterrows():
+        cols = st.columns([0.5, 1.4, 6.3, 1.2], gap="small")
+        cols[0].write(str(row["#"]))
+        cols[1].write(str(row["date"]))
+        if cols[2].button(
+            str(row["headline"]),
+            key=f"story_link_{table_key_suffix}_{row['#']}",
+            type="tertiary",
+            use_container_width=True,
+        ):
+            st.session_state["refinitiv_open_story_id"] = str(row["storyId"])
+            st.session_state["refinitiv_open_story_headline"] = str(row["headline"])
+            st.rerun()
+        source_code = row.get("sourceCode", "")
+        cols[3].write("" if pd.isna(source_code) else str(source_code))
 
-    selected_rows: list[int] = []
-    if selection is not None and hasattr(selection, "selection") and selection.selection.rows:
-        selected_rows = list(selection.selection.rows)
-
-    if not selected_rows:
-        st.info("Click a headline row above to read the full story.")
-        return
-
-    row_idx = int(selected_rows[0])
-    if row_idx < 0 or row_idx >= len(story_ids):
-        st.warning("Could not resolve the selected headline.")
-        return
-
-    story_id = story_ids[row_idx]
-    headline = str(table_df.iloc[row_idx].get("headline", "Selected headline"))
-
-    st.markdown("---")
-    st.markdown(f"**Reading:** {headline}")
-    with st.spinner("Loading full Refinitiv story..."):
-        try:
-            story_text = load_refinitiv_story_text(story_id)
-        except Exception as exc:
-            st.error(f"Could not load story: {exc}")
-        else:
-            st.text_area(
-                "Full story",
-                value=story_text,
-                height=420,
-                label_visibility="collapsed",
-            )
+    story_id = st.session_state.get("refinitiv_open_story_id") or st.query_params.get("refinitiv_story")
+    if story_id:
+        match = display_df[display_df["storyId"].astype(str) == str(story_id)]
+        headline = st.session_state.get("refinitiv_open_story_headline")
+        if headline is None and not match.empty:
+            headline = str(match.iloc[0]["headline"])
+        render_refinitiv_story_body(
+            str(story_id),
+            str(headline) if headline is not None else None,
+            close_key=f"close_story_{table_key_suffix}_{story_id}",
+        )
+    else:
+        st.caption("Click a headline link to read the full story below.")
 
 
 def render_live_api_results(query_result: dict[str, object]) -> None:
@@ -1504,6 +1528,8 @@ def render_live_api_test_tab() -> None:
             )
         st.session_state.refinitiv_news_version = st.session_state.get("refinitiv_news_version", 0) + 1
         st.session_state.pop("news_coverage_selected_date", None)
+        st.session_state.pop("refinitiv_open_story_id", None)
+        st.session_state.pop("refinitiv_open_story_headline", None)
         st.session_state.live_api_query_result = query_result
 
     if "live_api_query_result" in st.session_state:
