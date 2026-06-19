@@ -48,17 +48,30 @@ def load_csv(uploaded_file, fallback_paths: list[Path]) -> pd.DataFrame | None:
 
 
 def get_secret_or_env(name: str) -> str | None:
-    """Read a value from Streamlit secrets first, then environment variables."""
+    """Read a value from environment variables or Streamlit secrets."""
+    env_value = os.environ.get(name)
+    if env_value:
+        return env_value
+
     try:
-        value = st.secrets.get(name)
+        secret_value = st.secrets.get(name)
     except Exception:
-        value = None
-    return value or os.environ.get(name)
+        secret_value = None
+    return secret_value or None
+
+
+def wrds_credential_status() -> dict[str, bool]:
+    """Return non-sensitive WRDS credential presence checks."""
+    return {
+        "WRDS_USERNAME": bool(get_secret_or_env("WRDS_USERNAME")),
+        "WRDS_PASSWORD": bool(get_secret_or_env("WRDS_PASSWORD")),
+    }
 
 
 def wrds_credentials_available() -> bool:
     """Return whether the app has enough configuration for live WRDS queries."""
-    return bool(get_secret_or_env("WRDS_USERNAME") and get_secret_or_env("WRDS_PASSWORD"))
+    status = wrds_credential_status()
+    return status["WRDS_USERNAME"] and status["WRDS_PASSWORD"]
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -448,10 +461,20 @@ lookup_start = lookup_cols[1].date_input("Start date", value=pd.Timestamp(DEFAUL
 lookup_end = lookup_cols[2].date_input("End date", value=pd.Timestamp(DEFAULT_LOOKUP_END))
 lookup_limit = lookup_cols[3].number_input("Max rows", min_value=100, max_value=10000, value=3000, step=100)
 
+wrds_status = wrds_credential_status()
 if not wrds_credentials_available():
     st.info(
         "WRDS credentials are not configured for this app runtime. Add `WRDS_USERNAME` and "
         "`WRDS_PASSWORD` as Hugging Face Space secrets, or run locally with those values in `.env`."
+    )
+    st.caption(
+        "On Hugging Face: open this Space's Settings → Variables and secrets → add both secrets, "
+        "then use Settings → Restart this Space. Refreshing the browser page is not enough."
+    )
+    st.write(
+        "Credential detection status:",
+        f"`WRDS_USERNAME`={'set' if wrds_status['WRDS_USERNAME'] else 'missing'}, "
+        f"`WRDS_PASSWORD`={'set' if wrds_status['WRDS_PASSWORD'] else 'missing'}",
     )
 elif st.button("Query WRDS For Ticker"):
     if lookup_start > lookup_end:
