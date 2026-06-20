@@ -1536,6 +1536,310 @@ def render_live_api_test_tab() -> None:
         render_live_api_results(st.session_state.live_api_query_result)
 
 
+# ── RavenPack Sentiment helpers ───────────────────────────────────────────────
+
+def _pg_sql(db_conn, sql: str) -> pd.DataFrame:
+    """Execute SQL via raw psycopg2, bypassing SQLAlchemy 2.x incompatibility."""
+    cur = db_conn.connection.connection.cursor()
+    cur.execute(sql)
+    df = pd.DataFrame(cur.fetchall(), columns=[d[0] for d in cur.description])
+    cur.close()
+    return df
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def query_ravenpack_articles(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """Fetch RavenPack sentiment articles for a ticker from WRDS."""
+    if wrds is None:
+        raise RuntimeError("wrds package not installed.")
+    wrds_username = get_secret_or_env("WRDS_USERNAME")
+    wrds_password = get_secret_or_env("WRDS_PASSWORD")
+    if not wrds_username or not wrds_password:
+        raise RuntimeError("WRDS credentials not configured.")
+
+    clean_ticker = ticker.upper().strip()
+    db = wrds.Connection(wrds_username=wrds_username, wrds_password=wrds_password)
+    try:
+        mapping = _pg_sql(db, f"""
+            SELECT DISTINCT rp_entity_id
+            FROM ravenpack_common.wrds_rpa_company_mappings
+            WHERE ticker = '{clean_ticker}'
+        """)
+        if mapping.empty:
+            raise ValueError(f"No RavenPack entity found for {clean_ticker}.")
+        rp_entity_id = mapping["rp_entity_id"].iloc[0]
+
+        frames: list[pd.DataFrame] = []
+        for yr in range(int(start_date[:4]), int(end_date[:4]) + 1):
+            yr_start = max(start_date, f"{yr}-01-01")
+            yr_end   = min(end_date,   f"{yr}-12-31")
+            try:
+                yr_df = _pg_sql(db, f"""
+                    SELECT timestamp_utc, rp_story_id, relevance, event_sentiment_score,
+                           headline, event_text, source_name, topic, "group", "type",
+                           sub_type, news_type, css, nip
+                    FROM ravenpack_dj.rpa_djpr_equities_{yr}
+                    WHERE rp_entity_id = '{rp_entity_id}'
+                      AND rpa_date_utc BETWEEN '{yr_start}' AND '{yr_end}'
+                    ORDER BY timestamp_utc
+                """)
+                if not yr_df.empty:
+                    frames.append(yr_df)
+            except Exception:
+                continue
+    finally:
+        db.close()
+
+    if not frames:
+        return pd.DataFrame()
+
+    articles = pd.concat(frames, ignore_index=True)
+    articles["article_time"]          = pd.to_datetime(articles["timestamp_utc"], utc=True)
+    articles["relevance_score"]       = pd.to_numeric(articles["relevance"], errors="coerce") / 100
+    articles["event_sentiment_score"] = pd.to_numeric(articles["event_sentiment_score"], errors="coerce")
+    articles["sentiment_score"]       = articles["relevance_score"] * articles["event_sentiment_score"]
+    articles["ticker"]                = clean_ticker
+    return (
+        articles
+        .drop_duplicates(subset=["rp_story_id"])
+        .sort_values("article_time")
+        .reset_index(drop=True)
+    )
+
+
+def make_ravenpack_sentiment_chart(articles: pd.DataFrame, ticker: str):
+    """Scatter of sentiment_score over time, coloured by sign.
+
+    Each point carries the original `articles` row index in customdata[0] so that
+    a Plotly click event can map directly back to the article table row.
+    """
+    df = articles.dropna(subset=["sentiment_score"]).copy()
+    df["_orig_idx"] = df.index          # preserved so click → table row works
+    df["polarity"]  = df["sentiment_score"].apply(
+        lambda x: "Positive" if x > 0 else ("Negative" if x < 0 else "Neutral")
+    )
+    df["date_str"] = df["article_time"].dt.strftime("%Y-%m-%d %H:%M UTC")
+    fig = px.scatter(
+        df,
+        x="article_time",
+        y="sentiment_score",
+        color="polarity",
+        custom_data=["_orig_idx"],
+        color_discrete_map={"Positive": "#2ca02c", "Negative": "#d62728", "Neutral": "#aec7e8"},
+        hover_data={
+            "article_time": False,
+            "_orig_idx": False,
+            "date_str": True,
+            "headline": True,
+            "relevance_score": ":.2f",
+            "event_sentiment_score": ":.3f",
+            "sentiment_score": ":.3f",
+            "topic": True,
+        },
+        title=f"{ticker} — RavenPack Sentiment Score Over Time",
+        labels={"article_time": "Date", "sentiment_score": "Sentiment score", "polarity": ""},
+    )
+    fig.add_hline(y=0, line_dash="dash", line_color="grey", line_width=1)
+    fig.update_traces(marker={"size": 6, "opacity": 0.75})
+    fig.update_layout(height=420, hovermode="closest")
+    return fig
+
+
+def render_ravenpack_article_features(row: pd.Series) -> None:
+    """Render the full RavenPack feature panel for a selected article."""
+    st.markdown(f"##### {row.get('headline', '(no headline)')}")
+
+    event_text = row.get("event_text")
+    if event_text and str(event_text) not in {"None", "nan", ""}:
+        st.info(str(event_text))
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Relevance score",        f"{row.get('relevance_score', float('nan')):.2f}")
+    m2.metric("Event sentiment score",  f"{row.get('event_sentiment_score', float('nan')):.3f}")
+    m3.metric("Sentiment score (Eq. 8)", f"{row.get('sentiment_score', float('nan')):.3f}")
+
+    st.markdown("**Categorisation**")
+    cat_cols = st.columns(4)
+    for col, field in zip(cat_cols, ["topic", "group", "type", "sub_type"]):
+        val = row.get(field)
+        col.markdown(f"**{field}**  \n{val if val and str(val) not in {'None','nan'} else '—'}")
+
+    detail_cols = st.columns(3)
+    for col, field in zip(detail_cols, ["news_type", "source_name", "rp_story_id"]):
+        val = row.get(field)
+        col.markdown(f"**{field}**  \n{val if val and str(val) not in {'None','nan'} else '—'}")
+
+    ts = row.get("article_time")
+    if ts is not None:
+        st.caption(f"Published: {pd.Timestamp(ts).strftime('%Y-%m-%d %H:%M UTC')}")
+
+    with st.expander("Advanced scores (css, nip)"):
+        adv = {k: row.get(k) for k in ["css", "nip"]}
+        st.json({k: (None if str(v) in {"None", "nan"} else float(v)) for k, v in adv.items()})
+
+
+def render_ravenpack_sentiment_tab() -> None:
+    """Render the RavenPack Sentiment browser tab."""
+    st.subheader("RavenPack Sentiment")
+    st.caption(
+        "Fetch RavenPack Dow Jones articles from WRDS for any ticker and date range. "
+        "Select an article row to inspect all sentiment features."
+    )
+
+    if not wrds_credentials_available():
+        st.warning("WRDS credentials are not configured. Add `WRDS_USERNAME` and `WRDS_PASSWORD` to `.env`.")
+        return
+
+    with st.form("rp_sentiment_form"):
+        form_cols = st.columns([1, 1, 1])
+        rp_ticker = form_cols[0].text_input("Ticker", value="AAPL", max_chars=12).strip().upper()
+        rp_start  = form_cols[1].date_input(
+            "Start date",
+            value=pd.Timestamp("2007-01-01").date(),
+            min_value=pd.Timestamp("2000-01-01").date(),
+            max_value=pd.Timestamp("2026-12-31").date(),
+        )
+        rp_end    = form_cols[2].date_input(
+            "End date",
+            value=pd.Timestamp("2007-03-31").date(),
+            min_value=pd.Timestamp("2000-01-01").date(),
+            max_value=pd.Timestamp("2026-12-31").date(),
+        )
+        rp_submitted = st.form_submit_button("Fetch RavenPack data", type="primary")
+
+    if rp_submitted:
+        if rp_start > rp_end:
+            st.error("Start date must be before end date.")
+            return
+        st.session_state.rp_articles      = None
+        st.session_state.rp_selected_row  = None
+        st.session_state.rp_query_start   = rp_start.strftime("%Y-%m-%d")
+        st.session_state.rp_query_end     = rp_end.strftime("%Y-%m-%d")
+        with st.spinner(f"Querying RavenPack on WRDS for {rp_ticker}…"):
+            try:
+                st.session_state.rp_articles = query_ravenpack_articles(
+                    rp_ticker,
+                    rp_start.strftime("%Y-%m-%d"),
+                    rp_end.strftime("%Y-%m-%d"),
+                )
+                st.session_state.rp_ticker = rp_ticker
+            except Exception as exc:
+                st.error(str(exc))
+                return
+
+    articles: pd.DataFrame | None = st.session_state.get("rp_articles")
+    if articles is None:
+        st.info("Enter a ticker and date range, then click **Fetch RavenPack data**.")
+        return
+
+    rp_ticker     = st.session_state.get("rp_ticker", "")
+    query_start   = st.session_state.get("rp_query_start", "")
+    query_end     = st.session_state.get("rp_query_end", "")
+
+    if articles.empty:
+        st.warning(f"No RavenPack articles found for {rp_ticker} in the selected range.")
+        return
+
+    # ── SQL inspector ─────────────────────────────────────────────────────────
+    with st.expander("Show SQL query"):
+        st.caption(
+            "Entity ID is first resolved with: "
+            f"`SELECT DISTINCT rp_entity_id FROM ravenpack_common.wrds_rpa_company_mappings "
+            f"WHERE ticker = '{rp_ticker}'`"
+        )
+        sql_parts: list[str] = []
+        if query_start and query_end:
+            for yr in range(int(query_start[:4]), int(query_end[:4]) + 1):
+                yr_s = max(query_start, f"{yr}-01-01")
+                yr_e = min(query_end,   f"{yr}-12-31")
+                sql_parts.append(
+                    f"-- Year {yr}\n"
+                    f"SELECT timestamp_utc, rp_story_id, relevance, event_sentiment_score,\n"
+                    f"       headline, event_text, source_name, topic, \"group\", \"type\",\n"
+                    f"       sub_type, news_type, css, nip\n"
+                    f"FROM ravenpack_dj.rpa_djpr_equities_{yr}\n"
+                    f"WHERE rp_entity_id = '{{rp_entity_id}}'  -- from mapping table\n"
+                    f"  AND rpa_date_utc BETWEEN '{yr_s}' AND '{yr_e}'\n"
+                    f"ORDER BY timestamp_utc;"
+                )
+        st.code("\n\n".join(sql_parts) if sql_parts else "Run a query first.", language="sql")
+
+    # ── Summary metrics ───────────────────────────────────────────────────────
+    with_score = articles["sentiment_score"].notna().sum()
+    sm_cols = st.columns(4)
+    sm_cols[0].metric("Total articles",       f"{len(articles):,}")
+    sm_cols[1].metric("With sentiment score", f"{with_score:,}")
+    sm_cols[2].metric("Avg sentiment score",
+                      f"{articles['sentiment_score'].mean():.3f}" if with_score else "—")
+    sm_cols[3].metric("Avg relevance",
+                      f"{articles['relevance_score'].mean():.2f}" if articles["relevance_score"].notna().any() else "—")
+
+    # ── Sentiment timeline — clicking a dot selects that article ──────────────
+    prev_scatter_idx: int | None = st.session_state.get("rp_prev_scatter_idx")
+    scatter_just_changed = False
+
+    if with_score:
+        scatter_sel = st.plotly_chart(
+            make_ravenpack_sentiment_chart(articles, rp_ticker),
+            use_container_width=True,
+            on_select="rerun",
+            selection_mode="points",
+            key="rp_scatter_chart",
+        )
+        pts = getattr(scatter_sel.selection, "points", []) if hasattr(scatter_sel, "selection") else []
+        scatter_idx: int | None = None
+        if pts:
+            raw_cd = pts[0].get("customdata")
+            if raw_cd:
+                scatter_idx = int(raw_cd[0])
+
+        # Only treat scatter as "just changed" when the selected article is new —
+        # this prevents the table's persistent selection from overriding it.
+        scatter_just_changed = (scatter_idx is not None and scatter_idx != prev_scatter_idx)
+        st.session_state.rp_prev_scatter_idx = scatter_idx
+        if scatter_just_changed:
+            st.session_state.rp_selected_row = scatter_idx
+
+    # ── Article table (with ▶ marker showing the active row) ─────────────────
+    st.markdown("#### Articles — click a row or a scatter dot to inspect features")
+    selected_row_idx: int | None = st.session_state.get("rp_selected_row")
+
+    table_df = articles[[
+        "article_time", "headline", "relevance_score",
+        "event_sentiment_score", "sentiment_score", "topic", "news_type",
+    ]].copy()
+    table_df.insert(0, "#", range(1, len(table_df) + 1))
+    table_df["article_time"] = table_df["article_time"].dt.strftime("%Y-%m-%d %H:%M")
+    # Visual marker so the user can see which row the scatter selected
+    table_df.insert(0, " ", [
+        "▶" if i == selected_row_idx else "" for i in range(len(table_df))
+    ])
+
+    selection = st.dataframe(
+        table_df,
+        use_container_width=True,
+        hide_index=True,
+        height=320,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="rp_article_table",
+    )
+
+    # Table click wins only when the scatter didn't just fire
+    if not scatter_just_changed and hasattr(selection, "selection") and selection.selection.rows:
+        st.session_state.rp_selected_row = int(selection.selection.rows[0])
+        selected_row_idx = st.session_state.rp_selected_row
+
+    if selected_row_idx is not None and 0 <= selected_row_idx < len(articles):
+        st.markdown("---")
+        st.markdown("#### Article Feature Detail")
+        render_ravenpack_article_features(articles.iloc[selected_row_idx])
+    else:
+        st.caption("Click a scatter dot or a table row to see the full feature breakdown below.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+
 st.set_page_config(
     page_title="Sentiment LTR Paper: CRSP Universe Validation",
     layout="wide",
@@ -1548,13 +1852,21 @@ st.caption(
 
 st.info(
     "The **Paper Validation** tab uses bundled 2003-2014 CSVs from `app_data/`. "
-    "The **Live API Test** tab queries selected providers simultaneously and renders them side by side."
+    "The **Live API Test** tab queries selected providers simultaneously and renders them side by side. "
+    "The **RavenPack Sentiment** tab lets you browse and inspect article-level sentiment features from WRDS."
 )
 
-tab_validation, tab_live_api = st.tabs(["Paper Validation (2003-2014)", "Live API Test"])
+tab_validation, tab_live_api, tab_ravenpack = st.tabs([
+    "Paper Validation (2003-2014)",
+    "Live API Test",
+    "RavenPack Sentiment",
+])
 
 with tab_live_api:
     render_live_api_test_tab()
+
+with tab_ravenpack:
+    render_ravenpack_sentiment_tab()
 
 with tab_validation:
     universe = load_bundled_csv(DEFAULT_UNIVERSE_PATHS)
