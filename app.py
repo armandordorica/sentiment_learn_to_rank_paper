@@ -206,9 +206,8 @@ def wrds_credentials_available() -> bool:
     return status["WRDS_USERNAME"] and status["WRDS_PASSWORD"]
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def query_wrds_ticker_data(ticker: str, start_date: str, end_date: str, row_limit: int) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Query CRSP name history and daily stock data for a ticker."""
+def open_wrds_connection():
+    """Open WRDS without allowing the library to fall back to interactive prompts."""
     if wrds is None:
         raise RuntimeError("The `wrds` package is not installed in this environment.")
 
@@ -217,11 +216,40 @@ def query_wrds_ticker_data(ticker: str, start_date: str, end_date: str, row_limi
     if not wrds_username or not wrds_password:
         raise RuntimeError("WRDS credentials are not configured.")
 
+    db = wrds.Connection(
+        autoconnect=False,
+        wrds_username=str(wrds_username).strip(),
+        wrds_password=str(wrds_password),
+    )
+    try:
+        # `wrds.Connection.connect()` prompts with input() after a failed first
+        # attempt. In Streamlit that becomes "EOF when reading a line", so call
+        # the underlying SQLAlchemy connector directly and surface the real error.
+        db._Connection__make_sa_engine_conn(raise_err=True)
+    except Exception as exc:
+        try:
+            db.close()
+        except Exception:
+            pass
+        raise RuntimeError(
+            "WRDS login failed non-interactively. Check `WRDS_USERNAME` and "
+            "`WRDS_PASSWORD` in `.env` or Streamlit secrets; the app cannot "
+            "answer WRDS terminal prompts."
+        ) from exc
+
+    if db.engine is None:
+        raise RuntimeError("WRDS login failed; no database engine was created.")
+    return db
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def query_wrds_ticker_data(ticker: str, start_date: str, end_date: str, row_limit: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Query CRSP name history and daily stock data for a ticker."""
     clean_ticker = "".join(char for char in ticker.upper().strip() if char.isalnum() or char in {".", "-"})
     if not clean_ticker:
         raise ValueError("Enter a valid ticker.")
 
-    db = wrds.Connection(wrds_username=wrds_username, wrds_password=wrds_password)
+    db = open_wrds_connection()
     try:
         names_query = f"""
         select
@@ -398,15 +426,7 @@ def load_refinitiv_story_text(story_id: str) -> str:
 @st.cache_data(ttl=300, show_spinner=False)
 def test_wrds_connection() -> dict[str, object]:
     """Run a minimal WRDS/CRSP query to verify credentials and database access."""
-    if wrds is None:
-        raise RuntimeError("The `wrds` package is not installed in this environment.")
-
-    wrds_username = get_secret_or_env("WRDS_USERNAME")
-    wrds_password = get_secret_or_env("WRDS_PASSWORD")
-    if not wrds_username or not wrds_password:
-        raise RuntimeError("WRDS credentials are not configured.")
-
-    db = wrds.Connection(wrds_username=wrds_username, wrds_password=wrds_password)
+    db = open_wrds_connection()
     try:
         latest = db.raw_sql("select max(date) as latest_crsp_date from crsp.dsf", date_cols=["latest_crsp_date"])
         sample = db.raw_sql(
@@ -463,6 +483,19 @@ def _yahoo_rate_limited(exc: Exception) -> bool:
     return "rate limit" in message or "too many requests" in message
 
 
+def _yahoo_network_blocked(exc: Exception) -> bool:
+    """Return whether Yahoo was blocked by the local/cloud network path."""
+    message = str(exc).lower()
+    blocked_markers = [
+        "connect tunnel failed",
+        "proxyerror",
+        "response 403",
+        "curl: (56)",
+        "failed to perform",
+    ]
+    return any(marker in message for marker in blocked_markers)
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_yahoo_daily(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
     """Fetch daily Yahoo Finance prices for a public cross-check."""
@@ -511,6 +544,12 @@ def fetch_yahoo_daily(ticker: str, start_date: str, end_date: str) -> pd.DataFra
             else ""
         )
         raise RuntimeError(f"Yahoo Finance rate-limited this request.{hosted_note}") from last_exc
+    if last_exc is not None and _yahoo_network_blocked(last_exc):
+        raise RuntimeError(
+            "Yahoo Finance is blocked by the current network/proxy path "
+            "(curl CONNECT tunnel returned 403). Uncheck Yahoo Finance for this "
+            "dashboard query, or use Refinitiv/WRDS as the primary price sources."
+        ) from last_exc
     if last_exc is not None:
         raise last_exc
 
@@ -1063,6 +1102,8 @@ def render_provider_price_column(
     provider_name: str,
     provider_result: dict[str, object],
     ticker: str,
+    *,
+    key_prefix: str | None = None,
 ) -> None:
     """Render one provider's price panel inside a Streamlit column."""
     with column:
@@ -1073,6 +1114,7 @@ def render_provider_price_column(
             st.plotly_chart(
                 make_provider_price_chart(prices, ticker, provider_name.lower()),
                 use_container_width=True,
+                key=f"{key_prefix}_{provider_name.lower()}_price_chart" if key_prefix else None,
             )
             st.dataframe(prices.sort_values("date", ascending=False), use_container_width=True, height=250)
         else:
@@ -1550,15 +1592,8 @@ def _pg_sql(db_conn, sql: str) -> pd.DataFrame:
 @st.cache_data(ttl=1800, show_spinner=False)
 def query_ravenpack_articles(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
     """Fetch RavenPack sentiment articles for a ticker from WRDS."""
-    if wrds is None:
-        raise RuntimeError("wrds package not installed.")
-    wrds_username = get_secret_or_env("WRDS_USERNAME")
-    wrds_password = get_secret_or_env("WRDS_PASSWORD")
-    if not wrds_username or not wrds_password:
-        raise RuntimeError("WRDS credentials not configured.")
-
     clean_ticker = ticker.upper().strip()
-    db = wrds.Connection(wrds_username=wrds_username, wrds_password=wrds_password)
+    db = open_wrds_connection()
     try:
         mapping = _pg_sql(db, f"""
             SELECT DISTINCT rp_entity_id
@@ -1838,6 +1873,372 @@ def render_ravenpack_sentiment_tab() -> None:
         st.caption("Click a scatter dot or a table row to see the full feature breakdown below.")
 
 
+def make_ravenpack_aggregate_sentiment_chart(articles: pd.DataFrame, ticker: str, *, freq: str = "D"):
+    """Build an aggregated RavenPack sentiment timeline."""
+    if articles.empty or "sentiment_score" not in articles.columns:
+        raise ValueError("No RavenPack sentiment rows available to plot.")
+
+    plot_data = articles.dropna(subset=["sentiment_score"]).copy()
+    if plot_data.empty:
+        raise ValueError("No non-null RavenPack sentiment scores available to plot.")
+
+    plot_data["article_time"] = pd.to_datetime(plot_data["article_time"], utc=True)
+    plot_data["period"] = plot_data["article_time"].dt.tz_convert(None).dt.to_period(freq).dt.start_time
+    agg = (
+        plot_data.groupby("period", as_index=False)
+        .agg(
+            avg_sentiment=("sentiment_score", "mean"),
+            article_count=("sentiment_score", "size"),
+            avg_relevance=("relevance_score", "mean"),
+        )
+        .sort_values("period")
+    )
+
+    label = "Daily" if freq == "D" else "Weekly"
+    fig = px.line(
+        agg,
+        x="period",
+        y="avg_sentiment",
+        title=f"{ticker.upper()} — {label} Average RavenPack Sentiment",
+        labels={"period": "Date", "avg_sentiment": "Average sentiment score"},
+        hover_data={
+            "period": "|%Y-%m-%d",
+            "avg_sentiment": ":.4f",
+            "article_count": ":,",
+            "avg_relevance": ":.2f",
+        },
+    )
+    fig.add_hline(y=0, line_dash="dash", line_color="grey", line_width=1)
+    fig.update_traces(mode="lines+markers", marker={"size": 5})
+    fig.update_layout(height=420, hovermode="closest")
+    return fig
+
+
+def render_dashboard_price_pane(live_result: dict[str, object], *, key_prefix: str) -> None:
+    """Render dashboard price charts and provider panels."""
+    ticker = str(live_result["ticker"])
+    providers = live_result["providers"]
+    price_frames = live_result["price_frames"]
+    selected = live_result.get("selected_providers", {})
+
+    if len(price_frames) >= 2:
+        st.plotly_chart(
+            make_combined_price_chart(price_frames, ticker),
+            use_container_width=True,
+            key=f"{key_prefix}_combined_price_chart",
+        )
+        comparison = build_cross_provider_comparison(price_frames)
+        if not comparison.empty:
+            st.markdown("##### Cross-provider close-price comparison")
+            st.dataframe(comparison, use_container_width=True, height=280)
+    elif len(price_frames) == 1:
+        provider, prices = next(iter(price_frames.items()))
+        st.plotly_chart(
+            make_provider_price_chart(prices, ticker, provider),
+            use_container_width=True,
+            key=f"{key_prefix}_{provider}_single_price_chart",
+        )
+    else:
+        st.warning("No selected price provider returned data for this ticker/date range.")
+
+    visible_panels = [
+        (name, providers[key])
+        for name, key in [("Refinitiv", "refinitiv"), ("WRDS/CRSP", "wrds"), ("Yahoo Finance", "yahoo")]
+        if selected.get(key, True)
+    ]
+    if visible_panels:
+        st.markdown("##### Provider panes")
+        panel_cols = st.columns(len(visible_panels))
+        for column, (name, result) in zip(panel_cols, visible_panels):
+            render_provider_price_column(column, name, result, ticker, key_prefix=key_prefix)
+
+
+def render_dashboard_news_pane(live_result: dict[str, object]) -> None:
+    """Render Refinitiv news coverage in the dashboard."""
+    ticker = str(live_result["ticker"])
+    refinitiv = live_result["providers"]["refinitiv"]
+    session_info = refinitiv.get("session_info")
+    news_df = refinitiv.get("news")
+    daily_counts = refinitiv.get("news_daily_counts")
+    news_summary = refinitiv.get("news_summary")
+
+    if isinstance(news_summary, dict):
+        metric_cols = st.columns(4)
+        metric_cols[0].metric("Refinitiv articles", f"{int(news_summary.get('total_articles', 0)):,}")
+        metric_cols[1].metric("Avg articles / week", f"{float(news_summary.get('avg_articles_per_week', 0.0)):.2f}")
+        metric_cols[2].metric("Days with news", f"{int(news_summary.get('calendar_days_with_news', 0)):,}")
+        metric_cols[3].metric(
+            "Paper weekly rule",
+            "Pass" if news_summary.get("passes_paper_weekly_threshold") else "Fail",
+        )
+
+    if isinstance(daily_counts, pd.DataFrame) and not daily_counts.empty:
+        try:
+            st.plotly_chart(
+                make_news_daily_count_chart(daily_counts, ticker),
+                use_container_width=True,
+                key="dashboard_refinitiv_news_daily_chart",
+            )
+        except ValueError as exc:
+            st.info(str(exc))
+
+    if isinstance(news_df, pd.DataFrame) and not news_df.empty:
+        display = news_df.copy().sort_values("date", ascending=False).reset_index(drop=True)
+        display.insert(0, "#", range(1, len(display) + 1))
+        if "date" in display.columns:
+            display["date"] = pd.to_datetime(display["date"]).dt.strftime("%Y-%m-%d %H:%M")
+        show_cols = ["#"] + [col for col in ["date", "headline", "sourceCode", "storyId"] if col in display.columns]
+        st.markdown("##### Refinitiv headline rows")
+        st.dataframe(display[show_cols], use_container_width=True, hide_index=True, height=360)
+    else:
+        error = refinitiv.get("error")
+        if error:
+            st.warning(format_refinitiv_news_error(str(error), session_info))
+        else:
+            st.info("No Refinitiv headline rows were returned.")
+
+
+def render_dashboard_sentiment_pane(ravenpack_articles: pd.DataFrame, ticker: str, ravenpack_error: str | None) -> None:
+    """Render RavenPack sentiment charts and data tables."""
+    if ravenpack_error:
+        st.warning(ravenpack_error)
+        return
+    if ravenpack_articles.empty:
+        st.info("No RavenPack articles were returned, or RavenPack was not selected.")
+        return
+
+    articles = ravenpack_articles.copy()
+    with_score = articles["sentiment_score"].notna().sum()
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("RavenPack articles", f"{len(articles):,}")
+    metric_cols[1].metric("With sentiment", f"{with_score:,}")
+    metric_cols[2].metric("Avg sentiment", f"{articles['sentiment_score'].mean():.3f}" if with_score else "—")
+    metric_cols[3].metric(
+        "Avg relevance",
+        f"{articles['relevance_score'].mean():.2f}" if articles["relevance_score"].notna().any() else "—",
+    )
+
+    if with_score:
+        chart_tabs = st.tabs(["Article Scatter", "Daily Average", "Weekly Average"])
+        with chart_tabs[0]:
+            st.plotly_chart(
+                make_ravenpack_sentiment_chart(articles, ticker),
+                use_container_width=True,
+                key="dashboard_sentiment_article_scatter",
+            )
+        with chart_tabs[1]:
+            st.plotly_chart(
+                make_ravenpack_aggregate_sentiment_chart(articles, ticker, freq="D"),
+                use_container_width=True,
+                key="dashboard_sentiment_daily_average",
+            )
+        with chart_tabs[2]:
+            st.plotly_chart(
+                make_ravenpack_aggregate_sentiment_chart(articles, ticker, freq="W"),
+                use_container_width=True,
+                key="dashboard_sentiment_weekly_average",
+            )
+
+    show_cols = [
+        "article_time", "headline", "event_text", "relevance_score",
+        "event_sentiment_score", "sentiment_score", "topic", "group", "type", "news_type",
+    ]
+    display = articles[[col for col in show_cols if col in articles.columns]].copy()
+    if "article_time" in display.columns:
+        display["article_time"] = pd.to_datetime(display["article_time"], utc=True).dt.strftime("%Y-%m-%d %H:%M")
+    st.markdown("##### RavenPack article rows")
+    st.dataframe(display, use_container_width=True, height=360)
+
+
+def render_dashboard_raw_data_pane(live_result: dict[str, object], ravenpack_articles: pd.DataFrame) -> None:
+    """Render raw provider frames for export/debugging."""
+    providers = live_result["providers"]
+    for label, key in [("Refinitiv prices", "refinitiv"), ("WRDS/CRSP prices", "wrds"), ("Yahoo prices", "yahoo")]:
+        provider_result = providers[key]
+        prices = provider_result.get("prices")
+        with st.expander(label, expanded=False):
+            if isinstance(prices, pd.DataFrame) and not prices.empty:
+                st.dataframe(prices.sort_values("date", ascending=False), use_container_width=True)
+            else:
+                st.caption(str(provider_result.get("error") or provider_result.get("status")))
+
+    refinitiv_news = providers["refinitiv"].get("news")
+    with st.expander("Refinitiv news headlines", expanded=False):
+        if isinstance(refinitiv_news, pd.DataFrame) and not refinitiv_news.empty:
+            st.dataframe(refinitiv_news.sort_values("date", ascending=False), use_container_width=True)
+        else:
+            st.caption("No Refinitiv news frame available.")
+
+    with st.expander("RavenPack sentiment articles", expanded=False):
+        if not ravenpack_articles.empty:
+            st.dataframe(ravenpack_articles, use_container_width=True)
+        else:
+            st.caption("No RavenPack article frame available.")
+
+
+def render_multi_api_dashboard_tab() -> None:
+    """Render a ticker/date dashboard that combines all available APIs into panes."""
+    st.subheader("Multi-API Ticker Dashboard")
+    st.caption(
+        "Enter one ticker and date range, then retrieve price, news, and sentiment data from the configured APIs. "
+        "Results are grouped into dashboard panes with Plotly charts and raw data tables."
+    )
+
+    status_cols = st.columns(4)
+    status_cols[0].metric("Refinitiv", refinitiv_status_label(PROJECT_ROOT))
+    status_cols[1].metric("WRDS/CRSP", "Ready" if wrds_credentials_available() else "Not configured")
+    status_cols[2].metric("Yahoo", "Ready")
+    status_cols[3].metric("RavenPack", "Ready" if wrds_credentials_available() else "Not configured")
+
+    if "dashboard_ticker" not in st.session_state:
+        st.session_state.dashboard_ticker = "AAPL"
+    if "dashboard_start_date" not in st.session_state:
+        st.session_state.dashboard_start_date = default_live_api_start(30).date()
+    if "dashboard_end_date" not in st.session_state:
+        st.session_state.dashboard_end_date = default_live_api_end().date()
+
+    preset_cols = st.columns(len(QUICK_TEST_TICKERS))
+    for column, preset_ticker in zip(preset_cols, QUICK_TEST_TICKERS):
+        if column.button(preset_ticker, key=f"dashboard_ticker_{preset_ticker}", use_container_width=True):
+            st.session_state.dashboard_ticker = preset_ticker
+
+    with st.form("multi_api_dashboard_query", clear_on_submit=False):
+        control_cols = st.columns([1, 1, 1])
+        ticker = control_cols[0].text_input("Ticker", key="dashboard_ticker", max_chars=16).strip().upper()
+        start_date = control_cols[1].date_input(
+            "Start date",
+            key="dashboard_start_date",
+            max_value=default_live_api_end().date(),
+        )
+        end_date = control_cols[2].date_input(
+            "End date",
+            key="dashboard_end_date",
+            max_value=default_live_api_end().date(),
+        )
+
+        provider_cols = st.columns(4)
+        use_refinitiv = provider_cols[0].checkbox(
+            "Refinitiv prices/news",
+            value=refinitiv_configured(PROJECT_ROOT),
+            key="dashboard_use_refinitiv",
+        )
+        use_wrds = provider_cols[1].checkbox(
+            "WRDS/CRSP prices",
+            value=wrds_credentials_available(),
+            key="dashboard_use_wrds",
+        )
+        use_yahoo = provider_cols[2].checkbox("Yahoo prices", value=True, key="dashboard_use_yahoo")
+        use_ravenpack = provider_cols[3].checkbox(
+            "RavenPack sentiment",
+            value=wrds_credentials_available(),
+            key="dashboard_use_ravenpack",
+        )
+        include_refinitiv_news = st.checkbox(
+            "Include Refinitiv news coverage and headline rows",
+            value=refinitiv_configured(PROJECT_ROOT),
+            key="dashboard_include_refinitiv_news",
+        )
+        submitted = st.form_submit_button("Retrieve Dashboard Data", type="primary")
+
+    if submitted:
+        if start_date > end_date:
+            st.error("Start date must be on or before end date.")
+            return
+        if not any([use_refinitiv, use_wrds, use_yahoo, use_ravenpack]):
+            st.error("Select at least one data source.")
+            return
+
+        latest_crsp_date: pd.Timestamp | None = None
+        if wrds_credentials_available():
+            try:
+                latest_crsp_date = get_latest_crsp_date()
+            except Exception:
+                latest_crsp_date = None
+
+        ravenpack_articles = pd.DataFrame()
+        ravenpack_error = None
+        with st.spinner(f"Retrieving dashboard data for {ticker}..."):
+            live_result = run_live_api_query(
+                ticker,
+                to_query_date(start_date),
+                to_query_date(end_date),
+                query_refinitiv=use_refinitiv,
+                query_wrds=use_wrds,
+                query_yahoo=use_yahoo,
+                news_count=1 if include_refinitiv_news else 0,
+                latest_crsp_date=latest_crsp_date,
+            )
+            if use_ravenpack:
+                try:
+                    ravenpack_articles = query_ravenpack_articles(
+                        ticker,
+                        to_query_date(start_date),
+                        to_query_date(end_date),
+                    )
+                except Exception as exc:
+                    ravenpack_error = str(exc)
+
+        st.session_state.dashboard_result = {
+            "live": live_result,
+            "ravenpack_articles": ravenpack_articles,
+            "ravenpack_error": ravenpack_error,
+        }
+
+    dashboard_result = st.session_state.get("dashboard_result")
+    if not dashboard_result:
+        st.info("Choose data sources above and click **Retrieve Dashboard Data**.")
+        return
+
+    live_result = dashboard_result["live"]
+    ravenpack_articles = dashboard_result.get("ravenpack_articles", pd.DataFrame())
+    if not isinstance(ravenpack_articles, pd.DataFrame):
+        ravenpack_articles = pd.DataFrame()
+    ravenpack_error = dashboard_result.get("ravenpack_error")
+    ticker = str(live_result["ticker"])
+
+    providers = live_result["providers"]
+    result_cols = st.columns(4)
+    result_cols[0].metric("Refinitiv", _provider_status_label(providers["refinitiv"]))
+    result_cols[1].metric("WRDS/CRSP", _provider_status_label(providers["wrds"]))
+    result_cols[2].metric("Yahoo", _provider_status_label(providers["yahoo"]))
+    result_cols[3].metric(
+        "RavenPack",
+        "OK" if not ravenpack_articles.empty else ("Failed" if ravenpack_error else "No rows"),
+    )
+    st.caption(f"Dashboard window: **{live_result['start_date']}** to **{live_result['end_date']}** for **{ticker}**")
+
+    pane_overview, pane_prices, pane_news, pane_sentiment, pane_raw = st.tabs([
+        "Overview",
+        "Prices",
+        "News",
+        "Sentiment",
+        "Raw Data",
+    ])
+
+    with pane_overview:
+        if live_result["price_frames"]:
+            render_dashboard_price_pane(live_result, key_prefix="dashboard_overview")
+        if not ravenpack_articles.empty:
+            st.markdown("#### Sentiment snapshot")
+            st.plotly_chart(
+                make_ravenpack_aggregate_sentiment_chart(ravenpack_articles, ticker, freq="D"),
+                use_container_width=True,
+                key="dashboard_overview_sentiment_snapshot",
+            )
+
+    with pane_prices:
+        render_dashboard_price_pane(live_result, key_prefix="dashboard_prices")
+
+    with pane_news:
+        render_dashboard_news_pane(live_result)
+
+    with pane_sentiment:
+        render_dashboard_sentiment_pane(ravenpack_articles, ticker, str(ravenpack_error) if ravenpack_error else None)
+
+    with pane_raw:
+        render_dashboard_raw_data_pane(live_result, ravenpack_articles)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 st.set_page_config(
@@ -1847,20 +2248,25 @@ st.set_page_config(
 
 st.title("CRSP Universe Validation")
 st.caption(
-    "Paper-replication validation charts plus a live API test tab for parallel Refinitiv, WRDS, and Yahoo comparisons."
+    "Paper-replication validation charts plus ticker dashboards for Refinitiv, WRDS/CRSP, Yahoo, and RavenPack data."
 )
 
 st.info(
     "The **Paper Validation** tab uses bundled 2003-2014 CSVs from `app_data/`. "
+    "The **Multi-API Dashboard** tab retrieves all selected data sources from one ticker/date-range form. "
     "The **Live API Test** tab queries selected providers simultaneously and renders them side by side. "
     "The **RavenPack Sentiment** tab lets you browse and inspect article-level sentiment features from WRDS."
 )
 
-tab_validation, tab_live_api, tab_ravenpack = st.tabs([
+tab_dashboard, tab_validation, tab_live_api, tab_ravenpack = st.tabs([
+    "Multi-API Dashboard",
     "Paper Validation (2003-2014)",
     "Live API Test",
     "RavenPack Sentiment",
 ])
+
+with tab_dashboard:
+    render_multi_api_dashboard_tab()
 
 with tab_live_api:
     render_live_api_test_tab()
