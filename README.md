@@ -73,6 +73,57 @@ WRDS_PASSWORD=your_wrds_password
 
 Do not commit `.env` to the repository. Start with `wrds_connection.ipynb` to verify authentication and CRSP table access.
 
+## Streamlit Web App
+
+The repository includes a Streamlit app (`app.py`) for interactively exploring the data sources used in the replication. It is useful for smoke-testing API credentials, inspecting ticker-level data coverage, comparing price providers, and browsing news/sentiment records before building batch datasets.
+
+Run it locally from the project root:
+
+```bash
+conda activate sentiment-ltr-paper
+python -m streamlit run app.py
+```
+
+Then open the local URL printed by Streamlit, usually `http://localhost:8501`.
+
+### What You Can Do
+
+The app has two top-level tabs:
+
+- **Data Explorer**: one ticker/date-range form that can query Refinitiv, WRDS/CRSP, Yahoo Finance, and RavenPack together.
+- **Paper Validation (2003-2014)**: bundled validation charts for the CRSP top-volume universe saved under `app_data/`.
+
+In **Data Explorer**, enter a ticker such as `AAPL`, choose a start and end date, select the data sources to query, and click **Retrieve Dashboard Data**. Results are split into panes:
+
+- **Overview**: combined price chart and a sentiment snapshot when RavenPack data is available.
+- **Prices**: provider-specific price charts and tables for Refinitiv, WRDS/CRSP, and Yahoo Finance.
+- **News**: Refinitiv daily headline counts, coverage metrics, and returned headline rows.
+- **Sentiment**: RavenPack article-level sentiment scatter plus daily and weekly average sentiment charts.
+- **Raw Data**: expandable raw data frames for debugging, export, or schema inspection.
+
+The Plotly charts use point-level hover behavior so you can inspect the exact date, provider, article count, sentiment score, relevance, and headline metadata behind each point.
+
+### Data Sources And Requirements
+
+| Source | Used For | Required Setup |
+| --- | --- | --- |
+| Refinitiv/LSEG | Daily prices, news coverage, headline rows, optional story text | Install `requirements-refinitiv.txt`; configure `lseg-data.config.json` for local Workspace or `LSEG_APP_KEY`, `LSEG_USERNAME`, and `LSEG_PASSWORD` for cloud/API usage. |
+| WRDS/CRSP | CRSP daily prices and name history | Set `WRDS_USERNAME` and `WRDS_PASSWORD` in `.env` or Streamlit secrets. |
+| RavenPack via WRDS | Article-level sentiment, relevance, event text, and taxonomy fields | Same WRDS credentials plus RavenPack table access on WRDS. |
+| Yahoo Finance | Public price cross-checks | `yfinance` from `requirements.txt`; outbound internet access. |
+
+WRDS connections are opened non-interactively in the app. If credentials are missing or invalid, the app shows a credential error instead of waiting for terminal input.
+
+Yahoo Finance is best-effort. Some hosted or sandboxed networks block Yahoo's HTTPS requests; if that happens, uncheck Yahoo and use Refinitiv or WRDS/CRSP as the primary price source.
+
+### Typical Workflows
+
+1. **Check whether a ticker has usable price coverage**: select Refinitiv, WRDS/CRSP, and Yahoo; compare the combined price chart and provider tables in the **Prices** pane.
+2. **Inspect Refinitiv news coverage**: select Refinitiv and enable news coverage; use the **News** pane to check daily counts, headline rows, and the average articles-per-week paper filter.
+3. **Inspect RavenPack sentiment**: select RavenPack sentiment; use the **Sentiment** pane to review article-level sentiment scores, daily/weekly averages, event text, and classification fields.
+4. **Debug provider schemas**: use **Raw Data** to inspect returned columns and row counts before writing a notebook or batch pipeline.
+5. **Validate bundled paper-window artifacts**: open **Paper Validation (2003-2014)** to review the committed CRSP top-volume universe and top-20 validation plots without querying WRDS.
+
 ## Data Needed
 
 ### 1. Market Data

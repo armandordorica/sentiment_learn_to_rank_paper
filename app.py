@@ -1962,34 +1962,65 @@ def render_dashboard_news_pane(live_result: dict[str, object]) -> None:
     daily_counts = refinitiv.get("news_daily_counts")
     news_summary = refinitiv.get("news_summary")
 
-    if isinstance(news_summary, dict):
-        metric_cols = st.columns(4)
-        metric_cols[0].metric("Refinitiv articles", f"{int(news_summary.get('total_articles', 0)):,}")
-        metric_cols[1].metric("Avg articles / week", f"{float(news_summary.get('avg_articles_per_week', 0.0)):.2f}")
-        metric_cols[2].metric("Days with news", f"{int(news_summary.get('calendar_days_with_news', 0)):,}")
-        metric_cols[3].metric(
-            "Paper weekly rule",
-            "Pass" if news_summary.get("passes_paper_weekly_threshold") else "Fail",
-        )
-
-    if isinstance(daily_counts, pd.DataFrame) and not daily_counts.empty:
-        try:
-            st.plotly_chart(
-                make_news_daily_count_chart(daily_counts, ticker),
-                use_container_width=True,
-                key="dashboard_refinitiv_news_daily_chart",
-            )
-        except ValueError as exc:
-            st.info(str(exc))
-
     if isinstance(news_df, pd.DataFrame) and not news_df.empty:
+        if isinstance(daily_counts, pd.DataFrame) and not daily_counts.empty:
+            render_refinitiv_news_coverage_section(
+                news_df,
+                daily_counts,
+                news_summary if isinstance(news_summary, dict) else None,
+                ticker,
+            )
+
+        st.markdown("#### Full Refinitiv Headline List")
+        st.caption(
+            "Select any headline row below to load its full Refinitiv story text. "
+            "The daily drill-down above is useful for coverage checks; this table exposes the complete returned list."
+        )
         display = news_df.copy().sort_values("date", ascending=False).reset_index(drop=True)
         display.insert(0, "#", range(1, len(display) + 1))
         if "date" in display.columns:
             display["date"] = pd.to_datetime(display["date"]).dt.strftime("%Y-%m-%d %H:%M")
         show_cols = ["#"] + [col for col in ["date", "headline", "sourceCode", "storyId"] if col in display.columns]
-        st.markdown("##### Refinitiv headline rows")
-        st.dataframe(display[show_cols], use_container_width=True, hide_index=True, height=360)
+        selection = st.dataframe(
+            display[show_cols],
+            use_container_width=True,
+            hide_index=True,
+            height=420,
+            on_select="rerun",
+            selection_mode="single-row",
+            key="dashboard_all_refinitiv_headlines",
+        )
+        if selection is not None and hasattr(selection, "selection") and selection.selection.rows:
+            row_idx = int(selection.selection.rows[0])
+            if 0 <= row_idx < len(display):
+                row = display.iloc[row_idx]
+                if "storyId" in row and pd.notna(row["storyId"]):
+                    st.session_state.dashboard_news_story_id = str(row["storyId"])
+                    st.session_state.dashboard_news_story_headline = str(row.get("headline", "Selected headline"))
+
+        story_id = st.session_state.get("dashboard_news_story_id")
+        if story_id:
+            headline = st.session_state.get("dashboard_news_story_headline", "Selected headline")
+            st.markdown("---")
+            st.markdown(f"**{headline}**")
+            with st.spinner("Loading full Refinitiv story..."):
+                try:
+                    story_text = load_refinitiv_story_text(str(story_id))
+                except Exception as exc:
+                    st.error(f"Could not load story: {exc}")
+                else:
+                    st.text_area(
+                        "Full story",
+                        value=story_text,
+                        height=420,
+                        disabled=True,
+                        label_visibility="collapsed",
+                        key="dashboard_news_story_text",
+                    )
+            if st.button("Close story", key="dashboard_close_news_story"):
+                st.session_state.pop("dashboard_news_story_id", None)
+                st.session_state.pop("dashboard_news_story_headline", None)
+                st.rerun()
     else:
         error = refinitiv.get("error")
         if error:
@@ -2078,10 +2109,11 @@ def render_dashboard_raw_data_pane(live_result: dict[str, object], ravenpack_art
 
 def render_multi_api_dashboard_tab() -> None:
     """Render a ticker/date dashboard that combines all available APIs into panes."""
-    st.subheader("Multi-API Ticker Dashboard")
+    st.subheader("Unified Ticker Data Explorer")
     st.caption(
-        "Enter one ticker and date range, then retrieve price, news, and sentiment data from the configured APIs. "
-        "Results are grouped into dashboard panes with Plotly charts and raw data tables."
+        "Enter one ticker and date range, then retrieve prices, Refinitiv news, and RavenPack sentiment "
+        "from the configured sources. This replaces the separate Live API Test and RavenPack Sentiment "
+        "workflows with one shared input form."
     )
 
     status_cols = st.columns(4)
@@ -2242,37 +2274,27 @@ def render_multi_api_dashboard_tab() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 st.set_page_config(
-    page_title="Sentiment LTR Paper: CRSP Universe Validation",
+    page_title="Sentiment LTR Paper: Data Explorer",
     layout="wide",
 )
 
-st.title("CRSP Universe Validation")
+st.title("Sentiment LTR Data Explorer")
 st.caption(
-    "Paper-replication validation charts plus ticker dashboards for Refinitiv, WRDS/CRSP, Yahoo, and RavenPack data."
+    "Unified ticker/date queries for Refinitiv, WRDS/CRSP, Yahoo, and RavenPack, plus paper-replication validation charts."
 )
 
 st.info(
-    "The **Paper Validation** tab uses bundled 2003-2014 CSVs from `app_data/`. "
-    "The **Multi-API Dashboard** tab retrieves all selected data sources from one ticker/date-range form. "
-    "The **Live API Test** tab queries selected providers simultaneously and renders them side by side. "
-    "The **RavenPack Sentiment** tab lets you browse and inspect article-level sentiment features from WRDS."
+    "The **Data Explorer** tab uses one ticker/date-range form for prices, Refinitiv news, and RavenPack sentiment. "
+    "The **Paper Validation** tab uses bundled 2003-2014 CSVs from `app_data/`."
 )
 
-tab_dashboard, tab_validation, tab_live_api, tab_ravenpack = st.tabs([
-    "Multi-API Dashboard",
+tab_dashboard, tab_validation = st.tabs([
+    "Data Explorer",
     "Paper Validation (2003-2014)",
-    "Live API Test",
-    "RavenPack Sentiment",
 ])
 
 with tab_dashboard:
     render_multi_api_dashboard_tab()
-
-with tab_live_api:
-    render_live_api_test_tab()
-
-with tab_ravenpack:
-    render_ravenpack_sentiment_tab()
 
 with tab_validation:
     universe = load_bundled_csv(DEFAULT_UNIVERSE_PATHS)
