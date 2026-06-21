@@ -29,6 +29,8 @@ SRC_PATH = PROJECT_ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
+from sentiment_ltr.data import live_data
+
 REFINITIV_IMPORT_ERROR: str | None = None
 
 
@@ -194,139 +196,23 @@ def get_secret_or_env(name: str) -> str | None:
 
 def wrds_credential_status() -> dict[str, bool]:
     """Return non-sensitive WRDS credential presence checks."""
-    return {
-        "WRDS_USERNAME": bool(get_secret_or_env("WRDS_USERNAME")),
-        "WRDS_PASSWORD": bool(get_secret_or_env("WRDS_PASSWORD")),
-    }
+    return live_data.wrds_credential_status()
 
 
 def wrds_credentials_available() -> bool:
     """Return whether the app has enough configuration for live WRDS queries."""
-    status = wrds_credential_status()
-    return status["WRDS_USERNAME"] and status["WRDS_PASSWORD"]
+    return live_data.wrds_credentials_available()
 
 
 def open_wrds_connection():
     """Open WRDS without allowing the library to fall back to interactive prompts."""
-    if wrds is None:
-        raise RuntimeError("The `wrds` package is not installed in this environment.")
-
-    wrds_username = get_secret_or_env("WRDS_USERNAME")
-    wrds_password = get_secret_or_env("WRDS_PASSWORD")
-    if not wrds_username or not wrds_password:
-        raise RuntimeError("WRDS credentials are not configured.")
-
-    db = wrds.Connection(
-        autoconnect=False,
-        wrds_username=str(wrds_username).strip(),
-        wrds_password=str(wrds_password),
-    )
-    try:
-        # `wrds.Connection.connect()` prompts with input() after a failed first
-        # attempt. In Streamlit that becomes "EOF when reading a line", so call
-        # the underlying SQLAlchemy connector directly and surface the real error.
-        db._Connection__make_sa_engine_conn(raise_err=True)
-    except Exception as exc:
-        try:
-            db.close()
-        except Exception:
-            pass
-        raise RuntimeError(
-            "WRDS login failed non-interactively. Check `WRDS_USERNAME` and "
-            "`WRDS_PASSWORD` in `.env` or Streamlit secrets; the app cannot "
-            "answer WRDS terminal prompts."
-        ) from exc
-
-    if db.engine is None:
-        raise RuntimeError("WRDS login failed; no database engine was created.")
-    return db
+    return live_data.open_wrds_connection()
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def query_wrds_ticker_data(ticker: str, start_date: str, end_date: str, row_limit: int) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Query CRSP name history and daily stock data for a ticker."""
-    clean_ticker = "".join(char for char in ticker.upper().strip() if char.isalnum() or char in {".", "-"})
-    if not clean_ticker:
-        raise ValueError("Enter a valid ticker.")
-
-    db = open_wrds_connection()
-    try:
-        names_query = f"""
-        select
-            permno,
-            permco,
-            namedt,
-            nameendt,
-            ticker,
-            comnam,
-            shrcd,
-            exchcd
-        from crsp.msenames
-        where trim(ticker) = '{clean_ticker}'
-          and namedt <= '{end_date}'
-          and nameendt >= '{start_date}'
-        order by namedt, permno
-        """
-        names = db.raw_sql(names_query, date_cols=["namedt", "nameendt"])
-
-        if names.empty:
-            fallback_names_query = f"""
-            select
-                permno,
-                permco,
-                namedt,
-                nameendt,
-                ticker,
-                comnam,
-                shrcd,
-                exchcd
-            from crsp.msenames
-            where trim(ticker) = '{clean_ticker}'
-            order by nameendt desc, namedt desc
-            """
-            names = db.raw_sql(fallback_names_query, date_cols=["namedt", "nameendt"])
-
-        if names.empty:
-            return names, pd.DataFrame()
-
-        permno_sql = ", ".join(str(int(permno)) for permno in sorted(names["permno"].dropna().unique()))
-        daily_query = f"""
-        select
-            d.permno,
-            n.permco,
-            d.date,
-            n.ticker,
-            n.comnam,
-            n.shrcd,
-            n.exchcd,
-            d.openprc,
-            d.prc,
-            d.ret,
-            d.retx,
-            d.vol,
-            d.shrout,
-            d.cfacpr,
-            d.cfacshr,
-            d.bidlo,
-            d.askhi
-        from crsp.dsf as d
-        join crsp.msenames as n
-          on d.permno = n.permno
-         and d.date between n.namedt and n.nameendt
-        where d.date between '{start_date}' and '{end_date}'
-          and d.permno in ({permno_sql})
-          and trim(n.ticker) = '{clean_ticker}'
-        order by d.date desc, d.permno
-        limit {int(row_limit)}
-        """
-        daily = db.raw_sql(daily_query, date_cols=["date"])
-    finally:
-        db.close()
-
-    for column in ["openprc", "prc", "bidlo", "askhi"]:
-        if column in daily.columns:
-            daily[f"abs_{column}"] = daily[column].abs()
-    return names, daily
+    return live_data.query_wrds_ticker_data(ticker, start_date, end_date, row_limit)
 
 
 def default_api_test_end(latest_crsp_date: pd.Timestamp | None = None) -> pd.Timestamp:
@@ -405,8 +291,7 @@ def calendar_preset_days(preset_label: str, default: int = 30) -> int:
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_latest_crsp_date() -> pd.Timestamp:
     """Return the latest daily observation date available in WRDS CRSP."""
-    connection_info = test_wrds_connection()
-    return pd.Timestamp(connection_info["latest_crsp_date"]).normalize()
+    return live_data.get_latest_crsp_date()
 
 
 def google_finance_url(ticker: str) -> str:
@@ -426,143 +311,32 @@ def load_refinitiv_story_text(story_id: str) -> str:
 @st.cache_data(ttl=300, show_spinner=False)
 def test_wrds_connection() -> dict[str, object]:
     """Run a minimal WRDS/CRSP query to verify credentials and database access."""
-    db = open_wrds_connection()
-    try:
-        latest = db.raw_sql("select max(date) as latest_crsp_date from crsp.dsf", date_cols=["latest_crsp_date"])
-        sample = db.raw_sql(
-            """
-            select permno, date, prc, vol
-            from crsp.dsf
-            order by date desc
-            limit 5
-            """,
-            date_cols=["date"],
-        )
-    finally:
-        db.close()
-
-    latest_date = latest["latest_crsp_date"].iloc[0]
-    return {
-        "latest_crsp_date": latest_date,
-        "sample_rows": sample,
-    }
+    return live_data.test_wrds_connection()
 
 
 def to_query_date(value: pd.Timestamp | str) -> str:
     """Normalize a date-like value to YYYY-MM-DD for WRDS/Yahoo queries."""
-    return pd.Timestamp(value).strftime("%Y-%m-%d")
+    return live_data.to_query_date(value)
 
 
 def _standardize_yahoo_daily(data: pd.DataFrame, ticker: str) -> pd.DataFrame:
     """Normalize a Yahoo Finance OHLCV frame to the app's daily schema."""
-    if data is None or data.empty:
-        raise ValueError(f"Yahoo Finance returned no rows for {ticker}.")
-
-    if isinstance(data.columns, pd.MultiIndex):
-        data.columns = data.columns.get_level_values(0)
-
-    result = data.reset_index()
-    date_column = "Date" if "Date" in result.columns else result.columns[0]
-    result = result.rename(
-        columns={
-            date_column: "date",
-            "Open": "yahoo_open",
-            "Close": "yahoo_close",
-            "Volume": "yahoo_volume",
-        }
-    )
-    result["date"] = pd.to_datetime(result["date"], utc=True).dt.tz_localize(None).dt.normalize()
-    keep_cols = [col for col in ["date", "yahoo_open", "yahoo_close", "yahoo_volume"] if col in result.columns]
-    if "yahoo_close" not in keep_cols:
-        raise ValueError(f"Yahoo Finance response for {ticker} did not include a Close column.")
-    return result[keep_cols].sort_values("date")
+    return live_data._standardize_yahoo_daily(data, ticker)
 
 
 def _yahoo_rate_limited(exc: Exception) -> bool:
-    message = str(exc).lower()
-    return "rate limit" in message or "too many requests" in message
+    return live_data._yahoo_rate_limited(exc)
 
 
 def _yahoo_network_blocked(exc: Exception) -> bool:
     """Return whether Yahoo was blocked by the local/cloud network path."""
-    message = str(exc).lower()
-    blocked_markers = [
-        "connect tunnel failed",
-        "proxyerror",
-        "response 403",
-        "curl: (56)",
-        "failed to perform",
-    ]
-    return any(marker in message for marker in blocked_markers)
+    return live_data._yahoo_network_blocked(exc)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_yahoo_daily(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
     """Fetch daily Yahoo Finance prices for a public cross-check."""
-    if yf is None:
-        raise RuntimeError("The `yfinance` package is not installed in this environment.")
-
-    start_date = to_query_date(start_date)
-    end_date = to_query_date(end_date)
-    end_exclusive = (pd.Timestamp(end_date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-    symbol = ticker.upper().strip()
-    last_exc: Exception | None = None
-
-    for attempt in range(3):
-        try:
-            from yfinance._http import new_session
-
-            session = new_session()
-            data = yf.download(
-                symbol,
-                start=start_date,
-                end=end_exclusive,
-                auto_adjust=False,
-                progress=False,
-                session=session,
-            )
-            if data is None or data.empty:
-                history = yf.Ticker(symbol, session=session).history(
-                    start=start_date,
-                    end=end_exclusive,
-                    auto_adjust=False,
-                )
-                data = history
-            return _standardize_yahoo_daily(data, ticker)
-        except Exception as exc:
-            last_exc = exc
-            if _yahoo_rate_limited(exc) and attempt < 2:
-                time.sleep(2**attempt)
-                continue
-            break
-
-    if last_exc is not None and _yahoo_rate_limited(last_exc):
-        hosted_note = (
-            " Yahoo often blocks or rate-limits shared cloud IPs on hosted apps; "
-            "try again later or use the local app for Yahoo checks."
-            if is_huggingface_space()
-            else ""
-        )
-        raise RuntimeError(f"Yahoo Finance rate-limited this request.{hosted_note}") from last_exc
-    if last_exc is not None and _yahoo_network_blocked(last_exc):
-        raise RuntimeError(
-            "Yahoo Finance is blocked by the current network/proxy path "
-            "(curl CONNECT tunnel returned 403). Uncheck Yahoo Finance for this "
-            "dashboard query, or use Refinitiv/WRDS as the primary price sources."
-        ) from last_exc
-    if last_exc is not None:
-        raise last_exc
-
-    try:
-        from yfinance._http import HAS_CURL_CFFI
-    except ImportError:
-        HAS_CURL_CFFI = False
-    if not HAS_CURL_CFFI:
-        raise RuntimeError(
-            "Yahoo Finance requests need curl_cffi for browser TLS impersonation. "
-            "Install curl_cffi>=0.15 and restart the app."
-        )
-    raise ValueError(f"Yahoo Finance returned no rows for {ticker}.")
+    return live_data.fetch_yahoo_daily(ticker, start_date, end_date)
 
 
 def compare_crsp_with_yahoo(crsp_daily: pd.DataFrame, yahoo_daily: pd.DataFrame) -> pd.DataFrame:
@@ -820,27 +594,12 @@ def default_live_api_start(days: int = 30) -> pd.Timestamp:
 
 def wrds_price_frame(daily_lookup: pd.DataFrame) -> pd.DataFrame:
     """Convert CRSP daily rows to a common price schema."""
-    if daily_lookup.empty:
-        return pd.DataFrame()
-    data = daily_lookup.copy()
-    data["date"] = pd.to_datetime(data["date"]).dt.normalize()
-    data["close_price"] = data["prc"].abs()
-    data["provider"] = "wrds"
-    keep_cols = [col for col in ["date", "close_price", "vol", "provider", "ticker", "permno"] if col in data.columns]
-    return data[keep_cols].sort_values("date")
+    return live_data.wrds_price_frame(daily_lookup)
 
 
 def yahoo_price_frame(yahoo_daily: pd.DataFrame) -> pd.DataFrame:
     """Convert Yahoo rows to a common price schema."""
-    if yahoo_daily.empty:
-        return pd.DataFrame()
-    data = yahoo_daily.copy()
-    data["close_price"] = data["yahoo_close"]
-    data["provider"] = "yahoo"
-    if "yahoo_volume" in data.columns:
-        data["volume"] = data["yahoo_volume"]
-    keep_cols = [col for col in ["date", "close_price", "volume", "provider"] if col in data.columns]
-    return data[keep_cols].sort_values("date")
+    return live_data.yahoo_price_frame(yahoo_daily)
 
 
 def make_provider_price_chart(price_data: pd.DataFrame, ticker: str, provider: str):
@@ -913,172 +672,25 @@ def run_live_api_query(
     query_refinitiv: bool = True,
     query_wrds: bool = True,
     query_yahoo: bool = True,
+    query_ravenpack: bool = False,
     news_count: int = 50,
     wrds_limit: int = 500,
     latest_crsp_date: pd.Timestamp | None = None,
 ) -> dict[str, object]:
     """Query selected market-data providers in parallel for the same ticker and date range."""
-    clean_ticker = ticker.upper().strip()
-    start_s = to_query_date(start_date)
-    end_s = to_query_date(end_date)
-    providers: dict[str, dict[str, object]] = {
-        "refinitiv": {"status": "skipped", "error": None, "prices": pd.DataFrame(), "news": pd.DataFrame(), "ric": None},
-        "wrds": {"status": "skipped", "error": None, "prices": pd.DataFrame(), "names": pd.DataFrame()},
-        "yahoo": {"status": "skipped", "error": None, "prices": pd.DataFrame()},
-    }
-
-    if query_refinitiv:
-        _bind_refinitiv_helpers()
-        if query_refinitiv_prices is not None and refinitiv_configured(PROJECT_ROOT):
-            import lseg.data as ld  # type: ignore
-
-            from sentiment_ltr.data.news_coverage import build_news_coverage_result
-
-            open_refinitiv_session(PROJECT_ROOT, ld)
-            session_info = get_last_refinitiv_session_info()
-            try:
-                refinitiv_prices, ric = query_refinitiv_prices(
-                    PROJECT_ROOT,
-                    clean_ticker,
-                    start_s,
-                    end_s,
-                    ld_module=ld,
-                )
-                refinitiv_news = pd.DataFrame()
-                news_daily_counts = pd.DataFrame()
-                news_summary: dict[str, object] | None = None
-                news_error = None
-                if news_count > 0:
-                    try:
-                        coverage_news, news_daily_counts, summary_obj, news_ric = build_news_coverage_result(
-                            PROJECT_ROOT,
-                            clean_ticker,
-                            start_s,
-                            end_s,
-                            ld_module=ld,
-                        )
-                        refinitiv_news = coverage_news
-                        news_summary = summary_obj.__dict__
-                        if ric is None:
-                            ric = news_ric
-                    except Exception as exc:
-                        news_error = str(exc)
-                providers["refinitiv"] = {
-                    "status": "ok" if not refinitiv_prices.empty else "empty",
-                    "error": news_error if not refinitiv_prices.empty else "No Refinitiv price history returned.",
-                    "prices": refinitiv_prices,
-                    "news": refinitiv_news,
-                    "news_daily_counts": news_daily_counts,
-                    "news_summary": news_summary,
-                    "ric": ric,
-                    "session_info": session_info,
-                }
-            except Exception as exc:
-                providers["refinitiv"] = {
-                    "status": "failed",
-                    "error": str(exc),
-                    "prices": pd.DataFrame(),
-                    "news": pd.DataFrame(),
-                    "news_daily_counts": pd.DataFrame(),
-                    "news_summary": None,
-                    "ric": None,
-                }
-            finally:
-                try:
-                    ld.close_session()
-                except Exception:
-                    pass
-        else:
-            providers["refinitiv"] = {
-                "status": "unavailable",
-                "error": refinitiv_setup_message(PROJECT_ROOT),
-                "prices": pd.DataFrame(),
-                "news": pd.DataFrame(),
-                "news_daily_counts": pd.DataFrame(),
-                "news_summary": None,
-                "ric": None,
-            }
-
-    if query_wrds:
-        if wrds_credentials_available():
-            wrds_start = pd.Timestamp(start_s)
-            wrds_end = pd.Timestamp(end_s)
-            if latest_crsp_date is not None:
-                crsp_end = min(pd.Timestamp.today().normalize(), pd.Timestamp(latest_crsp_date).normalize())
-                wrds_end = min(wrds_end, crsp_end)
-            if wrds_start <= wrds_end:
-                try:
-                    name_history, daily_lookup = query_wrds_ticker_data(
-                        clean_ticker,
-                        to_query_date(wrds_start),
-                        to_query_date(wrds_end),
-                        int(wrds_limit),
-                    )
-                    wrds_prices = wrds_price_frame(daily_lookup)
-                    providers["wrds"] = {
-                        "status": "ok" if not wrds_prices.empty else "empty",
-                        "error": None if not wrds_prices.empty else "No CRSP rows in the selected date range.",
-                        "prices": wrds_prices,
-                        "names": name_history,
-                        "query_start": wrds_start,
-                        "query_end": wrds_end,
-                    }
-                except Exception as exc:
-                    providers["wrds"] = {
-                        "status": "failed",
-                        "error": str(exc),
-                        "prices": pd.DataFrame(),
-                        "names": pd.DataFrame(),
-                    }
-            else:
-                providers["wrds"] = {
-                    "status": "empty",
-                    "error": "Selected range is entirely after the latest CRSP date available in WRDS.",
-                    "prices": pd.DataFrame(),
-                    "names": pd.DataFrame(),
-                }
-        else:
-            providers["wrds"] = {
-                "status": "unavailable",
-                "error": "WRDS credentials are not configured.",
-                "prices": pd.DataFrame(),
-                "names": pd.DataFrame(),
-            }
-
-    if query_yahoo:
-        try:
-            yahoo_daily = fetch_yahoo_daily(clean_ticker, start_s, end_s)
-            yahoo_prices = yahoo_price_frame(yahoo_daily)
-            providers["yahoo"] = {
-                "status": "ok" if not yahoo_prices.empty else "empty",
-                "error": None if not yahoo_prices.empty else "Yahoo Finance returned no rows.",
-                "prices": yahoo_prices,
-            }
-        except Exception as exc:
-            providers["yahoo"] = {
-                "status": "failed",
-                "error": str(exc),
-                "prices": pd.DataFrame(),
-            }
-
-    price_frames = {
-        provider: result["prices"]
-        for provider, result in providers.items()
-        if isinstance(result.get("prices"), pd.DataFrame) and not result["prices"].empty
-    }
-
-    return {
-        "ticker": clean_ticker,
-        "start_date": start_s,
-        "end_date": end_s,
-        "providers": providers,
-        "price_frames": price_frames,
-        "selected_providers": {
-            "refinitiv": query_refinitiv,
-            "wrds": query_wrds,
-            "yahoo": query_yahoo,
-        },
-    }
+    return live_data.run_ticker_data_query(
+        PROJECT_ROOT,
+        ticker,
+        start_date,
+        end_date,
+        query_refinitiv=query_refinitiv,
+        query_wrds=query_wrds,
+        query_yahoo=query_yahoo,
+        query_ravenpack=query_ravenpack,
+        news_count=news_count,
+        wrds_limit=wrds_limit,
+        latest_crsp_date=latest_crsp_date,
+    )
 
 
 def _provider_status_label(result: dict[str, object]) -> str:
@@ -1592,54 +1204,7 @@ def _pg_sql(db_conn, sql: str) -> pd.DataFrame:
 @st.cache_data(ttl=1800, show_spinner=False)
 def query_ravenpack_articles(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
     """Fetch RavenPack sentiment articles for a ticker from WRDS."""
-    clean_ticker = ticker.upper().strip()
-    db = open_wrds_connection()
-    try:
-        mapping = _pg_sql(db, f"""
-            SELECT DISTINCT rp_entity_id
-            FROM ravenpack_common.wrds_rpa_company_mappings
-            WHERE ticker = '{clean_ticker}'
-        """)
-        if mapping.empty:
-            raise ValueError(f"No RavenPack entity found for {clean_ticker}.")
-        rp_entity_id = mapping["rp_entity_id"].iloc[0]
-
-        frames: list[pd.DataFrame] = []
-        for yr in range(int(start_date[:4]), int(end_date[:4]) + 1):
-            yr_start = max(start_date, f"{yr}-01-01")
-            yr_end   = min(end_date,   f"{yr}-12-31")
-            try:
-                yr_df = _pg_sql(db, f"""
-                    SELECT timestamp_utc, rp_story_id, relevance, event_sentiment_score,
-                           headline, event_text, source_name, topic, "group", "type",
-                           sub_type, news_type, css, nip
-                    FROM ravenpack_dj.rpa_djpr_equities_{yr}
-                    WHERE rp_entity_id = '{rp_entity_id}'
-                      AND rpa_date_utc BETWEEN '{yr_start}' AND '{yr_end}'
-                    ORDER BY timestamp_utc
-                """)
-                if not yr_df.empty:
-                    frames.append(yr_df)
-            except Exception:
-                continue
-    finally:
-        db.close()
-
-    if not frames:
-        return pd.DataFrame()
-
-    articles = pd.concat(frames, ignore_index=True)
-    articles["article_time"]          = pd.to_datetime(articles["timestamp_utc"], utc=True)
-    articles["relevance_score"]       = pd.to_numeric(articles["relevance"], errors="coerce") / 100
-    articles["event_sentiment_score"] = pd.to_numeric(articles["event_sentiment_score"], errors="coerce")
-    articles["sentiment_score"]       = articles["relevance_score"] * articles["event_sentiment_score"]
-    articles["ticker"]                = clean_ticker
-    return (
-        articles
-        .drop_duplicates(subset=["rp_story_id"])
-        .sort_values("article_time")
-        .reset_index(drop=True)
-    )
+    return live_data.query_ravenpack_articles(ticker, start_date, end_date)
 
 
 def make_ravenpack_sentiment_chart(articles: pd.DataFrame, ticker: str):
@@ -2187,8 +1752,6 @@ def render_multi_api_dashboard_tab() -> None:
             except Exception:
                 latest_crsp_date = None
 
-        ravenpack_articles = pd.DataFrame()
-        ravenpack_error = None
         with st.spinner(f"Retrieving dashboard data for {ticker}..."):
             live_result = run_live_api_query(
                 ticker,
@@ -2197,23 +1760,13 @@ def render_multi_api_dashboard_tab() -> None:
                 query_refinitiv=use_refinitiv,
                 query_wrds=use_wrds,
                 query_yahoo=use_yahoo,
+                query_ravenpack=use_ravenpack,
                 news_count=1 if include_refinitiv_news else 0,
                 latest_crsp_date=latest_crsp_date,
             )
-            if use_ravenpack:
-                try:
-                    ravenpack_articles = query_ravenpack_articles(
-                        ticker,
-                        to_query_date(start_date),
-                        to_query_date(end_date),
-                    )
-                except Exception as exc:
-                    ravenpack_error = str(exc)
 
         st.session_state.dashboard_result = {
             "live": live_result,
-            "ravenpack_articles": ravenpack_articles,
-            "ravenpack_error": ravenpack_error,
         }
 
     dashboard_result = st.session_state.get("dashboard_result")
@@ -2222,10 +1775,11 @@ def render_multi_api_dashboard_tab() -> None:
         return
 
     live_result = dashboard_result["live"]
-    ravenpack_articles = dashboard_result.get("ravenpack_articles", pd.DataFrame())
+    ravenpack_result = live_result["providers"].get("ravenpack", {})
+    ravenpack_articles = ravenpack_result.get("articles", pd.DataFrame())
     if not isinstance(ravenpack_articles, pd.DataFrame):
         ravenpack_articles = pd.DataFrame()
-    ravenpack_error = dashboard_result.get("ravenpack_error")
+    ravenpack_error = ravenpack_result.get("error")
     ticker = str(live_result["ticker"])
 
     providers = live_result["providers"]
