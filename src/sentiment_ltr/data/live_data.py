@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -88,8 +89,14 @@ def query_wrds_ticker_data(
     start_date: str,
     end_date: str,
     row_limit: int = 500,
+    permno: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Query CRSP name history and daily stock data for a ticker."""
+    """Query CRSP name history and daily stock data for a ticker.
+
+    When `permno` is supplied the daily query uses PERMNO as the anchor instead
+    of the ticker string, so data for renamed companies (FB→META, TWTR→X, etc.)
+    is returned continuously across all ticker periods.
+    """
     ticker_clean = clean_ticker(ticker)
     if not ticker_clean:
         raise ValueError("Enter a valid ticker.")
@@ -99,26 +106,25 @@ def query_wrds_ticker_data(
 
     db = open_wrds_connection()
     try:
-        names_query = f"""
-        select
-            permno,
-            permco,
-            namedt,
-            nameendt,
-            ticker,
-            comnam,
-            shrcd,
-            exchcd
-        from crsp.msenames
-        where trim(ticker) = '{ticker_clean}'
-          and namedt <= '{end_s}'
-          and nameendt >= '{start_s}'
-        order by namedt, permno
-        """
-        names = db.raw_sql(names_query, date_cols=["namedt", "nameendt"])
-
-        if names.empty:
-            fallback_names_query = f"""
+        if permno is not None:
+            # PERMNO-anchored lookup: get all name records for this company.
+            names_query = f"""
+            select
+                permno,
+                permco,
+                namedt,
+                nameendt,
+                ticker,
+                comnam,
+                shrcd,
+                exchcd
+            from crsp.msenames
+            where permno = {int(permno)}
+            order by namedt
+            """
+            names = db.raw_sql(names_query, date_cols=["namedt", "nameendt"])
+        else:
+            names_query = f"""
             select
                 permno,
                 permco,
@@ -130,43 +136,94 @@ def query_wrds_ticker_data(
                 exchcd
             from crsp.msenames
             where trim(ticker) = '{ticker_clean}'
-            order by nameendt desc, namedt desc
+              and namedt <= '{end_s}'
+              and nameendt >= '{start_s}'
+            order by namedt, permno
             """
-            names = db.raw_sql(fallback_names_query, date_cols=["namedt", "nameendt"])
+            names = db.raw_sql(names_query, date_cols=["namedt", "nameendt"])
+
+            if names.empty:
+                fallback_names_query = f"""
+                select
+                    permno,
+                    permco,
+                    namedt,
+                    nameendt,
+                    ticker,
+                    comnam,
+                    shrcd,
+                    exchcd
+                from crsp.msenames
+                where trim(ticker) = '{ticker_clean}'
+                order by nameendt desc, namedt desc
+                """
+                names = db.raw_sql(fallback_names_query, date_cols=["namedt", "nameendt"])
 
         if names.empty:
             return names, pd.DataFrame()
 
-        permno_sql = ", ".join(str(int(permno)) for permno in sorted(names["permno"].dropna().unique()))
-        daily_query = f"""
-        select
-            d.permno,
-            n.permco,
-            d.date,
-            n.ticker,
-            n.comnam,
-            n.shrcd,
-            n.exchcd,
-            d.openprc,
-            d.prc,
-            d.ret,
-            d.retx,
-            d.vol,
-            d.shrout,
-            d.cfacpr,
-            d.cfacshr,
-            d.bidlo,
-            d.askhi
-        from crsp.dsf as d
-        join crsp.msenames as n
-          on d.permno = n.permno
-         and d.date between n.namedt and n.nameendt
-        where d.date between '{start_s}' and '{end_s}'
-          and d.permno in ({permno_sql})
-          and trim(n.ticker) = '{ticker_clean}'
-        order by d.date desc, d.permno
-        limit {int(row_limit)}
-        """
+        permno_sql = ", ".join(str(int(p)) for p in sorted(names["permno"].dropna().unique()))
+
+        if permno is not None:
+            # No ticker filter — follow the company across all its ticker names.
+            daily_query = f"""
+            select
+                d.permno,
+                n.permco,
+                d.date,
+                n.ticker,
+                n.comnam,
+                n.shrcd,
+                n.exchcd,
+                d.openprc,
+                d.prc,
+                d.ret,
+                d.retx,
+                d.vol,
+                d.shrout,
+                d.cfacpr,
+                d.cfacshr,
+                d.bidlo,
+                d.askhi
+            from crsp.dsf as d
+            join crsp.msenames as n
+              on d.permno = n.permno
+             and d.date between n.namedt and n.nameendt
+            where d.date between '{start_s}' and '{end_s}'
+              and d.permno in ({permno_sql})
+            order by d.date desc, d.permno
+            limit {int(row_limit)}
+            """
+        else:
+            daily_query = f"""
+            select
+                d.permno,
+                n.permco,
+                d.date,
+                n.ticker,
+                n.comnam,
+                n.shrcd,
+                n.exchcd,
+                d.openprc,
+                d.prc,
+                d.ret,
+                d.retx,
+                d.vol,
+                d.shrout,
+                d.cfacpr,
+                d.cfacshr,
+                d.bidlo,
+                d.askhi
+            from crsp.dsf as d
+            join crsp.msenames as n
+              on d.permno = n.permno
+             and d.date between n.namedt and n.nameendt
+            where d.date between '{start_s}' and '{end_s}'
+              and d.permno in ({permno_sql})
+              and trim(n.ticker) = '{ticker_clean}'
+            order by d.date desc, d.permno
+            limit {int(row_limit)}
+            """
         daily = db.raw_sql(daily_query, date_cols=["date"])
     finally:
         db.close()
@@ -207,12 +264,24 @@ def get_latest_crsp_date() -> pd.Timestamp:
 
 
 def wrds_price_frame(daily_lookup: pd.DataFrame) -> pd.DataFrame:
-    """Convert CRSP daily rows to a common price schema."""
+    """Convert CRSP daily rows to a common price schema.
+
+    Applies the cumulative price-adjustment factor (cfacpr) so that CRSP prices
+    are split-adjusted and directly comparable to Yahoo Finance's Close prices.
+    cfacpr = 1.0 for the most-recent period; for historical periods it equals the
+    product of all subsequent split factors (e.g. 28 = 7×4 for AAPL in 2014,
+    reflecting the 7:1 split in June 2014 and the 4:1 split in August 2020).
+    """
     if daily_lookup.empty:
         return pd.DataFrame()
     data = daily_lookup.copy()
     data["date"] = pd.to_datetime(data["date"]).dt.normalize()
-    data["close_price"] = data["prc"].abs()
+    raw_price = data["prc"].abs()
+    if "cfacpr" in data.columns:
+        factor = data["cfacpr"].abs().replace(0, float("nan"))
+        data["close_price"] = (raw_price / factor).where(factor.notna(), raw_price)
+    else:
+        data["close_price"] = raw_price
     data["provider"] = "wrds"
     keep_cols = [col for col in ["date", "close_price", "vol", "provider", "ticker", "permno"] if col in data.columns]
     return data[keep_cols].sort_values("date")
@@ -281,6 +350,33 @@ def _lookup_current_crsp_ticker(permno: int) -> str | None:
         """)
         if not row.empty:
             return str(row["ticker"].iloc[0]).strip().upper()
+    except Exception:
+        pass
+    finally:
+        db.close()
+    return None
+
+
+def _lookup_permno_for_ticker(ticker: str) -> int | None:
+    """Return the most recent PERMNO for a ticker symbol from crsp.msenames, or None.
+
+    Used so the Data Explorer can pass a permno to providers that support the
+    renamed-ticker fallback (Yahoo, Refinitiv) even when the user only supplies a
+    historical ticker like 'FB'.
+    """
+    if not wrds_credentials_available():
+        return None
+    db = open_wrds_connection()
+    try:
+        row = _pg_sql(db, f"""
+            SELECT permno
+            FROM crsp.msenames
+            WHERE trim(ticker) = '{ticker.upper()}'
+            ORDER BY nameendt DESC NULLS FIRST
+            LIMIT 1
+        """)
+        if not row.empty:
+            return int(row["permno"].iloc[0])
     except Exception:
         pass
     finally:
@@ -578,6 +674,23 @@ def run_ticker_data_query(
     ticker_clean = ticker.upper().strip()
     start_s = to_query_date(start_date)
     end_s = to_query_date(end_date)
+
+    # Resolve PERMNO and the authoritative current ticker once.
+    # Using the current ticker directly (rather than try-then-fallback) avoids the
+    # problem where a new company has since taken over the old ticker symbol (e.g. a
+    # new "FB" appeared after Meta moved to META, so yfinance now returns that wrong
+    # company's data instead of Meta's).
+    permno: int | None = _lookup_permno_for_ticker(ticker_clean)
+    current_ticker: str = ticker_clean  # default: no rename detected
+    if permno is not None:
+        resolved = _lookup_current_crsp_ticker(permno)
+        if resolved and resolved != ticker_clean:
+            current_ticker = resolved
+            logging.info(
+                "[%s] Ticker rename detected via CRSP: using %s for Yahoo/Refinitiv queries",
+                ticker_clean, current_ticker,
+            )
+
     providers: dict[str, dict[str, object]] = {
         "refinitiv": {"status": "skipped", "error": None, "prices": pd.DataFrame(), "news": pd.DataFrame(), "ric": None},
         "wrds": {"status": "skipped", "error": None, "prices": pd.DataFrame(), "names": pd.DataFrame()},
@@ -600,9 +713,11 @@ def run_ticker_data_query(
                 open_refinitiv_session(project_root, ld)
                 session_info = get_last_refinitiv_session_info()
                 try:
+                    # Use current_ticker directly — if the company was renamed
+                    # (FB→META) we already resolved the right ticker above.
                     refinitiv_prices, ric = query_refinitiv_prices(
                         project_root,
-                        ticker_clean,
+                        current_ticker,
                         start_s,
                         end_s,
                         ld_module=ld,
@@ -615,7 +730,7 @@ def run_ticker_data_query(
                         try:
                             coverage_news, news_daily_counts, summary_obj, news_ric = build_news_coverage_result(
                                 project_root,
-                                ticker_clean,
+                                current_ticker,
                                 start_s,
                                 end_s,
                                 ld_module=ld,
@@ -676,6 +791,7 @@ def run_ticker_data_query(
                         to_query_date(wrds_start),
                         to_query_date(wrds_end),
                         int(wrds_limit),
+                        permno=permno,
                     )
                     wrds_prices = wrds_price_frame(daily_lookup)
                     providers["wrds"] = {
@@ -710,7 +826,9 @@ def run_ticker_data_query(
 
     if query_yahoo:
         try:
-            yahoo_daily = fetch_yahoo_daily(ticker_clean, start_s, end_s)
+            # Use the current ticker directly — avoids downloading data for a
+            # different company that may have taken over the old ticker symbol.
+            yahoo_daily = fetch_yahoo_daily(current_ticker, start_s, end_s)
             yahoo_prices = yahoo_price_frame(yahoo_daily)
             providers["yahoo"] = {
                 "status": "ok" if not yahoo_prices.empty else "empty",

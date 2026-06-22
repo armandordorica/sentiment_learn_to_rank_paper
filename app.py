@@ -633,14 +633,34 @@ def make_provider_price_chart(price_data: pd.DataFrame, ticker: str, provider: s
 
 
 def make_combined_price_chart(price_frames: dict[str, pd.DataFrame], ticker: str):
-    """Overlay close prices from multiple providers on one chart."""
+    """Overlay split-adjusted close prices from CRSP and Yahoo on one chart.
+
+    Refinitiv is excluded here because it returns unadjusted prices — its
+    pre-split values are orders-of-magnitude larger and would compress CRSP/Yahoo
+    to invisible flat lines.  Refinitiv's own panel below shows its absolute prices.
+
+    Both CRSP (cfacpr-adjusted) and Yahoo (retroactively split-adjusted) should
+    overlay very closely, making this chart a good cross-provider sanity check.
+    """
+    # Exclude Refinitiv from the combined adjusted-price chart.
+    adjusted_providers = {k: v for k, v in price_frames.items() if k != "refinitiv"}
     parts: list[pd.DataFrame] = []
-    for provider, frame in price_frames.items():
+    for provider, frame in adjusted_providers.items():
         if frame.empty:
             continue
-        part = frame[["date", "close_price"]].copy()
+        part = frame[["date", "close_price"]].copy().sort_values("date")
         part["provider"] = provider.title()
         parts.append(part)
+
+    if not parts:
+        # Fallback: show all providers if adjusted-only set is empty.
+        for provider, frame in price_frames.items():
+            if frame.empty:
+                continue
+            part = frame[["date", "close_price"]].copy().sort_values("date")
+            part["provider"] = provider.title()
+            parts.append(part)
+
     if not parts:
         raise ValueError("No provider price rows available to plot.")
 
@@ -650,12 +670,12 @@ def make_combined_price_chart(price_frames: dict[str, pd.DataFrame], ticker: str
         x="date",
         y="close_price",
         color="provider",
-        title=f"Provider Close Price Comparison For {ticker.upper()}",
-        labels={"date": "Date", "close_price": "Close price, USD", "provider": "Provider"},
-        hover_data={"date": "|%Y-%m-%d", "close_price": ":,.2f"},
+        title=f"CRSP vs Yahoo Split-Adjusted Close Price — {ticker.upper()}",
+        labels={"date": "Date", "close_price": "Split-adjusted close price (USD)", "provider": "Provider"},
+        hover_data={"date": "|%Y-%m-%d", "close_price": ":,.4f"},
     )
-    fig.update_traces(mode="lines+markers", marker={"size": 4})
-    fig.update_layout(height=550, hovermode="closest")
+    fig.update_traces(mode="lines", line={"width": 2})
+    fig.update_layout(height=500, hovermode="x unified")
     return fig
 
 
@@ -1108,7 +1128,7 @@ def render_live_api_test_tab() -> None:
         if column.button(preset_ticker, use_container_width=True):
             st.session_state.api_test_ticker = preset_ticker
 
-    quick_date_cols = st.columns(3)
+    quick_date_cols = st.columns(4)
     if quick_date_cols[0].button("Last 7 days"):
         st.session_state.api_start_date = (default_live_api_end() - pd.Timedelta(days=7)).date()
         st.session_state.api_end_date = default_live_api_end().date()
@@ -1118,13 +1138,15 @@ def render_live_api_test_tab() -> None:
     if quick_date_cols[2].button("Paper window"):
         st.session_state.api_start_date = pd.Timestamp(DEFAULT_LOOKUP_START).date()
         st.session_state.api_end_date = pd.Timestamp(DEFAULT_LOOKUP_END).date()
+    if quick_date_cols[3].button("End → Today"):
+        st.session_state.api_end_date = default_live_api_end().date()
 
     if "api_test_ticker" not in st.session_state:
         st.session_state.api_test_ticker = "AAPL"
     if "api_start_date" not in st.session_state:
-        st.session_state.api_start_date = default_live_api_start(30).date()
+        st.session_state.api_start_date = pd.Timestamp(DEFAULT_LOOKUP_START).date()
     if "api_end_date" not in st.session_state:
-        st.session_state.api_end_date = default_live_api_end().date()
+        st.session_state.api_end_date = pd.Timestamp(DEFAULT_LOOKUP_END).date()
 
     ric_hint = ", ".join(ticker_to_ric_candidates(st.session_state.api_test_ticker)[:2])
 
@@ -1139,11 +1161,13 @@ def render_live_api_test_tab() -> None:
         start_date = control_cols[1].date_input(
             "Start date",
             key="api_start_date",
+            min_value=pd.Timestamp("1990-01-01").date(),
             max_value=default_live_api_end().date(),
         )
         end_date = control_cols[2].date_input(
             "End date",
             key="api_end_date",
+            min_value=pd.Timestamp("1990-01-01").date(),
             max_value=default_live_api_end().date(),
         )
         st.caption(
@@ -1242,7 +1266,6 @@ def make_ravenpack_sentiment_chart(articles: pd.DataFrame, ticker: str):
             "article_time": False,
             "_orig_idx": False,
             "date_str": True,
-            "headline": True,
             "relevance_score": ":.2f",
             "event_sentiment_score": ":.3f",
             "sentiment_score": ":.3f",
@@ -1702,14 +1725,24 @@ def render_multi_api_dashboard_tab() -> None:
     if "dashboard_ticker" not in st.session_state:
         st.session_state.dashboard_ticker = "AAPL"
     if "dashboard_start_date" not in st.session_state:
-        st.session_state.dashboard_start_date = default_live_api_start(30).date()
+        st.session_state.dashboard_start_date = pd.Timestamp(DEFAULT_LOOKUP_START).date()
     if "dashboard_end_date" not in st.session_state:
-        st.session_state.dashboard_end_date = default_live_api_end().date()
+        st.session_state.dashboard_end_date = pd.Timestamp(DEFAULT_LOOKUP_END).date()
 
     preset_cols = st.columns(len(QUICK_TEST_TICKERS))
     for column, preset_ticker in zip(preset_cols, QUICK_TEST_TICKERS):
         if column.button(preset_ticker, key=f"dashboard_ticker_{preset_ticker}", use_container_width=True):
             st.session_state.dashboard_ticker = preset_ticker
+
+    dash_date_cols = st.columns(3)
+    if dash_date_cols[0].button("Paper window", key="dash_paper_window"):
+        st.session_state.dashboard_start_date = pd.Timestamp(DEFAULT_LOOKUP_START).date()
+        st.session_state.dashboard_end_date = pd.Timestamp(DEFAULT_LOOKUP_END).date()
+    if dash_date_cols[1].button("End → Today", key="dash_end_today"):
+        st.session_state.dashboard_end_date = default_live_api_end().date()
+    if dash_date_cols[2].button("Full history (1990 → today)", key="dash_full_history"):
+        st.session_state.dashboard_start_date = pd.Timestamp("1990-01-01").date()
+        st.session_state.dashboard_end_date = default_live_api_end().date()
 
     with st.form("multi_api_dashboard_query", clear_on_submit=False):
         control_cols = st.columns([1, 1, 1])
@@ -1717,11 +1750,13 @@ def render_multi_api_dashboard_tab() -> None:
         start_date = control_cols[1].date_input(
             "Start date",
             key="dashboard_start_date",
+            min_value=pd.Timestamp("1990-01-01").date(),
             max_value=default_live_api_end().date(),
         )
         end_date = control_cols[2].date_input(
             "End date",
             key="dashboard_end_date",
+            min_value=pd.Timestamp("1990-01-01").date(),
             max_value=default_live_api_end().date(),
         )
 
@@ -1765,6 +1800,7 @@ def render_multi_api_dashboard_tab() -> None:
                 latest_crsp_date = None
 
         with st.spinner(f"Retrieving dashboard data for {ticker}..."):
+            # 10 000 rows ≈ 40 years of daily data — enough for any date window.
             live_result = run_live_api_query(
                 ticker,
                 to_query_date(start_date),
@@ -1775,6 +1811,7 @@ def render_multi_api_dashboard_tab() -> None:
                 query_ravenpack=use_ravenpack,
                 news_count=1 if include_refinitiv_news else 0,
                 latest_crsp_date=latest_crsp_date,
+                wrds_limit=10_000,
             )
 
         st.session_state.dashboard_result = {
@@ -1814,8 +1851,17 @@ def render_multi_api_dashboard_tab() -> None:
     ])
 
     with pane_overview:
+        # Debug: show provider row counts so we can diagnose empty charts.
+        with st.expander("🔍 Provider debug", expanded=not bool(live_result["price_frames"])):
+            for pname, pres in live_result["providers"].items():
+                prices = pres.get("prices")
+                n = len(prices) if isinstance(prices, pd.DataFrame) else "—"
+                err = pres.get("error") or ""
+                st.caption(f"**{pname}** status={pres.get('status')} rows={n} err={str(err)[:120]}")
         if live_result["price_frames"]:
             render_dashboard_price_pane(live_result, key_prefix="dashboard_overview")
+        else:
+            st.warning("No provider returned price data for this ticker/date range. Check the debug expander above.")
         if not ravenpack_articles.empty:
             st.markdown("#### Sentiment snapshot")
             st.plotly_chart(
