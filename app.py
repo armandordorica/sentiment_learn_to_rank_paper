@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -160,6 +163,15 @@ DEFAULT_MONTHLY_PRICE_PATHS = [
 DEFAULT_LOOKUP_START = "2003-01-01"
 DEFAULT_LOOKUP_END = "2014-12-31"
 QUICK_TEST_TICKERS = ["AAPL", "MSFT", "SPY", "GOOGL", "TSLA"]
+
+TOP1K_OUTPUT_DIR    = PROJECT_ROOT / "data" / "raw" / "data_explorer_top1k"
+TOP1K_BY_TICKER_DIR = TOP1K_OUTPUT_DIR / "by_ticker"
+TOP1K_COMBINED_DIR  = TOP1K_OUTPUT_DIR / "combined"
+BATCH_PROGRESS_CSV  = TOP1K_OUTPUT_DIR / "batch_progress.csv"
+BATCH_STATUS_FILE   = TOP1K_OUTPUT_DIR / "batch_status.json"
+BATCH_PID_FILE      = TOP1K_OUTPUT_DIR / "batch.pid"
+BATCH_RUNNER_SCRIPT = PROJECT_ROOT / "scripts" / "run_batch_pipeline.py"
+TOP1K_UNIVERSE_PATH = PROJECT_ROOT / "app_data" / "crsp_top_volume_universe.csv"
 DATE_RANGE_PRESETS = {
     "Last 7 calendar days": {"mode": "calendar", "days": 7},
     "Last 30 calendar days": {"mode": "calendar", "days": 30},
@@ -1837,18 +1849,500 @@ st.caption(
     "Unified ticker/date queries for Refinitiv, WRDS/CRSP, Yahoo, and RavenPack, plus paper-replication validation charts."
 )
 
+# ── Batch Pipeline helpers ────────────────────────────────────────────────────
+
+
+def _batch_pid_running() -> int | None:
+    """Return the PID from batch.pid if the process is still alive, else None."""
+    if not BATCH_PID_FILE.exists():
+        return None
+    try:
+        pid = int(BATCH_PID_FILE.read_text(encoding="utf-8").strip())
+        os.kill(pid, 0)  # signal 0 = existence check only
+        return pid
+    except (ValueError, OSError):
+        return None
+
+
+def _read_batch_status() -> dict:
+    if not BATCH_STATUS_FILE.exists():
+        return {}
+    try:
+        return json.loads(BATCH_STATUS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _read_batch_progress() -> pd.DataFrame | None:
+    if not BATCH_PROGRESS_CSV.exists():
+        return None
+    try:
+        return pd.read_csv(BATCH_PROGRESS_CSV)
+    except Exception:
+        return None
+
+
+def _load_all_manifests() -> pd.DataFrame:
+    """Walk by_ticker/ dirs and collect manifest data into a DataFrame."""
+    rows = []
+    if not TOP1K_BY_TICKER_DIR.exists():
+        return pd.DataFrame()
+    for mfile in sorted(TOP1K_BY_TICKER_DIR.glob("rank_*/manifest.json")):
+        try:
+            m = json.loads(mfile.read_text(encoding="utf-8"))
+            provider_map: dict[str, str] = {}
+            provider_rows_map: dict[str, int] = {}
+            for ps in m.get("provider_status", []):
+                pname = ps.get("provider", "")
+                provider_map[pname] = ps.get("status", "")
+                provider_rows_map[pname] = int(ps.get("rows") or 0)
+            rows.append({
+                "rank":       m.get("volume_rank"),
+                "ticker":     m.get("ticker"),
+                "company":    m.get("company_name", ""),
+                "status":     m.get("status"),
+                "ok":         m.get("ok_provider_count", 0),
+                "fail":       m.get("failed_provider_count", 0),
+                "wrds_status":       provider_map.get("wrds", ""),
+                "yahoo_status":      provider_map.get("yahoo", ""),
+                "ravenpack_status":  provider_map.get("ravenpack", ""),
+                "refinitiv_status":  provider_map.get("refinitiv", ""),
+                "wrds_rows":         provider_rows_map.get("wrds", 0),
+                "yahoo_rows":        provider_rows_map.get("yahoo", 0),
+                "ravenpack_rows":    provider_rows_map.get("ravenpack", 0),
+                "refinitiv_rows":    provider_rows_map.get("refinitiv", 0),
+                "created_at": m.get("created_at", ""),
+            })
+        except Exception:
+            pass
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values("rank").reset_index(drop=True)
+
+
+def _launch_batch(
+    start: str, end: str,
+    start_rank: int, max_tickers: int | None,
+    force_rerun: bool, rerun_failed: bool, sleep_sec: float,
+    stop_after: int, provider_timeout: float,
+    use_wrds: bool, use_yahoo: bool, use_ravenpack: bool, use_refinitiv: bool,
+    combined_parquets: bool,
+) -> subprocess.Popen:
+    cmd = [sys.executable, str(BATCH_RUNNER_SCRIPT),
+           "--start", start, "--end", end,
+           "--start-rank", str(start_rank),
+           "--sleep", str(sleep_sec),
+           "--stop-after-failures", str(stop_after),
+           "--provider-timeout", str(provider_timeout)]
+    if max_tickers is not None:
+        cmd += ["--max-tickers", str(max_tickers)]
+    if force_rerun:
+        cmd.append("--force-rerun")
+    if rerun_failed:
+        cmd.append("--rerun-failed")
+    if not use_wrds:
+        cmd.append("--no-wrds")
+    if not use_yahoo:
+        cmd.append("--no-yahoo")
+    if not use_ravenpack:
+        cmd.append("--no-ravenpack")
+    if use_refinitiv:
+        cmd.append("--refinitiv")
+    if not combined_parquets:
+        cmd.append("--no-combined-parquets")
+    log_path = TOP1K_OUTPUT_DIR / "batch_runner.log"
+    TOP1K_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    log_file = open(log_path, "a", encoding="utf-8")  # noqa: SIM115
+    log_file.write(f"\n\n=== Run started at {datetime.now(timezone.utc).isoformat()} ===\n")
+    log_file.flush()
+    return subprocess.Popen(cmd, stdout=log_file, stderr=log_file, start_new_session=True)
+
+
+def _status_color(status: str) -> str:
+    return {
+        "complete":       "🟢",
+        "partial":        "🟡",
+        "failed":         "🔴",
+        "error":          "🔴",
+        "skipped_cached": "⚪",
+    }.get(status, "⬜")
+
+
+def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI function
+    # Force Refinitiv off by default so stale session state never auto-enables it
+    if "batch_use_refinitiv" not in st.session_state:
+        st.session_state["batch_use_refinitiv"] = False
+
+    st.header("Top-1,000 Batch Pipeline")
+    st.caption(
+        "Pull and cache WRDS/CRSP, Yahoo, and RavenPack data for every ticker in the "
+        "CRSP top-volume universe. Each ticker is cached immediately; reruns skip "
+        "completed tickers automatically."
+    )
+
+    # ── Live status banner ────────────────────────────────────────────────────
+    pid = _batch_pid_running()
+    batch_status = _read_batch_status()
+    is_running = pid is not None
+
+    if is_running:
+        current  = batch_status.get("current_ticker", "starting…")
+        rank     = batch_status.get("current_rank",   "—")
+        step     = batch_status.get("current_step",   "")
+        done     = batch_status.get("done", 0) or 0
+        total    = batch_status.get("total") or 0
+        elapsed  = batch_status.get("elapsed_s")
+
+        elapsed_str = f"  |  {elapsed}s on this ticker" if elapsed else ""
+        step_str    = f"  —  *{step}*" if step else ""
+        st.success(
+            f"**Batch running** (PID {pid}){step_str}\n\n"
+            f"Now on: **{current}** (rank {rank}){elapsed_str}  "
+            f"|  **{done}** of **{total}** done"
+        )
+
+        # Progress bar driven purely by batch_status.json
+        if total > 0:
+            frac = min(1.0, done / total)
+            st.progress(frac, text=f"{done:,} / {total:,} tickers  ({frac*100:.1f}%)")
+        else:
+            st.progress(0.0, text="Starting…")
+
+        # Live log tail — always visible while running
+        log_path = TOP1K_OUTPUT_DIR / "batch_runner.log"
+        if log_path.exists():
+            try:
+                lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+                st.code("\n".join(lines[-25:]), language=None)
+            except Exception:
+                pass
+        else:
+            st.info("Log file not yet created — the batch process is still starting up.")
+
+    elif batch_status:
+        final_status = batch_status.get("status", "unknown")
+        done  = batch_status.get("done", 0) or 0
+        total = batch_status.get("total", 0) or 0
+        updated = batch_status.get("updated_at", "")
+        if final_status == "complete":
+            st.success(f"Last batch **completed** — {done:,} tickers — {updated}")
+            if total > 0:
+                st.progress(1.0, text=f"{done:,} / {total:,} tickers")
+        elif final_status == "stopped_failures":
+            st.error(f"Last batch **stopped** (too many consecutive failures) — {batch_status.get('error', '')} — {updated}")
+            if total > 0:
+                st.progress(min(1.0, done / total), text=f"{done:,} / {total:,} tickers before stop")
+        else:
+            st.info(f"Batch status: **{final_status}** — {updated}")
+    else:
+        st.info("No batch has been run yet. Use the configuration below to launch one.")
+
+    # ── Configuration form ────────────────────────────────────────────────────
+    with st.expander("⚙️  Configuration", expanded=not is_running):
+        with st.form("batch_config_form"):
+            date_cols = st.columns(2)
+            start_date = date_cols[0].text_input("Start date", value="2003-01-01", key="batch_start")
+            end_date   = date_cols[1].text_input("End date",   value="2014-12-31", key="batch_end")
+
+            rank_cols = st.columns(3)
+            start_rank = rank_cols[0].number_input("Start rank", min_value=1, max_value=999, value=1, step=1, key="batch_start_rank")
+            max_tickers_input = rank_cols[1].text_input(
+                "Max tickers (blank = all)", value="", key="batch_max_tickers",
+                help="Leave blank to run all tickers from start rank onward. Enter a number for a smoke test."
+            )
+            sleep_sec = rank_cols[2].number_input("Sleep between tickers (s)", min_value=0.0, max_value=10.0, value=0.25, step=0.05, key="batch_sleep")
+
+            timeout_cols = st.columns(2)
+            stop_after = timeout_cols[0].number_input(
+                "Stop after N consecutive failures", min_value=1, max_value=200, value=25, step=1, key="batch_stop_after"
+            )
+            provider_timeout = timeout_cols[1].number_input(
+                "Provider timeout (s)", min_value=30, max_value=1800, value=300, step=30,
+                key="batch_provider_timeout",
+                help="Max seconds to wait for a single provider (WRDS/Yahoo/RavenPack) before skipping it. Default 300s = 5 min.",
+            )
+
+            st.markdown("**Providers**")
+            prov_cols = st.columns(4)
+            use_wrds       = prov_cols[0].checkbox("WRDS/CRSP",      value=wrds_credentials_available(), key="batch_use_wrds")
+            use_yahoo      = prov_cols[1].checkbox("Yahoo Finance",   value=True,                         key="batch_use_yahoo")
+            use_ravenpack  = prov_cols[2].checkbox("RavenPack",       value=wrds_credentials_available(), key="batch_use_ravenpack")
+            use_refinitiv  = prov_cols[3].checkbox(
+                "Refinitiv",
+                value=False,  # off by default — news scope may not be available even with a config file
+                key="batch_use_refinitiv",
+                help="Only enable if your LSEG account has the news/prices scope. Leave off for WRDS+Yahoo+RavenPack only.",
+            )
+
+            opt_cols = st.columns(3)
+            force_rerun       = opt_cols[0].checkbox("Force rerun (ignore cache)", value=False, key="batch_force_rerun")
+            rerun_failed      = opt_cols[1].checkbox("Retry failed tickers",       value=True,  key="batch_rerun_failed")
+            combined_parquets = opt_cols[2].checkbox("Write combined parquets",    value=True,  key="batch_combined")
+
+            submitted = st.form_submit_button(
+                "🚀  Launch Batch" if not is_running else "⚠️  Batch already running",
+                type="primary",
+                disabled=is_running,
+            )
+
+        if submitted and not is_running:
+            max_tickers = int(max_tickers_input) if max_tickers_input.strip().isdigit() else None
+            _launch_batch(
+                start=start_date, end=end_date,
+                start_rank=int(start_rank), max_tickers=max_tickers,
+                force_rerun=force_rerun, rerun_failed=rerun_failed,
+                sleep_sec=float(sleep_sec), stop_after=int(stop_after),
+                provider_timeout=float(provider_timeout),
+                use_wrds=use_wrds, use_yahoo=use_yahoo,
+                use_ravenpack=use_ravenpack, use_refinitiv=use_refinitiv,
+                combined_parquets=combined_parquets,
+            )
+            time.sleep(1.5)
+            st.rerun()
+
+    # ── Stop / refresh controls ───────────────────────────────────────────────
+    ctrl_cols = st.columns([1, 1, 4])
+    if is_running:
+        if ctrl_cols[0].button("🛑  Stop Batch", type="secondary"):
+            try:
+                import signal
+                os.kill(pid, signal.SIGTERM)
+                time.sleep(0.5)
+                BATCH_PID_FILE.unlink(missing_ok=True)
+                st.warning(f"Sent SIGTERM to PID {pid}. Batch will stop after the current ticker finishes.")
+            except OSError as exc:
+                st.error(f"Could not stop process {pid}: {exc}")
+            time.sleep(1)
+            st.rerun()
+    if ctrl_cols[1].button("🔄  Refresh now"):
+        st.rerun()
+    auto_refresh = ctrl_cols[2].checkbox(
+        "Auto-refresh every 5 s", value=is_running, key="batch_auto_refresh"
+    )
+
+    st.divider()
+
+    # ── Read progress data ────────────────────────────────────────────────────
+    progress_df = _read_batch_progress()
+    manifests_df = _load_all_manifests()
+
+    # ── Overall progress metrics ──────────────────────────────────────────────
+    if progress_df is not None and not progress_df.empty:
+        total_n    = len(progress_df)
+        complete_n = int((progress_df["status"] == "complete").sum())
+        partial_n  = int((progress_df["status"] == "partial").sum())
+        failed_n   = int(progress_df["status"].isin(["failed", "error"]).sum())
+        skipped_n  = int((progress_df["status"] == "skipped_cached").sum())
+        pending_n  = max(0, (batch_status.get("total") or 0) - total_n)
+
+        m_cols = st.columns(6)
+        m_cols[0].metric("Processed",    f"{total_n:,}")
+        m_cols[1].metric("🟢 Complete",  f"{complete_n:,}")
+        m_cols[2].metric("🟡 Partial",   f"{partial_n:,}")
+        m_cols[3].metric("🔴 Failed",    f"{failed_n:,}")
+        m_cols[4].metric("⚪ Skipped",   f"{skipped_n:,}")
+        m_cols[5].metric("⏳ Remaining", f"{pending_n:,}" if batch_status.get("total") else "—")
+    elif not is_running:
+        st.info("No batch progress recorded yet. Configure and launch a batch above.")
+
+    st.divider()
+
+    # ── Per-ticker progress table ─────────────────────────────────────────────
+    st.subheader("Per-Ticker Status")
+
+    if not manifests_df.empty:
+        # Filter controls
+        filter_cols = st.columns([2, 1, 1, 1])
+        status_filter = filter_cols[0].multiselect(
+            "Filter by status",
+            options=["complete", "partial", "failed", "error"],
+            default=[],
+            key="batch_status_filter",
+            placeholder="All statuses",
+        )
+        show_ticker = filter_cols[1].text_input("Filter ticker", value="", key="batch_ticker_filter").strip().upper()
+        show_only_failed_providers = filter_cols[2].checkbox("Only show provider failures", key="batch_prov_fail_filter")
+
+        view_df = manifests_df.copy()
+        if status_filter:
+            view_df = view_df[view_df["status"].isin(status_filter)]
+        if show_ticker:
+            view_df = view_df[view_df["ticker"].str.upper().str.contains(show_ticker)]
+        if show_only_failed_providers:
+            view_df = view_df[view_df["fail"] > 0]
+
+        # Build display table
+        display = view_df[[
+            "rank", "ticker", "company", "status",
+            "wrds_status", "wrds_rows",
+            "yahoo_status", "yahoo_rows",
+            "ravenpack_status", "ravenpack_rows",
+            "refinitiv_status", "refinitiv_rows",
+            "created_at",
+        ]].copy()
+        display.columns = [
+            "Rank", "Ticker", "Company", "Status",
+            "WRDS", "WRDS rows",
+            "Yahoo", "Yahoo rows",
+            "RavenPack", "RP rows",
+            "Refinitiv", "RF rows",
+            "Cached at",
+        ]
+        display["Status"] = display["Status"].apply(lambda s: f"{_status_color(s)} {s}")
+        for col in ["WRDS", "Yahoo", "RavenPack", "Refinitiv"]:
+            display[col] = display[col].apply(lambda s: ("✅" if s == "ok" else ("❌" if s == "failed" else ("—" if not s else s))))
+
+        st.dataframe(display, use_container_width=True, height=480)
+        st.caption(f"Showing {len(view_df):,} of {len(manifests_df):,} cached tickers")
+
+        # ── Ticker detail expander ────────────────────────────────────────────
+        st.subheader("Ticker Detail")
+        ticker_options = sorted(manifests_df["ticker"].dropna().unique().tolist())
+        selected_detail = st.selectbox("Select ticker for detail", options=[""] + ticker_options, key="batch_detail_ticker")
+        if selected_detail:
+            row = manifests_df[manifests_df["ticker"] == selected_detail]
+            if not row.empty:
+                r = row.iloc[0]
+                rank_dir = None
+                slug = "".join(ch if ch.isalnum() else "_" for ch in selected_detail.upper().strip())
+                for d in TOP1K_BY_TICKER_DIR.glob(f"rank_{int(r['rank']):04d}_{slug}"):
+                    rank_dir = d
+                    break
+
+                d_cols = st.columns(4)
+                d_cols[0].metric("Rank",    r["rank"])
+                d_cols[1].metric("Ticker",  r["ticker"])
+                d_cols[2].metric("Status",  r["status"])
+                d_cols[3].metric("OK / Fail providers", f"{int(r['ok'])} / {int(r['fail'])}")
+                st.caption(f"Company: {r['company']}   |   Cached: {r['created_at']}")
+
+                # Per-provider detail table
+                prov_rows = []
+                for pname in ["wrds", "yahoo", "ravenpack", "refinitiv"]:
+                    prov_rows.append({
+                        "Provider":  pname,
+                        "Status":    r[f"{pname}_status"] or "—",
+                        "Rows":      int(r[f"{pname}_rows"]) if r[f"{pname}_rows"] else 0,
+                    })
+                st.dataframe(pd.DataFrame(prov_rows), use_container_width=True, hide_index=True)
+
+                # Show output files
+                if rank_dir and (rank_dir / "manifest.json").exists():
+                    try:
+                        full_manifest = json.loads((rank_dir / "manifest.json").read_text(encoding="utf-8"))
+                        outputs = full_manifest.get("outputs", {})
+                        if outputs:
+                            st.markdown("**Cached files**")
+                            for key, path in outputs.items():
+                                st.code(path)
+                    except Exception:
+                        pass
+    elif progress_df is not None:
+        st.info("Progress CSV exists but no manifest files found yet — the batch may still be on the first few tickers.")
+    else:
+        st.info("No ticker data cached yet.")
+
+    # ── Full log (collapsed) ──────────────────────────────────────────────────
+    log_path = TOP1K_OUTPUT_DIR / "batch_runner.log"
+    if log_path.exists() and not is_running:
+        with st.expander("📄  Full batch log"):
+            try:
+                lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+                st.code("\n".join(lines[-100:]), language=None)
+            except Exception as exc:
+                st.warning(f"Could not read log: {exc}")
+
+    # ── Storage summary ───────────────────────────────────────────────────────
+    with st.expander("📁  Storage — where files are saved", expanded=manifests_df.empty and not is_running):
+        st.markdown(f"**Root directory:** `{TOP1K_OUTPUT_DIR.relative_to(PROJECT_ROOT)}/`")
+        st.code(
+            "by_ticker/\n"
+            "  rank_0001_C/\n"
+            "    wrds_prices.parquet       ← CRSP daily prices\n"
+            "    wrds_names.parquet        ← CRSP name history\n"
+            "    yahoo_prices.parquet      ← Yahoo Finance daily prices\n"
+            "    ravenpack_articles.parquet← RavenPack sentiment articles\n"
+            "    refinitiv_prices.parquet  ← Refinitiv daily prices (if enabled)\n"
+            "    manifest.json             ← row counts, status, file paths\n"
+            "    provider_status.parquet   ← per-provider ok/fail summary\n"
+            "  rank_0002_BAC/\n"
+            "  rank_0003_MSFT/\n"
+            "  ...\n"
+            "combined/\n"
+            "  wrds_prices.parquet         ← all tickers merged (written at end)\n"
+            "  yahoo_prices.parquet\n"
+            "  ravenpack_articles.parquet\n"
+            "batch_progress.csv            ← one row per ticker processed\n"
+            "batch_status.json             ← current run state\n"
+            "batch_runner.log              ← full stdout log\n",
+            language=None,
+        )
+        # Live storage stats
+        if TOP1K_BY_TICKER_DIR.exists():
+            ticker_dirs = list(TOP1K_BY_TICKER_DIR.glob("rank_*"))
+            total_bytes = sum(
+                f.stat().st_size for d in ticker_dirs for f in d.rglob("*") if f.is_file()
+            )
+            total_mb = total_bytes / 1_048_576
+            s_cols = st.columns(3)
+            s_cols[0].metric("Ticker folders", f"{len(ticker_dirs):,}")
+            s_cols[1].metric("Total size on disk", f"{total_mb:.1f} MB" if total_mb < 1024 else f"{total_mb/1024:.2f} GB")
+            s_cols[2].metric("Avg per ticker", f"{total_mb/len(ticker_dirs):.1f} MB" if ticker_dirs else "—")
+
+    # ── Combined parquets ─────────────────────────────────────────────────────
+    with st.expander("📦  Combined parquets"):
+        st.markdown(
+            "Once the batch is complete (or partially done), click below to merge "
+            "all per-ticker parquets into provider-level files under `data/raw/data_explorer_top1k/combined/`."
+        )
+        if st.button("Write combined parquets now", key="batch_write_combined"):
+            combined_keys = ["wrds_prices", "wrds_names", "yahoo_prices", "ravenpack_articles",
+                             "refinitiv_prices", "refinitiv_news"]
+            TOP1K_COMBINED_DIR.mkdir(parents=True, exist_ok=True)
+            written = []
+            for key in combined_keys:
+                filename = f"{key}.parquet"
+                frames = []
+                for ticker_dir in sorted(TOP1K_BY_TICKER_DIR.glob("rank_*")):
+                    p = ticker_dir / filename
+                    if p.exists():
+                        try:
+                            frames.append(pd.read_parquet(p))
+                        except Exception:
+                            pass
+                if frames:
+                    out = TOP1K_COMBINED_DIR / filename
+                    pd.concat(frames, ignore_index=True).to_parquet(out, index=False)
+                    written.append(f"{filename}  ({len(frames)} tickers, {sum(len(f) for f in frames):,} rows)")
+            if written:
+                st.success("Written:\n" + "\n".join(f"- `{w}`" for w in written))
+            else:
+                st.info("No ticker parquets found yet.")
+
+    # ── Auto-refresh trigger ──────────────────────────────────────────────────
+    if auto_refresh and is_running:
+        time.sleep(5)
+        st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+
 st.info(
     "The **Data Explorer** tab uses one ticker/date-range form for prices, Refinitiv news, and RavenPack sentiment. "
     "The **Paper Validation** tab uses bundled 2003-2014 CSVs from `app_data/`."
 )
 
-tab_dashboard, tab_validation = st.tabs([
+tab_dashboard, tab_batch, tab_validation = st.tabs([
     "Data Explorer",
+    "Batch Pipeline (Top-1K)",
     "Paper Validation (2003-2014)",
 ])
 
 with tab_dashboard:
     render_multi_api_dashboard_tab()
+
+with tab_batch:
+    render_batch_pipeline_tab()
 
 with tab_validation:
     universe = load_bundled_csv(DEFAULT_UNIVERSE_PATHS)

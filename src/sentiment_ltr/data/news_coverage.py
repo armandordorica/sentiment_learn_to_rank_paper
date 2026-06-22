@@ -8,8 +8,7 @@ from typing import Any
 
 import pandas as pd
 
-from sentiment_ltr.data.refinitiv_queries import ticker_to_ric_candidates
-from sentiment_ltr.data.refinitiv_session import open_refinitiv_session
+# Refinitiv helpers imported lazily to avoid LSEG auto-initialisation when not needed.
 
 
 @dataclass(frozen=True)
@@ -163,6 +162,9 @@ def fetch_ticker_headlines(
     ld_module: Any | None = None,
 ) -> tuple[pd.DataFrame, str]:
     """Fetch deduplicated headlines for a ticker across a long date range."""
+    from sentiment_ltr.data.refinitiv_queries import ticker_to_ric_candidates  # lazy
+    from sentiment_ltr.data.refinitiv_session import open_refinitiv_session  # lazy
+
     ld = ld_module
     opened_here = False
     if ld is None:

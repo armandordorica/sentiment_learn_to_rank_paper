@@ -8,14 +8,10 @@ from typing import Any
 
 import pandas as pd
 
-from sentiment_ltr.data.news_coverage import build_news_coverage_result
-from sentiment_ltr.data.refinitiv_queries import (
-    query_refinitiv_prices,
-    refinitiv_configured,
-    refinitiv_setup_message,
-)
-from sentiment_ltr.data.refinitiv_session import get_last_refinitiv_session_info, open_refinitiv_session
 from sentiment_ltr.data.secrets import get_env_or_secret
+
+# news_coverage and all Refinitiv helpers are imported lazily inside run_ticker_data_query
+# so that the LSEG library never auto-initialises when Refinitiv is not being used.
 
 try:
     import wrds
@@ -348,22 +344,82 @@ def _pg_sql(db_conn: Any, sql: str) -> pd.DataFrame:
     return df
 
 
-def query_ravenpack_articles(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """Fetch RavenPack sentiment articles for a ticker from WRDS."""
+def query_ravenpack_articles(
+    ticker: str,
+    start_date: str,
+    end_date: str,
+    permno: int | None = None,
+) -> pd.DataFrame:
+    """Fetch RavenPack sentiment articles for a ticker from WRDS.
+
+    Uses PERMNO→CUSIP→rp_entity_id resolution when permno is supplied (preferred),
+    falling back to ticker-only matching otherwise.  Ticker matching is ambiguous
+    because multiple companies can share the same ticker across exchanges/time.
+    """
     ticker_clean = ticker.upper().strip()
     start_s = to_query_date(start_date)
     end_s = to_query_date(end_date)
 
     db = open_wrds_connection()
     try:
-        mapping = _pg_sql(db, f"""
-            SELECT DISTINCT rp_entity_id
-            FROM ravenpack_common.wrds_rpa_company_mappings
-            WHERE ticker = '{ticker_clean}'
-        """)
-        if mapping.empty:
-            raise ValueError(f"No RavenPack entity found for {ticker_clean}.")
-        rp_entity_id = mapping["rp_entity_id"].iloc[0]
+        rp_entity_id: str | None = None
+
+        # ── Primary: PERMNO → CUSIP → RavenPack entity (unambiguous) ──────────
+        if permno is not None:
+            cusip_row = _pg_sql(db, f"""
+                SELECT ncusip
+                FROM crsp.stocknames
+                WHERE permno = {int(permno)}
+                  AND ncusip IS NOT NULL
+                  AND ncusip <> ''
+                ORDER BY namedt DESC
+                LIMIT 1
+            """)
+            if not cusip_row.empty:
+                ncusip = str(cusip_row["ncusip"].iloc[0]).strip()
+                # RavenPack CUSIPs are 8-char (no check digit); CRSP ncusip is 8-char too
+                emap = _pg_sql(db, f"""
+                    SELECT DISTINCT rp_entity_id, entity_name
+                    FROM ravenpack_common.wrds_rpa_company_mappings
+                    WHERE cusip LIKE '{ncusip[:8]}%'
+                    LIMIT 1
+                """)
+                if not emap.empty:
+                    rp_entity_id = str(emap["rp_entity_id"].iloc[0])
+
+        # ── Fallback: ticker match — take the row with the most RavenPack data ─
+        if rp_entity_id is None:
+            mapping = _pg_sql(db, f"""
+                SELECT DISTINCT rp_entity_id, entity_name
+                FROM ravenpack_common.wrds_rpa_company_mappings
+                WHERE ticker = '{ticker_clean}'
+                  AND entity_type = 'COMP'
+            """)
+            if mapping.empty:
+                raise ValueError(f"No RavenPack entity found for {ticker_clean}.")
+            if len(mapping) == 1:
+                rp_entity_id = str(mapping["rp_entity_id"].iloc[0])
+            else:
+                # Multiple matches — pick by checking which entity actually has data
+                # in one representative year near the middle of the window
+                best_id = None
+                best_count = -1
+                for eid in mapping["rp_entity_id"].tolist():
+                    try:
+                        cnt = _pg_sql(db, f"""
+                            SELECT COUNT(*) AS n
+                            FROM ravenpack_dj.rpa_djpr_equities_2007
+                            WHERE rp_entity_id = '{eid}'
+                        """)
+                        n = int(cnt["n"].iloc[0]) if not cnt.empty else 0
+                        if n > best_count:
+                            best_count = n
+                            best_id = eid
+                    except Exception:
+                        pass
+                if best_id is None:
+                    best_id = str(mapping["rp_entity_id"].iloc[0])
+                rp_entity_id = best_id
 
         frames: list[pd.DataFrame] = []
         for yr in range(int(start_s[:4]), int(end_s[:4]) + 1):
@@ -429,6 +485,13 @@ def run_ticker_data_query(
     }
 
     if query_refinitiv:
+        from sentiment_ltr.data.news_coverage import build_news_coverage_result  # lazy – avoids LSEG auto-init
+        from sentiment_ltr.data.refinitiv_queries import (
+            query_refinitiv_prices,
+            refinitiv_configured,
+            refinitiv_setup_message,
+        )
+        from sentiment_ltr.data.refinitiv_session import get_last_refinitiv_session_info, open_refinitiv_session
         if refinitiv_configured(project_root):
             try:
                 import lseg.data as ld  # type: ignore
