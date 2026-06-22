@@ -1969,7 +1969,7 @@ def _load_all_manifests() -> pd.DataFrame:
 def _launch_batch(
     start: str, end: str,
     start_rank: int, max_tickers: int | None,
-    force_rerun: bool, rerun_failed: bool, sleep_sec: float,
+    force_rerun: bool, rerun_failed: bool, rerun_partial: bool, sleep_sec: float,
     stop_after: int, provider_timeout: float, year_timeout: int,
     use_wrds: bool, use_yahoo: bool, use_ravenpack: bool, use_refinitiv: bool,
     combined_parquets: bool,
@@ -1987,6 +1987,8 @@ def _launch_batch(
         cmd.append("--force-rerun")
     if rerun_failed:
         cmd.append("--rerun-failed")
+    if rerun_partial:
+        cmd.append("--rerun-partial")
     if not use_wrds:
         cmd.append("--no-wrds")
     if not use_yahoo:
@@ -2155,10 +2157,12 @@ def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI
                 help="Only enable if your LSEG account has the news/prices scope. Leave off for WRDS+Yahoo+RavenPack only.",
             )
 
-            opt_cols = st.columns(3)
-            force_rerun       = opt_cols[0].checkbox("Force rerun (ignore cache)", value=False, key="batch_force_rerun")
-            rerun_failed      = opt_cols[1].checkbox("Retry failed tickers",       value=True,  key="batch_rerun_failed")
-            combined_parquets = opt_cols[2].checkbox("Write combined parquets",    value=True,  key="batch_combined")
+            opt_cols = st.columns(4)
+            force_rerun       = opt_cols[0].checkbox("Force rerun (ignore cache)",    value=False, key="batch_force_rerun")
+            rerun_failed      = opt_cols[1].checkbox("Retry failed tickers",          value=True,  key="batch_rerun_failed")
+            rerun_partial     = opt_cols[2].checkbox("Smart retry partial tickers",   value=True,  key="batch_rerun_partial",
+                                                     help="Re-fetch only the providers that failed; keeps already-ok data intact.")
+            combined_parquets = opt_cols[3].checkbox("Write combined parquets",       value=True,  key="batch_combined")
 
             submitted = st.form_submit_button(
                 "🚀  Launch Batch" if not is_running else "⚠️  Batch already running",
@@ -2172,6 +2176,7 @@ def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI
                 start=start_date, end=end_date,
                 start_rank=int(start_rank), max_tickers=max_tickers,
                 force_rerun=force_rerun, rerun_failed=rerun_failed,
+                rerun_partial=rerun_partial,
                 sleep_sec=float(sleep_sec), stop_after=int(stop_after),
                 provider_timeout=float(provider_timeout), year_timeout=int(year_timeout),
                 use_wrds=use_wrds, use_yahoo=use_yahoo,
@@ -2214,6 +2219,56 @@ def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI
         m_cols[5].metric("⏳ Remaining", f"{pending_n:,}" if batch_status.get("total") else "—")
     elif not is_running:
         st.info("No batch progress recorded yet. Configure and launch a batch above.")
+
+    # ── Partial-ticker breakdown ──────────────────────────────────────────────
+    if progress_df is not None and not progress_df.empty:
+        partial_rows = progress_df[progress_df["status"] == "partial"]
+        if not partial_rows.empty:
+            with st.expander(
+                f"🟡  {len(partial_rows)} tickers with partial data — click to inspect missing providers",
+                expanded=False,
+            ):
+                st.caption(
+                    "These tickers have at least one provider that failed. "
+                    "Launch the batch with **Smart retry partial tickers** checked to automatically "
+                    "re-fetch only the missing providers without discarding the data you already have."
+                )
+                detail_rows = []
+                for _, pr in partial_rows.iterrows():
+                    ticker_val = str(pr.get("ticker", ""))
+                    rank_val   = int(pr.get("volume_rank", 0))
+                    # Read provider_status from the cached parquet to show which failed
+                    slug = "".join(ch if ch.isalnum() else "_" for ch in ticker_val.upper().strip())
+                    ps_path = (
+                        TOP1K_BY_TICKER_DIR
+                        / f"rank_{rank_val:04d}_{slug}"
+                        / "provider_status.parquet"
+                    )
+                    failed_provs = "—"
+                    ok_provs = "—"
+                    if ps_path.exists():
+                        try:
+                            ps_df = pd.read_parquet(ps_path)
+                            failed_provs = ", ".join(
+                                ps_df.loc[ps_df["status"] != "ok", "provider"].tolist()
+                            ) or "none"
+                            ok_provs = ", ".join(
+                                ps_df.loc[ps_df["status"] == "ok", "provider"].tolist()
+                            ) or "none"
+                        except Exception:
+                            pass
+                    detail_rows.append({
+                        "rank": rank_val,
+                        "ticker": ticker_val,
+                        "company": pr.get("company", ""),
+                        "ok providers": ok_provs,
+                        "failed providers": failed_provs,
+                    })
+                st.dataframe(
+                    pd.DataFrame(detail_rows),
+                    use_container_width=True,
+                    hide_index=True,
+                )
 
     st.divider()
 

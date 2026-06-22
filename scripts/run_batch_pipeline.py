@@ -66,18 +66,70 @@ def read_manifest(rank: int, ticker: str) -> dict | None:
         return None
 
 
-def should_skip(rank: int, ticker: str, force_rerun: bool, rerun_failed: bool) -> bool:
+def should_skip(rank: int, ticker: str, force_rerun: bool, rerun_failed: bool,
+                rerun_partial: bool = True) -> bool:
     if force_rerun:
         return False
     manifest = read_manifest(rank, ticker)
     if not manifest:
         return False
     status = manifest.get("status")
-    if status in ("complete", "partial"):
+    if status == "complete":
         return True
+    if status == "partial":
+        # Partial = some providers succeeded, some failed.  By default we retry
+        # only the failed providers (see load_cached_providers).
+        return not rerun_partial
     if status == "failed" and not rerun_failed:
         return True
     return False
+
+
+def load_cached_providers(rank: int, ticker: str) -> dict[str, dict]:
+    """Return prov_results pre-populated with already-successful provider data.
+
+    Only providers whose cached status is "ok" are loaded; failed/empty/missing
+    providers are left out so the main loop re-fetches them.
+    """
+    out_dir = ticker_cache_dir(rank, ticker)
+    ps_path = out_dir / "provider_status.parquet"
+    if not ps_path.exists():
+        return {}
+
+    try:
+        ps = pd.read_parquet(ps_path)
+    except Exception:
+        return {}
+
+    cached: dict[str, dict] = {}
+    for _, r in ps.iterrows():
+        pname = str(r["provider"])
+        if r.get("status") != "ok":
+            continue  # will be re-fetched
+
+        result: dict = {"status": "ok", "error": None, "rows": int(r.get("rows", 0))}
+        try:
+            if pname == "wrds":
+                for key, fname in [("prices", "wrds_prices.parquet"), ("names", "wrds_names.parquet")]:
+                    p = out_dir / fname
+                    result[key] = pd.read_parquet(p) if p.exists() else pd.DataFrame()
+            elif pname == "yahoo":
+                p = out_dir / "yahoo_prices.parquet"
+                result["prices"] = pd.read_parquet(p) if p.exists() else pd.DataFrame()
+            elif pname == "ravenpack":
+                p = out_dir / "ravenpack_articles.parquet"
+                result["articles"] = pd.read_parquet(p) if p.exists() else pd.DataFrame()
+            elif pname == "refinitiv":
+                for key, fname in [("prices", "refinitiv_prices.parquet"),
+                                    ("news", "refinitiv_news.parquet"),
+                                    ("news_daily_counts", "refinitiv_news_daily_counts.parquet")]:
+                    p = out_dir / fname
+                    result[key] = pd.read_parquet(p) if p.exists() else pd.DataFrame()
+            cached[pname] = result
+        except Exception:
+            pass  # If we can't read the parquet, let it be re-fetched
+
+    return cached
 
 
 def write_progress(records: list[dict]) -> None:
@@ -240,6 +292,8 @@ def main() -> None:
     parser.add_argument("--max-tickers",         type=int, default=None)
     parser.add_argument("--force-rerun",         action="store_true", default=False)
     parser.add_argument("--rerun-failed",        action="store_true", default=True)
+    parser.add_argument("--rerun-partial",       action="store_true", default=True,
+                        help="Re-fetch only failed providers for tickers with partial data (default: True)")
     parser.add_argument("--sleep",               type=float, default=0.25)
     parser.add_argument("--stop-after-failures", type=int, default=25)
     parser.add_argument("--wrds",                action="store_true", default=True)
@@ -299,7 +353,7 @@ def main() -> None:
         company = str(row.get("comnam", "")).strip()
         prefix = f"[{i+1}/{total}]  rank {rank:4d}  {ticker:<8s}"
 
-        if should_skip(rank, ticker, args.force_rerun, args.rerun_failed):
+        if should_skip(rank, ticker, args.force_rerun, args.rerun_failed, args.rerun_partial):
             manifest = read_manifest(rank, ticker) or {}
             prior = manifest.get("status", "?")
             records.append({
@@ -317,10 +371,17 @@ def main() -> None:
             continue
 
         ticker_started_at = datetime.now(timezone.utc).isoformat()
-        _log(f"{prefix} — ▶  starting  |  {providers_label}")
 
-        # ── Query each provider individually so we log exactly which one is slow ──
+        # ── For partial tickers, pre-load the already-ok provider data ───────────
+        prior_manifest = read_manifest(rank, ticker) or {}
+        is_partial_retry = prior_manifest.get("status") == "partial"
         prov_results: dict[str, dict] = {}
+        if is_partial_retry and args.rerun_partial:
+            prov_results = load_cached_providers(rank, ticker)
+            ok_cached = list(prov_results.keys())
+            _log(f"{prefix} — 🔄  partial retry  |  cached ok={ok_cached}  |  re-fetching failed providers")
+        else:
+            _log(f"{prefix} — ▶  starting  |  {providers_label}")
 
         def _run_with_timeout(fn, timeout_s, label):
             """Run fn() in a thread; return (result, elapsed, error_str).
@@ -360,7 +421,7 @@ def main() -> None:
                          providers_so_far={})
 
             # ── WRDS ────────────────────────────────────────────────────────────
-            if args.wrds:
+            if args.wrds and "wrds" not in prov_results:
                 write_status("running", current_rank=rank, current_ticker=ticker,
                              current_step="querying WRDS/CRSP",
                              total=total, done=i, ticker_started_at=ticker_started_at,
@@ -389,7 +450,7 @@ def main() -> None:
                              providers_so_far=_prov_summary())
 
             # ── Yahoo ────────────────────────────────────────────────────────────
-            if args.yahoo:
+            if args.yahoo and "yahoo" not in prov_results:
                 write_status("running", current_rank=rank, current_ticker=ticker,
                              current_step="querying Yahoo Finance",
                              total=total, done=i, ticker_started_at=ticker_started_at,
@@ -417,7 +478,7 @@ def main() -> None:
                              providers_so_far=_prov_summary())
 
             # ── RavenPack ────────────────────────────────────────────────────────
-            if args.ravenpack:
+            if args.ravenpack and "ravenpack" not in prov_results:
                 write_status("running", current_rank=rank, current_ticker=ticker,
                              current_step="querying RavenPack",
                              total=total, done=i, ticker_started_at=ticker_started_at,
@@ -468,7 +529,7 @@ def main() -> None:
                              providers_so_far=_prov_summary())
 
             # ── Refinitiv ────────────────────────────────────────────────────────
-            if args.refinitiv:
+            if args.refinitiv and "refinitiv" not in prov_results:
                 write_status("running", current_rank=rank, current_ticker=ticker,
                              current_step="querying Refinitiv",
                              total=total, done=i, ticker_started_at=ticker_started_at,
