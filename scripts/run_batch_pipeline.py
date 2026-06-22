@@ -302,7 +302,8 @@ def main() -> None:
     parser.add_argument("--no-yahoo",            dest="yahoo", action="store_false")
     parser.add_argument("--ravenpack",           action="store_true", default=True)
     parser.add_argument("--no-ravenpack",        dest="ravenpack", action="store_false")
-    parser.add_argument("--refinitiv",           action="store_true", default=False)
+    parser.add_argument("--refinitiv",           action="store_true", default=True)
+    parser.add_argument("--no-refinitiv",        dest="refinitiv", action="store_false")
     parser.add_argument("--combined-parquets",   action="store_true", default=True)
     parser.add_argument("--provider-timeout",    type=float, default=300.0,
                         help="Max seconds to wait for a single provider query (default 300s / 5 min)")

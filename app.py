@@ -1995,8 +1995,8 @@ def _launch_batch(
         cmd.append("--no-yahoo")
     if not use_ravenpack:
         cmd.append("--no-ravenpack")
-    if use_refinitiv:
-        cmd.append("--refinitiv")
+    if not use_refinitiv:
+        cmd.append("--no-refinitiv")
     if not combined_parquets:
         cmd.append("--no-combined-parquets")
     log_path = TOP1K_OUTPUT_DIR / "batch_runner.log"
@@ -2020,7 +2020,7 @@ def _status_color(status: str) -> str:
 def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI function
     # Force Refinitiv off by default so stale session state never auto-enables it
     if "batch_use_refinitiv" not in st.session_state:
-        st.session_state["batch_use_refinitiv"] = False
+        st.session_state["batch_use_refinitiv"] = True
 
     st.header("Top-1,000 Batch Pipeline")
     st.caption(
@@ -2152,9 +2152,8 @@ def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI
             use_ravenpack  = prov_cols[2].checkbox("RavenPack",       value=wrds_credentials_available(), key="batch_use_ravenpack")
             use_refinitiv  = prov_cols[3].checkbox(
                 "Refinitiv",
-                value=False,  # off by default — news scope may not be available even with a config file
+                value=True,
                 key="batch_use_refinitiv",
-                help="Only enable if your LSEG account has the news/prices scope. Leave off for WRDS+Yahoo+RavenPack only.",
             )
 
             opt_cols = st.columns(4)
