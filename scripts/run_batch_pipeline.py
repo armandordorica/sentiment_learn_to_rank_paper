@@ -250,6 +250,8 @@ def main() -> None:
     parser.add_argument("--combined-parquets",   action="store_true", default=True)
     parser.add_argument("--provider-timeout",    type=float, default=300.0,
                         help="Max seconds to wait for a single provider query (default 300s / 5 min)")
+    parser.add_argument("--year-timeout",        type=int,   default=90,
+                        help="Per-year statement_timeout for RavenPack queries in seconds (default 90s)")
     args = parser.parse_args()
 
     TOP1K_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -319,17 +321,28 @@ def main() -> None:
         prov_results: dict[str, dict] = {}
 
         def _run_with_timeout(fn, timeout_s, label):
-            """Run fn() in a thread; return (result, elapsed, error_str)."""
+            """Run fn() in a thread; return (result, elapsed, error_str).
+
+            We deliberately avoid the `with ThreadPoolExecutor` context manager
+            because its __exit__ calls shutdown(wait=True), which blocks until the
+            background thread finishes — defeating the timeout entirely when the
+            thread is stuck in a blocking network call.  Instead we call
+            shutdown(wait=False) so the stuck thread is abandoned as a daemon and
+            the main loop can move on immediately.
+            """
             t0 = time.monotonic()
-            with ThreadPoolExecutor(max_workers=1) as ex:
-                fut = ex.submit(fn)
-                try:
-                    result = fut.result(timeout=timeout_s)
-                    return result, round(time.monotonic() - t0, 1), None
-                except FuturesTimeoutError:
-                    return None, round(time.monotonic() - t0, 1), f"TIMEOUT after {timeout_s}s"
-                except Exception as exc:
-                    return None, round(time.monotonic() - t0, 1), str(exc)
+            ex = ThreadPoolExecutor(max_workers=1)
+            fut = ex.submit(fn)
+            try:
+                result = fut.result(timeout=timeout_s)
+                ex.shutdown(wait=False)
+                return result, round(time.monotonic() - t0, 1), None
+            except FuturesTimeoutError:
+                ex.shutdown(wait=False, cancel_futures=True)
+                return None, round(time.monotonic() - t0, 1), f"TIMEOUT after {timeout_s}s"
+            except Exception as exc:
+                ex.shutdown(wait=False)
+                return None, round(time.monotonic() - t0, 1), str(exc)
 
         try:
             write_status("running", current_rank=rank, current_ticker=ticker,
@@ -386,10 +399,30 @@ def main() -> None:
                 write_status("running", current_rank=rank, current_ticker=ticker,
                              current_step="querying RavenPack",
                              total=total, done=i, ticker_started_at=ticker_started_at)
-                _log(f"{prefix}    ↳ RavenPack  …")
+                _log(f"{prefix}    ↳ RavenPack  … (year-by-year, {args.year_timeout}s/yr)")
                 _permno = int(row["permno"]) if "permno" in row.index else None
+
+                # Per-year callback — runs in the background thread but writes to
+                # the log file and status JSON which are safe for cross-thread use.
+                def _rp_year_cb(yr, n_rows, elapsed, error, _prefix=prefix, _rank=rank,
+                                _ticker=ticker, _total=total, _done=i,
+                                _started=ticker_started_at):
+                    if error:
+                        _log(f"{_prefix}    ↳ RavenPack {yr}  ⚠  [{elapsed}s]  {error}")
+                    else:
+                        mark = "✓" if n_rows > 0 else "—"
+                        _log(f"{_prefix}    ↳ RavenPack {yr}  {mark}  [{elapsed}s]  {n_rows} rows")
+                    write_status("running", current_rank=_rank, current_ticker=_ticker,
+                                 current_step=f"RavenPack {yr}",
+                                 total=_total, done=_done, ticker_started_at=_started)
+
                 rp_result, rp_elapsed, rp_err = _run_with_timeout(
-                    lambda: live_data.query_ravenpack_articles(ticker, args.start, args.end, permno=_permno),
+                    lambda: live_data.query_ravenpack_articles(
+                        ticker, args.start, args.end,
+                        permno=_permno,
+                        year_progress_callback=_rp_year_cb,
+                        year_timeout_s=args.year_timeout,
+                    ),
                     args.provider_timeout, "RavenPack"
                 )
                 if rp_err:
@@ -397,10 +430,14 @@ def main() -> None:
                                                  "error": rp_err, "articles": pd.DataFrame(), "rows": 0}
                     _log(f"{prefix}    ↳ RavenPack  ❌  [{rp_elapsed}s]  {rp_err}")
                 else:
-                    rows = len(rp_result)
-                    prov_results["ravenpack"] = {"status": "ok" if not rp_result.empty else "empty",
-                                                 "error": None, "articles": rp_result, "rows": rows}
-                    _log(f"{prefix}    ↳ RavenPack  ✓  [{rp_elapsed}s]  {rows} rows")
+                    rows = len(rp_result) if rp_result is not None else 0
+                    prov_results["ravenpack"] = {
+                        "status": "ok" if rows > 0 else "empty",
+                        "error": None,
+                        "articles": rp_result if rp_result is not None else pd.DataFrame(),
+                        "rows": rows,
+                    }
+                    _log(f"{prefix}    ↳ RavenPack  ✓  [{rp_elapsed}s]  {rows} rows total")
 
             # ── Refinitiv ────────────────────────────────────────────────────────
             if args.refinitiv:

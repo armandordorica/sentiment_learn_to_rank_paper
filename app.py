@@ -1924,7 +1924,7 @@ def _launch_batch(
     start: str, end: str,
     start_rank: int, max_tickers: int | None,
     force_rerun: bool, rerun_failed: bool, sleep_sec: float,
-    stop_after: int, provider_timeout: float,
+    stop_after: int, provider_timeout: float, year_timeout: int,
     use_wrds: bool, use_yahoo: bool, use_ravenpack: bool, use_refinitiv: bool,
     combined_parquets: bool,
 ) -> subprocess.Popen:
@@ -1933,7 +1933,8 @@ def _launch_batch(
            "--start-rank", str(start_rank),
            "--sleep", str(sleep_sec),
            "--stop-after-failures", str(stop_after),
-           "--provider-timeout", str(provider_timeout)]
+           "--provider-timeout", str(provider_timeout),
+           "--year-timeout", str(year_timeout)]
     if max_tickers is not None:
         cmd += ["--max-tickers", str(max_tickers)]
     if force_rerun:
@@ -1991,15 +1992,44 @@ def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI
         step     = batch_status.get("current_step",   "")
         done     = batch_status.get("done", 0) or 0
         total    = batch_status.get("total") or 0
-        elapsed  = batch_status.get("elapsed_s")
-
-        elapsed_str = f"  |  {elapsed}s on this ticker" if elapsed else ""
+        # Compute real elapsed from ticker_started_at rather than the stale
+        # elapsed_s field (which is frozen at the time status was last written).
+        ticker_started_at = batch_status.get("ticker_started_at")
+        if ticker_started_at:
+            try:
+                from datetime import datetime, timezone as _tz
+                started_dt = datetime.fromisoformat(ticker_started_at)
+                real_elapsed = round((datetime.now(_tz.utc) - started_dt).total_seconds())
+                elapsed_str = f"  |  **{real_elapsed}s** on this ticker"
+            except Exception:
+                elapsed_str = ""
+        else:
+            elapsed_str = ""
         step_str    = f"  —  *{step}*" if step else ""
-        st.success(
-            f"**Batch running** (PID {pid}){step_str}\n\n"
-            f"Now on: **{current}** (rank {rank}){elapsed_str}  "
-            f"|  **{done}** of **{total}** done"
-        )
+
+        # Banner + stop button in the same row
+        banner_col, stop_col, refresh_col = st.columns([6, 1, 1])
+        with banner_col:
+            st.success(
+                f"**Batch running** (PID {pid}){step_str}\n\n"
+                f"Now on: **{current}** [rank {rank}]{elapsed_str}  "
+                f"|  **{done}** of **{total}** done"
+            )
+        with stop_col:
+            if st.button("🛑 Stop", type="secondary", use_container_width=True):
+                try:
+                    import signal as _signal
+                    os.kill(pid, _signal.SIGKILL)
+                    time.sleep(0.3)
+                except OSError:
+                    pass
+                BATCH_PID_FILE.unlink(missing_ok=True)
+                st.warning(f"Killed PID {pid}.")
+                time.sleep(0.8)
+                st.rerun()
+        with refresh_col:
+            if st.button("🔄 Refresh", use_container_width=True):
+                st.rerun()
 
         # Progress bar driven purely by batch_status.json
         if total > 0:
@@ -2052,14 +2082,19 @@ def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI
             )
             sleep_sec = rank_cols[2].number_input("Sleep between tickers (s)", min_value=0.0, max_value=10.0, value=0.25, step=0.05, key="batch_sleep")
 
-            timeout_cols = st.columns(2)
+            timeout_cols = st.columns(3)
             stop_after = timeout_cols[0].number_input(
                 "Stop after N consecutive failures", min_value=1, max_value=200, value=25, step=1, key="batch_stop_after"
             )
             provider_timeout = timeout_cols[1].number_input(
                 "Provider timeout (s)", min_value=30, max_value=1800, value=300, step=30,
                 key="batch_provider_timeout",
-                help="Max seconds to wait for a single provider (WRDS/Yahoo/RavenPack) before skipping it. Default 300s = 5 min.",
+                help="Max seconds to wait for a full provider (safety net). Default 300s = 5 min.",
+            )
+            year_timeout = timeout_cols[2].number_input(
+                "RavenPack per-year timeout (s)", min_value=10, max_value=300, value=90, step=10,
+                key="batch_year_timeout",
+                help="Server-side timeout per yearly RavenPack query. Timed-out years are skipped; data from other years is still saved. Default 90s.",
             )
 
             st.markdown("**Providers**")
@@ -2092,7 +2127,7 @@ def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI
                 start_rank=int(start_rank), max_tickers=max_tickers,
                 force_rerun=force_rerun, rerun_failed=rerun_failed,
                 sleep_sec=float(sleep_sec), stop_after=int(stop_after),
-                provider_timeout=float(provider_timeout),
+                provider_timeout=float(provider_timeout), year_timeout=int(year_timeout),
                 use_wrds=use_wrds, use_yahoo=use_yahoo,
                 use_ravenpack=use_ravenpack, use_refinitiv=use_refinitiv,
                 combined_parquets=combined_parquets,
@@ -2100,23 +2135,12 @@ def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI
             time.sleep(1.5)
             st.rerun()
 
-    # ── Stop / refresh controls ───────────────────────────────────────────────
-    ctrl_cols = st.columns([1, 1, 4])
-    if is_running:
-        if ctrl_cols[0].button("🛑  Stop Batch", type="secondary"):
-            try:
-                import signal
-                os.kill(pid, signal.SIGTERM)
-                time.sleep(0.5)
-                BATCH_PID_FILE.unlink(missing_ok=True)
-                st.warning(f"Sent SIGTERM to PID {pid}. Batch will stop after the current ticker finishes.")
-            except OSError as exc:
-                st.error(f"Could not stop process {pid}: {exc}")
-            time.sleep(1)
+    # ── Refresh / auto-refresh controls (below config) ───────────────────────
+    ctrl_cols = st.columns([1, 5])
+    if not is_running:
+        if ctrl_cols[0].button("🔄  Refresh now"):
             st.rerun()
-    if ctrl_cols[1].button("🔄  Refresh now"):
-        st.rerun()
-    auto_refresh = ctrl_cols[2].checkbox(
+    auto_refresh = ctrl_cols[1].checkbox(
         "Auto-refresh every 5 s", value=is_running, key="batch_auto_refresh"
     )
 
@@ -2149,6 +2173,33 @@ def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI
 
     # ── Per-ticker progress table ─────────────────────────────────────────────
     st.subheader("Per-Ticker Status")
+
+    # Prepend a live row for the ticker currently being processed so it shows
+    # immediately without waiting for the manifest to be written.
+    if is_running and batch_status:
+        live_rank   = batch_status.get("current_rank")
+        live_ticker = batch_status.get("current_ticker", "")
+        live_step   = batch_status.get("current_step", "starting…")
+        if live_ticker and live_rank:
+            # Compute real elapsed
+            try:
+                from datetime import datetime, timezone as _tz2
+                _ts = batch_status.get("ticker_started_at", "")
+                _live_elapsed = round((datetime.now(_tz2.utc) - datetime.fromisoformat(_ts)).total_seconds()) if _ts else 0
+            except Exception:
+                _live_elapsed = 0
+            live_row = pd.DataFrame([{
+                "rank": live_rank, "ticker": live_ticker, "company": "⚡ in progress",
+                "status": f"⚡ {live_step}",
+                "wrds_status": "…", "wrds_rows": "",
+                "yahoo_status": "…", "yahoo_rows": "",
+                "ravenpack_status": "…", "ravenpack_rows": "",
+                "refinitiv_status": "…", "refinitiv_rows": "",
+                "ok": 0, "fail": 0, "created_at": f"{_live_elapsed}s elapsed",
+            }])
+            # Only prepend if this ticker isn't already in the manifests table
+            if manifests_df.empty or live_ticker not in manifests_df["ticker"].values:
+                manifests_df = pd.concat([live_row, manifests_df], ignore_index=True)
 
     if not manifests_df.empty:
         # Filter controls
@@ -2321,7 +2372,7 @@ def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI
 
     # ── Auto-refresh trigger ──────────────────────────────────────────────────
     if auto_refresh and is_running:
-        time.sleep(5)
+        time.sleep(1)
         st.rerun()
 
 

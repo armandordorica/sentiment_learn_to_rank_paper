@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -349,13 +349,23 @@ def query_ravenpack_articles(
     start_date: str,
     end_date: str,
     permno: int | None = None,
+    year_progress_callback: Callable[[int, int, float, "str | None"], None] | None = None,
+    year_timeout_s: int = 90,
 ) -> pd.DataFrame:
     """Fetch RavenPack sentiment articles for a ticker from WRDS.
 
     Uses PERMNO→CUSIP→rp_entity_id resolution when permno is supplied (preferred),
-    falling back to ticker-only matching otherwise.  Ticker matching is ambiguous
-    because multiple companies can share the same ticker across exchanges/time.
+    falling back to ticker-only matching otherwise.
+
+    Fetches one year at a time so partial results are guaranteed even when a single
+    year's table is very large.  Each year query has a server-side statement_timeout
+    of `year_timeout_s` seconds; timed-out years are skipped and the connection is
+    rolled back so subsequent years can still run.
+
+    year_progress_callback(yr, n_rows, elapsed_s, error_str | None) is called after
+    each year so callers can log real-time progress without polling.
     """
+    import time as _time
     ticker_clean = ticker.upper().strip()
     start_s = to_query_date(start_date)
     end_s = to_query_date(end_date)
@@ -421,24 +431,52 @@ def query_ravenpack_articles(
                     best_id = str(mapping["rp_entity_id"].iloc[0])
                 rp_entity_id = best_id
 
+        # ── Year-by-year fetch with per-query server-side timeout ───────────────
+        # headline / event_text are omitted — large text columns that multiply
+        # transfer size while the paper models only need the numeric scores.
+        cols = ("timestamp_utc, rp_story_id, relevance, event_sentiment_score, "
+                "source_name, topic, \"group\", \"type\", "
+                "sub_type, news_type, css, nip")
+
+        # Apply statement_timeout once; re-apply after each rollback.
+        def _set_timeout():
+            try:
+                _pg_sql(db, f"SET statement_timeout = {int(year_timeout_s * 1000)}")
+            except Exception:
+                pass
+
+        _set_timeout()
         frames: list[pd.DataFrame] = []
+
         for yr in range(int(start_s[:4]), int(end_s[:4]) + 1):
             yr_start = max(start_s, f"{yr}-01-01")
-            yr_end = min(end_s, f"{yr}-12-31")
+            yr_end   = min(end_s,   f"{yr}-12-31")
+            t0 = _time.monotonic()
             try:
                 yr_df = _pg_sql(db, f"""
-                    SELECT timestamp_utc, rp_story_id, relevance, event_sentiment_score,
-                           headline, event_text, source_name, topic, "group", "type",
-                           sub_type, news_type, css, nip
+                    SELECT {cols}
                     FROM ravenpack_dj.rpa_djpr_equities_{yr}
                     WHERE rp_entity_id = '{rp_entity_id}'
                       AND rpa_date_utc BETWEEN '{yr_start}' AND '{yr_end}'
                     ORDER BY timestamp_utc
                 """)
+                elapsed = round(_time.monotonic() - t0, 1)
+                if year_progress_callback:
+                    year_progress_callback(yr, len(yr_df), elapsed, None)
                 if not yr_df.empty:
                     frames.append(yr_df)
-            except Exception:
+            except Exception as exc:
+                elapsed = round(_time.monotonic() - t0, 1)
+                if year_progress_callback:
+                    year_progress_callback(yr, 0, elapsed, str(exc)[:120])
+                # Roll back to clear the error state so the next year can proceed.
+                try:
+                    db.connection.rollback()
+                except Exception:
+                    pass
+                _set_timeout()
                 continue
+
     finally:
         db.close()
 
