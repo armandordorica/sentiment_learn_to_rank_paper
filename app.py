@@ -2180,6 +2180,7 @@ def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI
         live_rank   = batch_status.get("current_rank")
         live_ticker = batch_status.get("current_ticker", "")
         live_step   = batch_status.get("current_step", "starting…")
+        psf         = batch_status.get("providers_so_far", {})  # partial provider results
         if live_ticker and live_rank:
             # Compute real elapsed
             try:
@@ -2188,14 +2189,31 @@ def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI
                 _live_elapsed = round((datetime.now(_tz2.utc) - datetime.fromisoformat(_ts)).total_seconds()) if _ts else 0
             except Exception:
                 _live_elapsed = 0
+
+            def _psf_status(p):
+                if p not in psf:
+                    return "…"        # not started yet
+                return psf[p].get("status", "…")
+
+            def _psf_rows(p):
+                if p not in psf:
+                    return ""
+                return psf[p].get("rows", 0)
+
             live_row = pd.DataFrame([{
                 "rank": live_rank, "ticker": live_ticker, "company": "⚡ in progress",
                 "status": f"⚡ {live_step}",
-                "wrds_status": "…", "wrds_rows": "",
-                "yahoo_status": "…", "yahoo_rows": "",
-                "ravenpack_status": "…", "ravenpack_rows": "",
-                "refinitiv_status": "…", "refinitiv_rows": "",
-                "ok": 0, "fail": 0, "created_at": f"{_live_elapsed}s elapsed",
+                "wrds_status":      _psf_status("wrds"),
+                "wrds_rows":        _psf_rows("wrds"),
+                "yahoo_status":     _psf_status("yahoo"),
+                "yahoo_rows":       _psf_rows("yahoo"),
+                "ravenpack_status": _psf_status("ravenpack"),
+                "ravenpack_rows":   _psf_rows("ravenpack"),
+                "refinitiv_status": _psf_status("refinitiv"),
+                "refinitiv_rows":   _psf_rows("refinitiv"),
+                "ok": sum(1 for p in psf if psf[p].get("status") == "ok"),
+                "fail": sum(1 for p in psf if psf[p].get("status") in ("failed", "timeout")),
+                "created_at": f"{_live_elapsed}s elapsed",
             }])
             # Only prepend if this ticker isn't already in the manifests table
             if manifests_df.empty or live_ticker not in manifests_df["ticker"].values:

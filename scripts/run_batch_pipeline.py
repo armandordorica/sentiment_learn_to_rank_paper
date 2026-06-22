@@ -109,6 +109,7 @@ def write_status(
     done: int | None = None,
     ticker_started_at: str | None = None,
     error: str | None = None,
+    providers_so_far: dict | None = None,
 ) -> None:
     now = datetime.now(timezone.utc).isoformat()
     elapsed_s: float | None = None
@@ -130,6 +131,7 @@ def write_status(
         "done": done,
         "error": error,
         "pid": os.getpid(),
+        "providers_so_far": providers_so_far or {},
     }
     TOP1K_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     STATUS_FILE.write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8")
@@ -344,16 +346,25 @@ def main() -> None:
                 ex.shutdown(wait=False)
                 return None, round(time.monotonic() - t0, 1), str(exc)
 
+        # Helper: compact summary of completed provider results for the live UI row
+        def _prov_summary():
+            return {
+                p: {"status": v.get("status", "?"), "rows": v.get("rows", 0)}
+                for p, v in prov_results.items()
+            }
+
         try:
             write_status("running", current_rank=rank, current_ticker=ticker,
                          current_step="starting providers",
-                         total=total, done=i, ticker_started_at=ticker_started_at)
+                         total=total, done=i, ticker_started_at=ticker_started_at,
+                         providers_so_far={})
 
             # ── WRDS ────────────────────────────────────────────────────────────
             if args.wrds:
                 write_status("running", current_rank=rank, current_ticker=ticker,
                              current_step="querying WRDS/CRSP",
-                             total=total, done=i, ticker_started_at=ticker_started_at)
+                             total=total, done=i, ticker_started_at=ticker_started_at,
+                             providers_so_far=_prov_summary())
                 _log(f"{prefix}    ↳ WRDS/CRSP  …")
                 wrds_result, wrds_elapsed, wrds_err = _run_with_timeout(
                     lambda: live_data.query_wrds_ticker_data(
@@ -372,12 +383,17 @@ def main() -> None:
                     prov_results["wrds"] = {"status": "ok" if not prices.empty else "empty",
                                             "error": None, "prices": prices, "names": name_history, "rows": rows}
                     _log(f"{prefix}    ↳ WRDS/CRSP  ✓  [{wrds_elapsed}s]  {rows} rows")
+                write_status("running", current_rank=rank, current_ticker=ticker,
+                             current_step="querying WRDS/CRSP — done",
+                             total=total, done=i, ticker_started_at=ticker_started_at,
+                             providers_so_far=_prov_summary())
 
             # ── Yahoo ────────────────────────────────────────────────────────────
             if args.yahoo:
                 write_status("running", current_rank=rank, current_ticker=ticker,
                              current_step="querying Yahoo Finance",
-                             total=total, done=i, ticker_started_at=ticker_started_at)
+                             total=total, done=i, ticker_started_at=ticker_started_at,
+                             providers_so_far=_prov_summary())
                 _log(f"{prefix}    ↳ Yahoo Finance  …")
                 yh_result, yh_elapsed, yh_err = _run_with_timeout(
                     lambda: live_data.fetch_yahoo_daily(ticker, args.start, args.end),
@@ -393,17 +409,22 @@ def main() -> None:
                     prov_results["yahoo"] = {"status": "ok" if not yh_prices.empty else "empty",
                                              "error": None, "prices": yh_prices, "rows": rows}
                     _log(f"{prefix}    ↳ Yahoo Finance  ✓  [{yh_elapsed}s]  {rows} rows")
+                write_status("running", current_rank=rank, current_ticker=ticker,
+                             current_step="querying Yahoo Finance — done",
+                             total=total, done=i, ticker_started_at=ticker_started_at,
+                             providers_so_far=_prov_summary())
 
             # ── RavenPack ────────────────────────────────────────────────────────
             if args.ravenpack:
                 write_status("running", current_rank=rank, current_ticker=ticker,
                              current_step="querying RavenPack",
-                             total=total, done=i, ticker_started_at=ticker_started_at)
+                             total=total, done=i, ticker_started_at=ticker_started_at,
+                             providers_so_far=_prov_summary())
                 _log(f"{prefix}    ↳ RavenPack  … (year-by-year, {args.year_timeout}s/yr)")
                 _permno = int(row["permno"]) if "permno" in row.index else None
 
-                # Per-year callback — runs in the background thread but writes to
-                # the log file and status JSON which are safe for cross-thread use.
+                # Per-year callback — runs in the background thread; writes to
+                # log + status JSON which are safe for cross-thread use.
                 def _rp_year_cb(yr, n_rows, elapsed, error, _prefix=prefix, _rank=rank,
                                 _ticker=ticker, _total=total, _done=i,
                                 _started=ticker_started_at):
@@ -414,7 +435,8 @@ def main() -> None:
                         _log(f"{_prefix}    ↳ RavenPack {yr}  {mark}  [{elapsed}s]  {n_rows} rows")
                     write_status("running", current_rank=_rank, current_ticker=_ticker,
                                  current_step=f"RavenPack {yr}",
-                                 total=_total, done=_done, ticker_started_at=_started)
+                                 total=_total, done=_done, ticker_started_at=_started,
+                                 providers_so_far=_prov_summary())
 
                 rp_result, rp_elapsed, rp_err = _run_with_timeout(
                     lambda: live_data.query_ravenpack_articles(
@@ -438,12 +460,17 @@ def main() -> None:
                         "rows": rows,
                     }
                     _log(f"{prefix}    ↳ RavenPack  ✓  [{rp_elapsed}s]  {rows} rows total")
+                write_status("running", current_rank=rank, current_ticker=ticker,
+                             current_step="querying RavenPack — done",
+                             total=total, done=i, ticker_started_at=ticker_started_at,
+                             providers_so_far=_prov_summary())
 
             # ── Refinitiv ────────────────────────────────────────────────────────
             if args.refinitiv:
                 write_status("running", current_rank=rank, current_ticker=ticker,
                              current_step="querying Refinitiv",
-                             total=total, done=i, ticker_started_at=ticker_started_at)
+                             total=total, done=i, ticker_started_at=ticker_started_at,
+                             providers_so_far=_prov_summary())
                 _log(f"{prefix}    ↳ Refinitiv  …")
                 rf_result, rf_elapsed, rf_err = _run_with_timeout(
                     lambda: live_data.run_ticker_data_query(
@@ -463,6 +490,10 @@ def main() -> None:
                     rows = len(rf_prov.get("prices", pd.DataFrame())) + len(rf_prov.get("news", pd.DataFrame()))
                     prov_results["refinitiv"] = {**rf_prov, "rows": rows}
                     _log(f"{prefix}    ↳ Refinitiv  ✓  [{rf_elapsed}s]  {rows} rows")
+                write_status("running", current_rank=rank, current_ticker=ticker,
+                             current_step="querying Refinitiv — done",
+                             total=total, done=i, ticker_started_at=ticker_started_at,
+                             providers_so_far=_prov_summary())
 
             # ── Build result dict and save ────────────────────────────────────────
             write_status("running", current_rank=rank, current_ticker=ticker,
