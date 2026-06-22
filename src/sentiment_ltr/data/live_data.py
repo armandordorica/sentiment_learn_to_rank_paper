@@ -261,8 +261,70 @@ def _yahoo_network_blocked(exc: Exception) -> bool:
     return any(marker in message for marker in blocked_markers)
 
 
-def fetch_yahoo_daily(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """Fetch daily Yahoo Finance prices for a public cross-check."""
+def _lookup_current_crsp_ticker(permno: int) -> str | None:
+    """Return the most recent ticker for a PERMNO from crsp.stocknames.
+
+    Used as a fallback when a company has been renamed (e.g. FB→META, TWTR→X)
+    and the historical ticker no longer resolves in Yahoo Finance or Refinitiv.
+    Returns None if the lookup fails or no ticker is found.
+    """
+    db = open_wrds_connection()
+    try:
+        row = _pg_sql(db, f"""
+            SELECT ticker
+            FROM crsp.stocknames
+            WHERE permno = {int(permno)}
+              AND ticker IS NOT NULL
+              AND ticker <> ''
+            ORDER BY nameenddt DESC NULLS FIRST
+            LIMIT 1
+        """)
+        if not row.empty:
+            return str(row["ticker"].iloc[0]).strip().upper()
+    except Exception:
+        pass
+    finally:
+        db.close()
+    return None
+
+
+def _yahoo_download_raw(symbol: str, start_s: str, end_exclusive: str) -> "pd.DataFrame | None":
+    """Single attempt at a Yahoo Finance download; returns None on any error."""
+    try:
+        from yfinance._http import new_session
+        session = new_session()
+        data = yf.download(
+            symbol,
+            start=start_s,
+            end=end_exclusive,
+            auto_adjust=False,
+            progress=False,
+            session=session,
+        )
+        if data is None or data.empty:
+            history = yf.Ticker(symbol, session=session).history(
+                start=start_s,
+                end=end_exclusive,
+                auto_adjust=False,
+            )
+            data = history
+        return data if (data is not None and not data.empty) else None
+    except Exception:
+        return None
+
+
+def fetch_yahoo_daily(
+    ticker: str,
+    start_date: str,
+    end_date: str,
+    permno: int | None = None,
+) -> pd.DataFrame:
+    """Fetch daily Yahoo Finance prices for a public cross-check.
+
+    If the primary ticker returns no rows and a PERMNO is supplied, looks up
+    the most recent ticker for that PERMNO from crsp.stocknames and retries.
+    This handles company renames (FB→META, TWTR→X, etc.) transparently.
+    """
     if yf is None:
         raise RuntimeError("The `yfinance` package is not installed in this environment.")
 
@@ -272,27 +334,14 @@ def fetch_yahoo_daily(ticker: str, start_date: str, end_date: str) -> pd.DataFra
     symbol = ticker.upper().strip()
     last_exc: Exception | None = None
 
+    # ── Primary attempt (with up to 3 retries for rate-limits) ───────────────
     for attempt in range(3):
         try:
-            from yfinance._http import new_session
-
-            session = new_session()
-            data = yf.download(
-                symbol,
-                start=start_s,
-                end=end_exclusive,
-                auto_adjust=False,
-                progress=False,
-                session=session,
-            )
-            if data is None or data.empty:
-                history = yf.Ticker(symbol, session=session).history(
-                    start=start_s,
-                    end=end_exclusive,
-                    auto_adjust=False,
-                )
-                data = history
-            return _standardize_yahoo_daily(data, ticker)
+            data = _yahoo_download_raw(symbol, start_s, end_exclusive)
+            if data is not None and not data.empty:
+                return _standardize_yahoo_daily(data, ticker)
+            # Empty result — don't retry, fall through to fallback logic
+            break
         except Exception as exc:
             last_exc = exc
             if _yahoo_rate_limited(exc) and attempt < 2:
@@ -309,6 +358,20 @@ def fetch_yahoo_daily(ticker: str, start_date: str, end_date: str) -> pd.DataFra
         ) from last_exc
     if last_exc is not None:
         raise last_exc
+
+    # ── Fallback: company may have been renamed — look up current CRSP ticker ─
+    # e.g. FB→META, TWTR→X.  Refinitiv/Yahoo serve historical data under the
+    # current ticker even for the pre-rename period.
+    if permno is not None:
+        try:
+            current_ticker = _lookup_current_crsp_ticker(permno)
+            if current_ticker and current_ticker != symbol:
+                data = _yahoo_download_raw(current_ticker, start_s, end_exclusive)
+                if data is not None and not data.empty:
+                    # Tag rows with the original ticker so callers still see "FB"
+                    return _standardize_yahoo_daily(data, ticker)
+        except Exception:
+            pass
 
     try:
         from yfinance._http import HAS_CURL_CFFI

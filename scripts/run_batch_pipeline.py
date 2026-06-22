@@ -395,8 +395,10 @@ def main() -> None:
                              total=total, done=i, ticker_started_at=ticker_started_at,
                              providers_so_far=_prov_summary())
                 _log(f"{prefix}    ↳ Yahoo Finance  …")
+                _yh_permno = int(row["permno"]) if "permno" in row.index else None
                 yh_result, yh_elapsed, yh_err = _run_with_timeout(
-                    lambda: live_data.fetch_yahoo_daily(ticker, args.start, args.end),
+                    lambda: live_data.fetch_yahoo_daily(ticker, args.start, args.end,
+                                                        permno=_yh_permno),
                     args.provider_timeout, "Yahoo"
                 )
                 if yh_err:
@@ -472,15 +474,37 @@ def main() -> None:
                              total=total, done=i, ticker_started_at=ticker_started_at,
                              providers_so_far=_prov_summary())
                 _log(f"{prefix}    ↳ Refinitiv  …")
-                rf_result, rf_elapsed, rf_err = _run_with_timeout(
-                    lambda: live_data.run_ticker_data_query(
-                        PROJECT_ROOT, ticker, args.start, args.end,
+                _rf_permno = int(row["permno"]) if "permno" in row.index else None
+
+                def _run_refinitiv(use_ticker):
+                    return live_data.run_ticker_data_query(
+                        PROJECT_ROOT, use_ticker, args.start, args.end,
                         query_refinitiv=True, query_wrds=False,
                         query_yahoo=False, query_ravenpack=False,
                         news_count=1, wrds_limit=0,
-                    ),
+                    )
+
+                rf_result, rf_elapsed, rf_err = _run_with_timeout(
+                    lambda: _run_refinitiv(ticker),
                     args.provider_timeout, "Refinitiv"
                 )
+
+                # If primary ticker failed, retry with the current CRSP ticker
+                # (handles renames like FB→META whose RIC changed to META.O).
+                if rf_err and _rf_permno is not None and "Unable to resolve" in (rf_err or ""):
+                    _log(f"{prefix}    ↳ Refinitiv  ⚠  RIC unresolved, looking up current ticker…")
+                    try:
+                        current_tk = live_data._lookup_current_crsp_ticker(_rf_permno)
+                        if current_tk and current_tk != ticker.upper():
+                            _log(f"{prefix}    ↳ Refinitiv  ↩  retrying as {current_tk}…")
+                            rf_result, rf_elapsed2, rf_err = _run_with_timeout(
+                                lambda: _run_refinitiv(current_tk),
+                                args.provider_timeout, f"Refinitiv({current_tk})"
+                            )
+                            rf_elapsed += rf_elapsed2
+                    except Exception:
+                        pass
+
                 if rf_err:
                     prov_results["refinitiv"] = {"status": "failed" if "TIMEOUT" not in rf_err else "timeout",
                                                   "error": rf_err, "prices": pd.DataFrame(), "news": pd.DataFrame(), "rows": 0}
