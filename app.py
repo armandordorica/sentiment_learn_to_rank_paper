@@ -2201,6 +2201,33 @@ def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI
     manifests_df = _load_all_manifests()
 
     # ── Overall progress metrics ──────────────────────────────────────────────
+
+    # --- All-time (on-disk manifests) ---
+    UNIVERSE_SIZE = 1_000
+    if not manifests_df.empty:
+        at_complete = int((manifests_df["status"] == "complete").sum())
+        at_partial  = int((manifests_df["status"] == "partial").sum())
+        at_failed   = int(manifests_df["status"].isin(["failed", "error"]).sum())
+        at_never    = max(0, UNIVERSE_SIZE - len(manifests_df))
+        # Per-provider coverage: count tickers where that provider is "ok"
+        at_wrds_ok  = int((manifests_df.get("wrds_status",      pd.Series(dtype=str)) == "ok").sum())
+        at_yahoo_ok = int((manifests_df.get("yahoo_status",     pd.Series(dtype=str)) == "ok").sum())
+        at_rp_ok    = int((manifests_df.get("ravenpack_status", pd.Series(dtype=str)) == "ok").sum())
+        at_rf_ok    = int((manifests_df.get("refinitiv_status", pd.Series(dtype=str)) == "ok").sum())
+
+        st.markdown("##### All-time — 1k Universe")
+        at_cols = st.columns(7)
+        at_cols[0].metric("🟢 Complete",  f"{at_complete:,}", help="All selected providers succeeded")
+        at_cols[1].metric("🟡 Partial",   f"{at_partial:,}",  help="At least one provider failed")
+        at_cols[2].metric("🔴 Failed",    f"{at_failed:,}",   help="All providers failed")
+        at_cols[3].metric("⬜ Never run", f"{at_never:,}",    help="No manifest on disk yet")
+        at_cols[4].metric("WRDS ✓",       f"{at_wrds_ok:,}")
+        at_cols[5].metric("Yahoo ✓",      f"{at_yahoo_ok:,}")
+        at_cols[6].metric("RavenPack ✓",  f"{at_rp_ok:,}")
+
+        st.divider()
+
+    # --- Last batch run (progress CSV) ---
     if progress_df is not None and not progress_df.empty:
         total_n    = len(progress_df)
         complete_n = int((progress_df["status"] == "complete").sum())
@@ -2209,6 +2236,7 @@ def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI
         skipped_n  = int((progress_df["status"] == "skipped_cached").sum())
         pending_n  = max(0, (batch_status.get("total") or 0) - total_n)
 
+        st.markdown("##### Last batch run")
         m_cols = st.columns(6)
         m_cols[0].metric("Processed",    f"{total_n:,}")
         m_cols[1].metric("🟢 Complete",  f"{complete_n:,}")
@@ -2219,12 +2247,12 @@ def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI
     elif not is_running:
         st.info("No batch progress recorded yet. Configure and launch a batch above.")
 
-    # ── Partial-ticker breakdown ──────────────────────────────────────────────
-    if progress_df is not None and not progress_df.empty:
-        partial_rows = progress_df[progress_df["status"] == "partial"]
-        if not partial_rows.empty:
+    # ── Partial-ticker breakdown (from on-disk manifests) ────────────────────
+    if not manifests_df.empty:
+        partial_manifest = manifests_df[manifests_df["status"] == "partial"]
+        if not partial_manifest.empty:
             with st.expander(
-                f"🟡  {len(partial_rows)} tickers with partial data — click to inspect missing providers",
+                f"🟡  {len(partial_manifest)} tickers with partial data — click to inspect missing providers",
                 expanded=False,
             ):
                 st.caption(
@@ -2232,36 +2260,19 @@ def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI
                     "Launch the batch with **Smart retry partial tickers** checked to automatically "
                     "re-fetch only the missing providers without discarding the data you already have."
                 )
+                def _status_icon(s):
+                    return {"ok": "✅", "failed": "❌", "empty": "⚠️", "skipped": "—", "timeout": "⏱"}.get(str(s), str(s) or "—")
+
                 detail_rows = []
-                for _, pr in partial_rows.iterrows():
-                    ticker_val = str(pr.get("ticker", ""))
-                    rank_val   = int(pr.get("volume_rank", 0))
-                    # Read provider_status from the cached parquet to show which failed
-                    slug = "".join(ch if ch.isalnum() else "_" for ch in ticker_val.upper().strip())
-                    ps_path = (
-                        TOP1K_BY_TICKER_DIR
-                        / f"rank_{rank_val:04d}_{slug}"
-                        / "provider_status.parquet"
-                    )
-                    failed_provs = "—"
-                    ok_provs = "—"
-                    if ps_path.exists():
-                        try:
-                            ps_df = pd.read_parquet(ps_path)
-                            failed_provs = ", ".join(
-                                ps_df.loc[ps_df["status"] != "ok", "provider"].tolist()
-                            ) or "none"
-                            ok_provs = ", ".join(
-                                ps_df.loc[ps_df["status"] == "ok", "provider"].tolist()
-                            ) or "none"
-                        except Exception:
-                            pass
+                for _, pr in partial_manifest.iterrows():
                     detail_rows.append({
-                        "rank": rank_val,
-                        "ticker": ticker_val,
-                        "company": pr.get("company", ""),
-                        "ok providers": ok_provs,
-                        "failed providers": failed_provs,
+                        "rank":       int(pr.get("rank", 0)),
+                        "ticker":     pr.get("ticker", ""),
+                        "company":    pr.get("company", ""),
+                        "WRDS":       _status_icon(pr.get("wrds_status", "")),
+                        "Yahoo":      _status_icon(pr.get("yahoo_status", "")),
+                        "RavenPack":  _status_icon(pr.get("ravenpack_status", "")),
+                        "Refinitiv":  _status_icon(pr.get("refinitiv_status", "")),
                     })
                 st.dataframe(
                     pd.DataFrame(detail_rows),
