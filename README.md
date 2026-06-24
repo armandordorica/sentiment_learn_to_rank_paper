@@ -26,6 +26,88 @@ The paper depends on proprietary data:
 
 To reproduce the exact paper, you need access to those datasets or archived equivalents. If those are unavailable, the same pipeline can be recreated with substitutes such as CRSP/Compustat or Yahoo Finance for market data and RavenPack, Refinitiv, GDELT, Bloomberg News Analytics, or a custom news sentiment model for sentiment data. Results should then be treated as a methodological replication, not an exact numerical replication.
 
+## Current State & Development Log
+
+*Last updated: June 2026*
+
+This section records what has been built so far, what is working end-to-end, and what remains before the paper's learning-to-rank backtest can run.
+
+### Where We Are
+
+| Phase | Status | Summary |
+| --- | --- | --- |
+| Data infrastructure | **In progress** | Multi-provider pulls, WRDS/CRSP universe, and per-ticker batch caching are in place. |
+| Universe (market side) | **Done** | Top-1,000 CRSP candidates by 2003–2014 average volume are committed in `app_data/crsp_top_volume_universe.csv`. |
+| Universe (news filter → 512) | **To do** | Paper's ≥1 article/week TRNA filter not yet applied at scale. |
+| Feature engineering | **To do** | Weekly sentiment shock/trend, lagged returns, and labels not implemented. |
+| RankNet / ListNet | **To do** | Models and rolling 2006–2014 backtest not implemented. |
+| Results reproduction | **To do** | Table 3 / cumulative-return targets not yet attempted. |
+
+The project is past the "can we pull data?" stage and into "can we pull it reliably for the full candidate universe, diagnose gaps, and cache it for modeling?"
+
+### What Works Today
+
+**Streamlit app (`app.py`)** — three tabs:
+
+1. **Data Explorer** — single-ticker queries across Refinitiv, WRDS/CRSP, Yahoo, and RavenPack with combined price charts, news coverage, sentiment panes, and raw schema inspection.
+2. **Batch Pipeline (Top-1K)** — launch, monitor, and inspect bulk fetches for all 1,000 universe tickers; live status banner, cache snapshot, per-provider failure breakdown, and per-ticker manifest table.
+3. **Paper Validation (2003-2014)** — bundled universe CSV and validation charts without a live WRDS connection.
+
+**Batch caching** — `scripts/run_batch_pipeline.py` writes one directory per ticker under:
+
+```text
+data/raw/data_explorer_top1k/by_ticker/rank_XXXX_TICKER/
+├── manifest.json
+├── provider_status.parquet
+├── wrds_prices.parquet
+├── yahoo_prices.parquet      (when ok)
+├── ravenpack_articles.parquet (when ok)
+└── refinitiv_prices.parquet   (when ok)
+```
+
+Runs are resumable: completed tickers are skipped; **smart partial retry** re-fetches only providers that failed while preserving already-ok parquet files.
+
+**Identifier handling** — pulls are keyed on **CRSP PERMNO** from the universe file, not just the displayed ticker. Renamed symbols (e.g. FB→META) resolve via CRSP name history; RavenPack entity lookup uses PERMNO where available.
+
+**Price alignment** — WRDS/CRSP prices use split adjustment (`cfacpr`) so CRSP and Yahoo series are comparable in the Data Explorer.
+
+**Provider diagnostics** — `src/sentiment_ltr/data/provider_reason_codes.py` assigns stable `fail_reason` codes (e.g. `delisted_no_vendor_history`, `delisted_ric_retired`, `ticker_recycled_wrong_entity`) saved in manifests and rolled up in the Batch Pipeline UI.
+
+### Known Data-Quality Patterns (Not Bugs)
+
+Many top-volume names from 2003–2014 later **delisted, merged, or went private** (Lucent, Sun, Dell, Fannie Mae, etc.). The CRSP universe **includes** these securities (`last_trade_date` in the universe CSV) — this is correct and avoids survivorship bias at universe construction.
+
+| Pattern | WRDS/CRSP | Yahoo | Refinitiv | RavenPack |
+| --- | --- | --- | --- | --- |
+| Delisted / merged | Usually **ok** through last trade | Often **fails** (no vendor history) | Often **RIC retired** | May have **no articles** after exit |
+| Ticker recycled (e.g. LU) | Ok via PERMNO | Wrong entity risk | RIC confusion | Wrong-entity risk if keyed on current ticker |
+| Still trading | Ok | Ok | Usually ok | Usually ok |
+
+For replication, **WRDS/CRSP is the authoritative price source**; Yahoo and Refinitiv gaps on delisted names are expected. A ticker with WRDS ok + Yahoo/Refinitiv fail is often **`partial`**, not a data-collection failure. The paper used Bloomberg/TRNA vendor masters that largely hid these issues.
+
+**Still to decide and document:** delisting-return handling in the backtest (`msedelist` / `dlret`), point-in-time vs static 512-stock universe, and how to chain RavenPack entities across mergers.
+
+### Development Log (recent)
+
+| Date | Milestone |
+| --- | --- |
+| 2026-06 | **CRSP top-1k universe** — `notebooks/build_top1k_volume_universe.ipynb` + committed `app_data/crsp_top_volume_universe.csv`. |
+| 2026-06 | **Unified data pulls** — shared `live_data.py` for Streamlit and notebooks; multi-API dashboard. |
+| 2026-06 | **Batch pipeline v1** — `run_batch_pipeline.py` + Batch Pipeline tab; per-ticker manifests and parquets. |
+| 2026-06 | **Live batch UX** — real-time `batch_status.json`, in-progress row in ticker table, incremental RavenPack year chunks. |
+| 2026-06 | **Data Explorer fixes** — CRSP `cfacpr` adjustment, wider date inputs, PERMNO-based rename fallback (FB→META), RavenPack headline hover fix. |
+| 2026-06 | **Smart partial retry** — `partial` tickers re-fetch only failed providers; `load_cached_providers()` preserves ok data. |
+| 2026-06 | **Provider fail reasons** — machine codes + labels in manifests; cache snapshot and per-API failure tabs in Batch Pipeline UI. |
+| 2026-06 | **Manifest load performance** — fixed UI hang during active batch runs (cache token + session state; no WRDS lookups on page load). |
+
+### Immediate Next Steps
+
+1. **Finish or validate the full 1k batch cache** — confirm WRDS + RavenPack coverage counts; use failure breakdown to separate expected delistings from real errors.
+2. **Apply the paper's news filter** — average ≥1 article/week over 2003–2014 (TRNA in paper; RavenPack or Refinitiv substitute here) to move from 1,000 → ~512 candidates.
+3. **Document corporate-events policy** — static vs point-in-time universe, delisting returns, when `partial` is acceptable for modeling.
+4. **Build the weekly feature panel** — sentiment aggregation, shock/trend, lagged returns, quartile labels.
+5. **Implement RankNet/ListNet and rolling backtest** — target paper Table 3 metrics.
+
 ## Target Results From The Paper
 
 The full backtest period is 2006-2014. The paper reports these annualized results:
@@ -88,9 +170,10 @@ Then open the local URL printed by Streamlit, usually `http://localhost:8501`.
 
 ### What You Can Do
 
-The app has two top-level tabs:
+The app has three top-level tabs:
 
 - **Data Explorer**: one ticker/date-range form that can query Refinitiv, WRDS/CRSP, Yahoo Finance, and RavenPack together.
+- **Batch Pipeline (Top-1K)**: launch and monitor bulk fetches for the full CRSP top-volume universe; inspect cache coverage, per-provider failure reasons, and per-ticker manifests.
 - **Paper Validation (2003-2014)**: bundled validation charts for the CRSP top-volume universe saved under `app_data/`.
 
 In **Data Explorer**, enter a ticker such as `AAPL`, choose a start and end date, select the data sources to query, and click **Retrieve Dashboard Data**. Results are split into panes:
@@ -123,6 +206,27 @@ Yahoo Finance is best-effort. Some hosted or sandboxed networks block Yahoo's HT
 3. **Inspect RavenPack sentiment**: select RavenPack sentiment; use the **Sentiment** pane to review article-level sentiment scores, daily/weekly averages, event text, and classification fields.
 4. **Debug provider schemas**: use **Raw Data** to inspect returned columns and row counts before writing a notebook or batch pipeline.
 5. **Validate bundled paper-window artifacts**: open **Paper Validation (2003-2014)** to review the committed CRSP top-volume universe and top-20 validation plots without querying WRDS.
+6. **Bulk-cache the full universe**: open **Batch Pipeline (Top-1K)**, configure providers and date range (2003-01-01 to 2014-12-31), launch the batch, and use the cache snapshot and failure-reason tabs to track progress across all 1,000 tickers.
+
+### Batch Pipeline
+
+Launch a background batch from the UI or CLI:
+
+```bash
+python scripts/run_batch_pipeline.py --start 2003-01-01 --end 2014-12-31 --rerun-partial
+```
+
+Useful flags:
+
+| Flag | Purpose |
+| --- | --- |
+| `--rerun-partial` | Smart retry: re-fetch only failed providers on `partial` tickers (default in UI). |
+| `--rerun-failed` | Retry tickers whose overall status is `failed` or `error`. |
+| `--force-rerun` | Ignore cache and re-fetch everything. |
+| `--no-refinitiv` / `--no-yahoo` | Skip optional price cross-check providers. |
+| `--max-tickers N` | Smoke-test on the first N tickers from the start rank. |
+
+Each completed ticker writes `manifest.json` with per-provider `status`, `rows`, `fail_reason`, and `fail_reason_label`. The UI reads these manifests to show universe-wide coverage without re-querying WRDS.
 
 ## Data Needed
 
@@ -475,9 +579,9 @@ Use these statuses while building the replication:
 
 | Task | Status | Notes |
 | --- | --- | --- |
-| Define data schema and file formats | To Do | Specify columns, date conventions, identifiers, and storage paths under `data/`. |
+| Define data schema and file formats | Pending Review | Per-ticker manifest + parquet layout under `data/raw/data_explorer_top1k/`; see **Current State** above. |
 | Maintain reproducible environment | Pending Review | Conda environment, lock file, and notebook kernel are in place; update when dependencies change. |
-| Document replication limitations | To Do | Record data substitutions, missing assumptions, and deviations from the paper. |
+| Document replication limitations | In Progress | Development log and delisting/survivorship notes in README; corporate-events backtest policy still TBD. |
 
 ### Market Data And Universe
 
@@ -487,22 +591,22 @@ Use these statuses while building the replication:
 | Verify WRDS connection and CRSP access | Done | `wrds_connection.ipynb` connected to WRDS, confirmed CRSP access, and returned a tiny CRSP sample query. |
 | Define market data universe candidate list | Done | Added a WRDS/CRSP script that builds the top 1,000 common-stock candidates by average daily volume for 2003-2014. |
 | Validate CRSP candidate universe | Pending Review | `notebooks/crsp_universe_validation.ipynb` checks row counts and filters, then displays the top 20 stocks by average daily volume. |
-| Build raw market data loader | Pending Review | Adapted the Yahoo Finance and Alpaca retrieval helper from `Portfolio_Optimization_2023`; WRDS/CRSP loader still needs to be implemented. |
-| Pull daily OHLCV data for 2003-2014 | To Do | Next task: download adjusted close, close, open, high, low, volume, returns, shares outstanding, and delisting data for the CRSP candidate securities. |
+| Build raw market data loader | In Progress | `live_data.py` + batch pipeline pull WRDS/CRSP daily prices; Yahoo/Refinitiv as optional cross-checks. |
+| Pull daily OHLCV data for 2003-2014 | In Progress | Batch pipeline caches per-ticker WRDS parquets for the full top-1k universe; delisting returns not yet pulled. |
 | Pull benchmark market data | To Do | Download SPY or S&P 500 benchmark data for the full 2003-2014 window. |
 | Pull or approximate GICS sectors | To Do | Needed for sector-specific sentiment lookback windows and stock-universe diagnostics. |
-| Map identifiers across data sources | To Do | Maintain PERMNO, PERMCO, ticker, RIC, company name, exchange, and sector identifiers so market data can join to news sentiment. |
-| Validate market data coverage | To Do | Check missing prices, stale symbols, delistings, split/dividend adjustment, and date coverage. |
-| Store raw market data locally | To Do | Save reproducible raw pulls under `data/raw/market/`, which is intentionally ignored by Git. |
-| Create market data manifest | To Do | Track source, pull date, symbols, date range, row counts, failures, and schema version. |
+| Map identifiers across data sources | In Progress | Universe and batch pulls use PERMNO; RavenPack entity resolution uses PERMNO; RIC mapping via Refinitiv where available. |
+| Validate market data coverage | In Progress | Batch Pipeline UI: cache snapshot, per-provider fail-reason rollups, and per-ticker manifest inspection. |
+| Store raw market data locally | In Progress | Per-ticker cache under `data/raw/data_explorer_top1k/by_ticker/` (gitignored). |
+| Create market data manifest | Done | Each ticker directory has `manifest.json` + `provider_status.parquet` with status, row counts, and fail reasons. |
 | Build processed daily market panel | To Do | Produce a clean daily table ready for weekly aggregation and feature generation. |
 
 ### News Sentiment Data
 
 | Task | Status | Notes |
 | --- | --- | --- |
-| Obtain company-level news sentiment data | Blocked | Exact replication requires TRNA or an equivalent historical sentiment dataset. |
-| Build raw news sentiment loader | To Do | Load article timestamps, stock identifiers, `pos`, `obj`, `neg`, and `relevance`. |
+| Obtain company-level news sentiment data | Blocked | Exact replication requires TRNA; using RavenPack via WRDS as substitute in batch pipeline. |
+| Build raw news sentiment loader | In Progress | RavenPack article pulls in `live_data.py` and batch pipeline; Refinitiv headlines available in Data Explorer. |
 | Aggregate weekly stock sentiment | To Do | Compute `S_sentiment = relevance * (pos - neg)` and average by stock-week. |
 
 ### Feature Dataset
@@ -537,7 +641,7 @@ Use these statuses while building the replication:
 | Task | Status | Notes |
 | --- | --- | --- |
 | Add tests for no look-ahead bias | To Do | Verify features use only information available before each rebalance. |
-| Validate survivorship-bias handling | To Do | Confirm CRSP delisted securities and name history are handled correctly. |
+| Validate survivorship-bias handling | In Progress | Universe includes delisted names via CRSP `last_trade_date`; backtest exit policy and `msedelist` returns still TBD. |
 | Validate portfolio accounting assumptions | To Do | Check leverage convention, transaction-cost assumptions, shorting assumptions, and benchmark alignment. |
 
 ## Reproducibility Checks
