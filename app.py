@@ -33,6 +33,7 @@ if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
 from sentiment_ltr.data import live_data
+from sentiment_ltr.data.provider_reason_codes import enrich_provider_status_records, reason_label
 
 REFINITIV_IMPORT_ERROR: str | None = None
 
@@ -733,11 +734,16 @@ def _provider_status_label(result: dict[str, object]) -> str:
         row_count = len(prices) if isinstance(prices, pd.DataFrame) else 0
         return f"OK ({row_count:,} rows)"
     if status == "empty":
-        return "No rows"
+        reason = result.get("fail_reason_label") or result.get("fail_reason")
+        return f"No rows — {reason}" if reason else "No rows"
     if status == "unavailable":
-        return "Unavailable"
+        reason = result.get("fail_reason_label") or result.get("fail_reason")
+        return f"Unavailable — {reason}" if reason else "Unavailable"
     if status == "skipped":
         return "Skipped"
+    reason = result.get("fail_reason_label") or result.get("fail_reason")
+    if reason:
+        return f"Failed — {reason}"
     return "Failed"
 
 
@@ -1857,7 +1863,11 @@ def render_multi_api_dashboard_tab() -> None:
                 prices = pres.get("prices")
                 n = len(prices) if isinstance(prices, pd.DataFrame) else "—"
                 err = pres.get("error") or ""
-                st.caption(f"**{pname}** status={pres.get('status')} rows={n} err={str(err)[:120]}")
+                reason = pres.get("fail_reason") or ""
+                st.caption(
+                    f"**{pname}** status={pres.get('status')} rows={n} "
+                    f"reason={reason or '—'} err={str(err)[:80]}"
+                )
         if live_result["price_frames"]:
             render_dashboard_price_pane(live_result, key_prefix="dashboard_overview")
         else:
@@ -1928,6 +1938,42 @@ def _read_batch_progress() -> pd.DataFrame | None:
         return None
 
 
+def _manifest_cache_token() -> str:
+    """Invalidate manifest cache when tickers are added/updated on disk.
+
+    Intentionally excludes batch_status.json — that file updates every second
+    during a run and would bust the cache on every auto-refresh.
+    """
+    if not TOP1K_BY_TICKER_DIR.exists():
+        return "0"
+    latest = 0.0
+    count = 0
+    for p in TOP1K_BY_TICKER_DIR.glob("rank_*/manifest.json"):
+        count += 1
+        latest = max(latest, p.stat().st_mtime)
+    return f"{count}:{latest:.0f}"
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def _load_all_manifests_cached(cache_token: str) -> pd.DataFrame:
+    """Cached wrapper — reloads when manifests change (see cache_token)."""
+    return _load_all_manifests()
+
+
+def _get_manifests_df() -> pd.DataFrame:
+    """Return manifests DataFrame, using session cache to avoid reload spinners."""
+    token = _manifest_cache_token()
+    if (
+        "_manifests_df" in st.session_state
+        and st.session_state.get("_manifests_token") == token
+    ):
+        return st.session_state["_manifests_df"]
+    df = _load_all_manifests_cached(token)
+    st.session_state["_manifests_df"] = df
+    st.session_state["_manifests_token"] = token
+    return df
+
+
 def _load_all_manifests() -> pd.DataFrame:
     """Walk by_ticker/ dirs and collect manifest data into a DataFrame."""
     rows = []
@@ -1936,12 +1982,31 @@ def _load_all_manifests() -> pd.DataFrame:
     for mfile in sorted(TOP1K_BY_TICKER_DIR.glob("rank_*/manifest.json")):
         try:
             m = json.loads(mfile.read_text(encoding="utf-8"))
+            provider_status = list(m.get("provider_status", []))
+            needs_enrich = any(
+                not ps.get("fail_reason") and str(ps.get("status", "")) not in ("ok", "skipped")
+                for ps in provider_status
+            )
+            if needs_enrich:
+                # Fast backfill from error text only — skip reading wrds parquets
+                # (reading 1000 parquets on every page load was causing the UI to hang).
+                provider_status = enrich_provider_status_records(
+                    provider_status,
+                    ticker=str(m.get("ticker", "")),
+                    permno=m.get("permno"),
+                    query_start=m.get("start_date"),
+                    query_end=m.get("end_date"),
+                    wrds_last_trade_date=None,
+                    skip_permno_lookup=True,
+                )
             provider_map: dict[str, str] = {}
             provider_rows_map: dict[str, int] = {}
-            for ps in m.get("provider_status", []):
+            provider_reason_map: dict[str, str] = {}
+            for ps in provider_status:
                 pname = ps.get("provider", "")
                 provider_map[pname] = ps.get("status", "")
                 provider_rows_map[pname] = int(ps.get("rows") or 0)
+                provider_reason_map[pname] = ps.get("fail_reason") or ""
             rows.append({
                 "rank":       m.get("volume_rank"),
                 "ticker":     m.get("ticker"),
@@ -1957,6 +2022,10 @@ def _load_all_manifests() -> pd.DataFrame:
                 "yahoo_rows":        provider_rows_map.get("yahoo", 0),
                 "ravenpack_rows":    provider_rows_map.get("ravenpack", 0),
                 "refinitiv_rows":    provider_rows_map.get("refinitiv", 0),
+                "yahoo_fail_reason":      provider_reason_map.get("yahoo", ""),
+                "ravenpack_fail_reason":  provider_reason_map.get("ravenpack", ""),
+                "refinitiv_fail_reason":  provider_reason_map.get("refinitiv", ""),
+                "wrds_fail_reason":       provider_reason_map.get("wrds", ""),
                 "created_at": m.get("created_at", ""),
             })
         except Exception:
@@ -2017,6 +2086,168 @@ def _status_color(status: str) -> str:
     }.get(status, "⬜")
 
 
+def _provider_status_cell(status: str, rows: object, fail_reason: str = "") -> str:
+    """One-line provider status for the per-ticker table: icon, rows, reason code."""
+    status = str(status or "").strip()
+    if not status or status in ("…", "—"):
+        return "…"
+    try:
+        row_n = int(rows or 0)
+    except (TypeError, ValueError):
+        row_n = 0
+    if status == "ok":
+        return f"✅ {row_n:,}" if row_n else "✅"
+    icon = {"failed": "❌", "empty": "⚠️", "timeout": "⏱", "skipped": "—", "unavailable": "⛔"}.get(status, "•")
+    if fail_reason:
+        return f"{icon} {fail_reason}"
+    return f"{icon} {status}"
+
+
+def _render_cache_snapshot(manifests_df: pd.DataFrame, universe_size: int = 1_000) -> None:
+    """At-a-glance view of everything cached on disk across the 1k universe."""
+    st.markdown("### 📦 Cached data snapshot")
+
+    if manifests_df.empty:
+        st.info(f"No tickers cached yet — 0 / {universe_size:,} in the universe.")
+        return
+
+    n_cached = len(manifests_df)
+    n_complete = int((manifests_df["status"] == "complete").sum())
+    n_partial = int((manifests_df["status"] == "partial").sum())
+    n_failed = int(manifests_df["status"].isin(["failed", "error"]).sum())
+    n_never = max(0, universe_size - n_cached)
+
+    # ── Universe progress ─────────────────────────────────────────────────────
+    top_cols = st.columns(6)
+    top_cols[0].metric("Cached", f"{n_cached:,} / {universe_size:,}")
+    top_cols[1].metric("🟢 Complete", f"{n_complete:,}")
+    top_cols[2].metric("🟡 Partial", f"{n_partial:,}")
+    top_cols[3].metric("🔴 Failed", f"{n_failed:,}")
+    top_cols[4].metric("⬜ Not cached", f"{n_never:,}")
+    pct_complete = n_complete / universe_size if universe_size else 0
+    top_cols[5].metric("Fully done", f"{pct_complete * 100:.1f}%")
+
+    st.progress(
+        n_cached / universe_size,
+        text=f"{n_cached:,} tickers have at least one cached manifest  ·  "
+             f"{n_complete:,} fully complete ({pct_complete * 100:.1f}% of universe)",
+    )
+
+    # ── Per-provider coverage matrix ─────────────────────────────────────────
+    st.markdown("**Provider coverage** — across all cached tickers")
+    provider_names = ["wrds", "yahoo", "ravenpack", "refinitiv"]
+    coverage_rows: list[dict] = []
+    for pname in provider_names:
+        status_col = f"{pname}_status"
+        statuses = manifests_df[status_col] if status_col in manifests_df.columns else pd.Series(dtype=str)
+        n_ok = int((statuses == "ok").sum())
+        n_fail = int(statuses.isin(["failed", "timeout"]).sum())
+        n_empty = int((statuses == "empty").sum())
+        n_other = int(n_cached - n_ok - n_fail - n_empty)
+        coverage_rows.append({
+            "Provider": pname.upper(),
+            "✅ ok": n_ok,
+            "❌ failed": n_fail,
+            "⚠️ empty": n_empty,
+            "other": n_other,
+            "% ok": f"{100 * n_ok / n_cached:.1f}%" if n_cached else "—",
+        })
+
+    cov_df = pd.DataFrame(coverage_rows)
+    st.dataframe(cov_df, use_container_width=True, hide_index=True)
+
+    bar_cols = st.columns(4)
+    for col, row in zip(bar_cols, coverage_rows):
+        ok_n = int(row["✅ ok"])
+        with col:
+            st.caption(row["Provider"])
+            st.progress(ok_n / n_cached if n_cached else 0.0, text=f"{ok_n:,} ok")
+
+
+_BATCH_PROVIDER_NAMES = ("wrds", "yahoo", "ravenpack", "refinitiv")
+_OK_PROVIDER_STATUSES = frozenset({"ok", "skipped", "…", ""})
+
+
+def _fail_reason_counts_for_provider(manifests_df: pd.DataFrame, pname: str) -> pd.DataFrame:
+    """Group non-ok tickers by fail_reason for one provider."""
+    reason_col = f"{pname}_fail_reason"
+    status_col = f"{pname}_status"
+    empty = pd.DataFrame(columns=["Reason", "Label", "Count"])
+    if manifests_df.empty or status_col not in manifests_df.columns:
+        return empty
+
+    statuses = manifests_df[status_col].fillna("").astype(str)
+    not_ok = manifests_df[~statuses.isin(_OK_PROVIDER_STATUSES)]
+    if not_ok.empty:
+        return empty
+
+    if reason_col in not_ok.columns:
+        reasons = not_ok[reason_col].fillna("").astype(str).replace("", "(no reason recorded)")
+    else:
+        reasons = pd.Series("(no reason recorded)", index=not_ok.index)
+
+    counts = (
+        reasons.value_counts()
+        .rename_axis("Reason")
+        .reset_index(name="Count")
+    )
+    counts["Label"] = counts["Reason"].apply(
+        lambda code: reason_label(code) if code != "(no reason recorded)" else code
+    )
+    return counts.sort_values("Count", ascending=False).reset_index(drop=True)
+
+
+def _render_fail_reasons_by_provider(manifests_df: pd.DataFrame) -> None:
+    """Per-API tables and charts of failure reason counts across cached tickers."""
+    st.markdown("### Failure reasons by provider")
+    st.caption(
+        "Counts of non-ok tickers among cached manifests, grouped by machine-readable "
+        "`fail_reason` code. Hover a bar for the human-readable label."
+    )
+
+    if manifests_df.empty:
+        st.info("No cached tickers yet — failure breakdown will appear after the first batch run.")
+        return
+
+    tab_labels = [p.upper() for p in _BATCH_PROVIDER_NAMES]
+    tabs = st.tabs(tab_labels)
+    for tab, pname in zip(tabs, _BATCH_PROVIDER_NAMES):
+        with tab:
+            counts_df = _fail_reason_counts_for_provider(manifests_df, pname)
+            if counts_df.empty:
+                st.success("No failures recorded for this provider.")
+                continue
+
+            total_failures = int(counts_df["Count"].sum())
+            st.metric("Non-ok tickers", f"{total_failures:,}")
+
+            display_df = counts_df[["Reason", "Label", "Count"]]
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+            chart_df = counts_df.sort_values("Count", ascending=True)
+            fig = px.bar(
+                chart_df,
+                x="Count",
+                y="Reason",
+                orientation="h",
+                custom_data=["Label"],
+                labels={"Reason": "Reason code", "Count": "Tickers"},
+            )
+            fig.update_traces(
+                hovertemplate=(
+                    "Reason: %{y}<br>Label: %{customdata[0]}<br>Tickers: %{x}<extra></extra>"
+                ),
+            )
+            fig.update_layout(
+                hovermode="closest",
+                height=max(220, 36 * len(chart_df)),
+                margin=dict(l=10, r=10, t=30, b=10),
+                yaxis=dict(categoryorder="total ascending"),
+                showlegend=False,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+
 def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI function
     # Force Refinitiv off by default so stale session state never auto-enables it
     if "batch_use_refinitiv" not in st.session_state:
@@ -2028,6 +2259,9 @@ def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI
         "CRSP top-volume universe. Each ticker is cached immediately; reruns skip "
         "completed tickers automatically."
     )
+
+    # Load cached manifests once per render (fast path when nothing changed).
+    manifests_df = _get_manifests_df()
 
     # ── Live status banner ────────────────────────────────────────────────────
     pid = _batch_pid_running()
@@ -2086,16 +2320,17 @@ def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI
         else:
             st.progress(0.0, text="Starting…")
 
-        # Live log tail — always visible while running
+        # Live log — collapsed so it doesn't push the cache snapshot off-screen.
         log_path = TOP1K_OUTPUT_DIR / "batch_runner.log"
-        if log_path.exists():
-            try:
-                lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-                st.code("\n".join(lines[-25:]), language=None)
-            except Exception:
-                pass
-        else:
-            st.info("Log file not yet created — the batch process is still starting up.")
+        with st.expander("📜 Live batch log", expanded=False):
+            if log_path.exists():
+                try:
+                    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+                    st.code("\n".join(lines[-40:]), language=None)
+                except Exception:
+                    st.caption("Could not read log file.")
+            else:
+                st.info("Log file not yet created — the batch process is still starting up.")
 
     elif batch_status:
         final_status = batch_status.get("status", "unknown")
@@ -2114,6 +2349,189 @@ def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI
             st.info(f"Batch status: **{final_status}** — {updated}")
     else:
         st.info("No batch has been run yet. Use the configuration below to launch one.")
+
+    # ── Cache snapshot (always visible — what's on disk right now) ───────────
+    _render_cache_snapshot(manifests_df)
+    st.divider()
+    _render_fail_reasons_by_provider(manifests_df)
+
+    # ── Refresh / auto-refresh controls ─────────────────────────────────────
+    ctrl_cols = st.columns([1, 5])
+    if not is_running:
+        if ctrl_cols[0].button("🔄  Refresh now"):
+            st.rerun()
+    auto_refresh = ctrl_cols[1].checkbox(
+        "Auto-refresh every 5 s", value=is_running, key="batch_auto_refresh"
+    )
+
+    st.divider()
+
+    # ── Per-ticker status (always visible — full cached universe) ─────────────
+    st.subheader("Per-Ticker Status")
+
+    # Prepend a live row for the ticker currently being processed so it shows
+    # immediately without waiting for the manifest to be written.
+    if is_running and batch_status:
+        live_rank   = batch_status.get("current_rank")
+        live_ticker = batch_status.get("current_ticker", "")
+        live_step   = batch_status.get("current_step", "starting…")
+        psf         = batch_status.get("providers_so_far", {})  # partial provider results
+        if live_ticker and live_rank:
+            # Compute real elapsed
+            try:
+                from datetime import datetime, timezone as _tz2
+                _ts = batch_status.get("ticker_started_at", "")
+                _live_elapsed = round((datetime.now(_tz2.utc) - datetime.fromisoformat(_ts)).total_seconds()) if _ts else 0
+            except Exception:
+                _live_elapsed = 0
+
+            def _psf_status(p):
+                if p not in psf:
+                    return "…"        # not started yet
+                return psf[p].get("status", "…")
+
+            def _psf_rows(p):
+                if p not in psf:
+                    return ""
+                return psf[p].get("rows", 0)
+
+            live_row = pd.DataFrame([{
+                "rank": live_rank, "ticker": live_ticker, "company": "⚡ in progress",
+                "status": f"⚡ {live_step}",
+                "wrds_status":      _psf_status("wrds"),
+                "wrds_rows":        _psf_rows("wrds"),
+                "yahoo_status":     _psf_status("yahoo"),
+                "yahoo_rows":       _psf_rows("yahoo"),
+                "ravenpack_status": _psf_status("ravenpack"),
+                "ravenpack_rows":   _psf_rows("ravenpack"),
+                "refinitiv_status": _psf_status("refinitiv"),
+                "refinitiv_rows":   _psf_rows("refinitiv"),
+                "wrds_fail_reason": "",
+                "yahoo_fail_reason": "",
+                "ravenpack_fail_reason": "",
+                "refinitiv_fail_reason": "",
+                "ok": sum(1 for p in psf if psf[p].get("status") == "ok"),
+                "fail": sum(1 for p in psf if psf[p].get("status") in ("failed", "timeout")),
+                "created_at": f"{_live_elapsed}s elapsed",
+            }])
+            # Only prepend if this ticker isn't already in the manifests table
+            if manifests_df.empty or live_ticker not in manifests_df["ticker"].values:
+                manifests_df = pd.concat([live_row, manifests_df], ignore_index=True)
+
+    if not manifests_df.empty:
+        # Filter controls
+        filter_cols = st.columns([2, 1, 1, 1])
+        status_filter = filter_cols[0].multiselect(
+            "Filter by status",
+            options=["complete", "partial", "failed", "error"],
+            default=[],
+            key="batch_status_filter",
+            placeholder="All statuses",
+        )
+        show_ticker = filter_cols[1].text_input("Filter ticker", value="", key="batch_ticker_filter").strip().upper()
+        show_only_failed_providers = filter_cols[2].checkbox("Only show provider failures", key="batch_prov_fail_filter")
+
+        view_df = manifests_df.copy()
+        for col in ("wrds_fail_reason", "yahoo_fail_reason", "ravenpack_fail_reason", "refinitiv_fail_reason"):
+            if col not in view_df.columns:
+                view_df[col] = ""
+        if status_filter:
+            view_df = view_df[view_df["status"].isin(status_filter)]
+        if show_ticker:
+            view_df = view_df[view_df["ticker"].str.upper().str.contains(show_ticker)]
+        if show_only_failed_providers:
+            view_df = view_df[view_df["fail"] > 0]
+
+        # Build display table — each provider column shows status + fail_reason inline
+        display = view_df[[
+            "rank", "ticker", "company", "status",
+            "wrds_status", "wrds_rows", "wrds_fail_reason",
+            "yahoo_status", "yahoo_rows", "yahoo_fail_reason",
+            "ravenpack_status", "ravenpack_rows", "ravenpack_fail_reason",
+            "refinitiv_status", "refinitiv_rows", "refinitiv_fail_reason",
+            "created_at",
+        ]].copy()
+        display["Status"] = display["status"].apply(lambda s: f"{_status_color(s)} {s}")
+        display["WRDS"] = display.apply(
+            lambda r: _provider_status_cell(r["wrds_status"], r["wrds_rows"], r["wrds_fail_reason"]), axis=1,
+        )
+        display["Yahoo"] = display.apply(
+            lambda r: _provider_status_cell(r["yahoo_status"], r["yahoo_rows"], r["yahoo_fail_reason"]), axis=1,
+        )
+        display["RavenPack"] = display.apply(
+            lambda r: _provider_status_cell(
+                r["ravenpack_status"], r["ravenpack_rows"], r["ravenpack_fail_reason"],
+            ), axis=1,
+        )
+        display["Refinitiv"] = display.apply(
+            lambda r: _provider_status_cell(
+                r["refinitiv_status"], r["refinitiv_rows"], r["refinitiv_fail_reason"],
+            ), axis=1,
+        )
+        display = display[[
+            "rank", "ticker", "company", "Status",
+            "WRDS", "Yahoo", "RavenPack", "Refinitiv", "created_at",
+        ]]
+        display.columns = [
+            "Rank", "Ticker", "Company", "Status",
+            "WRDS", "Yahoo", "RavenPack", "Refinitiv", "Cached at",
+        ]
+
+        st.dataframe(display, use_container_width=True, height=480)
+        st.caption(
+            f"Showing {len(view_df):,} of {len(manifests_df):,} cached tickers. "
+            "Provider cells: ✅ ok + row count · ❌/⚠️ fail_reason code (hover row in Ticker Detail for full label)."
+        )
+
+        # ── Ticker detail expander ────────────────────────────────────────────
+        st.subheader("Ticker Detail")
+        ticker_options = sorted(manifests_df["ticker"].dropna().unique().tolist())
+        selected_detail = st.selectbox("Select ticker for detail", options=[""] + ticker_options, key="batch_detail_ticker")
+        if selected_detail:
+            row = manifests_df[manifests_df["ticker"] == selected_detail]
+            if not row.empty:
+                r = row.iloc[0]
+                rank_dir = None
+                slug = "".join(ch if ch.isalnum() else "_" for ch in selected_detail.upper().strip())
+                for d in TOP1K_BY_TICKER_DIR.glob(f"rank_{int(r['rank']):04d}_{slug}"):
+                    rank_dir = d
+                    break
+
+                d_cols = st.columns(4)
+                d_cols[0].metric("Rank",    r["rank"])
+                d_cols[1].metric("Ticker",  r["ticker"])
+                d_cols[2].metric("Status",  r["status"])
+                d_cols[3].metric("OK / Fail providers", f"{int(r['ok'])} / {int(r['fail'])}")
+                st.caption(f"Company: {r['company']}   |   Cached: {r['created_at']}")
+
+                # Per-provider detail table
+                prov_rows = []
+                for pname in ["wrds", "yahoo", "ravenpack", "refinitiv"]:
+                    reason = r.get(f"{pname}_fail_reason") or ""
+                    prov_rows.append({
+                        "Provider":  pname,
+                        "Status":    r.get(f"{pname}_status") or "—",
+                        "Rows":      int(r.get(f"{pname}_rows") or 0),
+                        "Reason":    reason,
+                        "Reason (label)": reason_label(reason) if reason else "",
+                    })
+                st.dataframe(pd.DataFrame(prov_rows), use_container_width=True, hide_index=True)
+
+                # Show output files
+                if rank_dir and (rank_dir / "manifest.json").exists():
+                    try:
+                        full_manifest = json.loads((rank_dir / "manifest.json").read_text(encoding="utf-8"))
+                        outputs = full_manifest.get("outputs", {})
+                        if outputs:
+                            st.markdown("**Cached files**")
+                            for key, path in outputs.items():
+                                st.code(path)
+                    except Exception:
+                        pass
+    else:
+        st.info("No ticker data cached yet.")
+
+    st.divider()
 
     # ── Configuration form ────────────────────────────────────────────────────
     with st.expander("⚙️  Configuration", expanded=not is_running):
@@ -2184,243 +2602,6 @@ def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI
             )
             time.sleep(1.5)
             st.rerun()
-
-    # ── Refresh / auto-refresh controls (below config) ───────────────────────
-    ctrl_cols = st.columns([1, 5])
-    if not is_running:
-        if ctrl_cols[0].button("🔄  Refresh now"):
-            st.rerun()
-    auto_refresh = ctrl_cols[1].checkbox(
-        "Auto-refresh every 5 s", value=is_running, key="batch_auto_refresh"
-    )
-
-    st.divider()
-
-    # ── Read progress data ────────────────────────────────────────────────────
-    progress_df = _read_batch_progress()
-    manifests_df = _load_all_manifests()
-
-    # ── Overall progress metrics ──────────────────────────────────────────────
-
-    # --- All-time (on-disk manifests) ---
-    UNIVERSE_SIZE = 1_000
-    if not manifests_df.empty:
-        at_complete = int((manifests_df["status"] == "complete").sum())
-        at_partial  = int((manifests_df["status"] == "partial").sum())
-        at_failed   = int(manifests_df["status"].isin(["failed", "error"]).sum())
-        at_never    = max(0, UNIVERSE_SIZE - len(manifests_df))
-        # Per-provider coverage: count tickers where that provider is "ok"
-        at_wrds_ok  = int((manifests_df.get("wrds_status",      pd.Series(dtype=str)) == "ok").sum())
-        at_yahoo_ok = int((manifests_df.get("yahoo_status",     pd.Series(dtype=str)) == "ok").sum())
-        at_rp_ok    = int((manifests_df.get("ravenpack_status", pd.Series(dtype=str)) == "ok").sum())
-        at_rf_ok    = int((manifests_df.get("refinitiv_status", pd.Series(dtype=str)) == "ok").sum())
-
-        st.markdown("##### All-time — 1k Universe")
-        at_cols = st.columns(7)
-        at_cols[0].metric("🟢 Complete",  f"{at_complete:,}", help="All selected providers succeeded")
-        at_cols[1].metric("🟡 Partial",   f"{at_partial:,}",  help="At least one provider failed")
-        at_cols[2].metric("🔴 Failed",    f"{at_failed:,}",   help="All providers failed")
-        at_cols[3].metric("⬜ Never run", f"{at_never:,}",    help="No manifest on disk yet")
-        at_cols[4].metric("WRDS ✓",       f"{at_wrds_ok:,}")
-        at_cols[5].metric("Yahoo ✓",      f"{at_yahoo_ok:,}")
-        at_cols[6].metric("RavenPack ✓",  f"{at_rp_ok:,}")
-
-        st.divider()
-
-    # --- Last batch run (progress CSV) ---
-    if progress_df is not None and not progress_df.empty:
-        total_n    = len(progress_df)
-        complete_n = int((progress_df["status"] == "complete").sum())
-        partial_n  = int((progress_df["status"] == "partial").sum())
-        failed_n   = int(progress_df["status"].isin(["failed", "error"]).sum())
-        skipped_n  = int((progress_df["status"] == "skipped_cached").sum())
-        pending_n  = max(0, (batch_status.get("total") or 0) - total_n)
-
-        st.markdown("##### Last batch run")
-        m_cols = st.columns(6)
-        m_cols[0].metric("Processed",    f"{total_n:,}")
-        m_cols[1].metric("🟢 Complete",  f"{complete_n:,}")
-        m_cols[2].metric("🟡 Partial",   f"{partial_n:,}")
-        m_cols[3].metric("🔴 Failed",    f"{failed_n:,}")
-        m_cols[4].metric("⚪ Skipped",   f"{skipped_n:,}")
-        m_cols[5].metric("⏳ Remaining", f"{pending_n:,}" if batch_status.get("total") else "—")
-    elif not is_running:
-        st.info("No batch progress recorded yet. Configure and launch a batch above.")
-
-    # ── Partial-ticker breakdown (from on-disk manifests) ────────────────────
-    if not manifests_df.empty:
-        partial_manifest = manifests_df[manifests_df["status"] == "partial"]
-        if not partial_manifest.empty:
-            with st.expander(
-                f"🟡  {len(partial_manifest)} tickers with partial data — click to inspect missing providers",
-                expanded=False,
-            ):
-                st.caption(
-                    "These tickers have at least one provider that failed. "
-                    "Launch the batch with **Smart retry partial tickers** checked to automatically "
-                    "re-fetch only the missing providers without discarding the data you already have."
-                )
-                def _status_icon(s):
-                    return {"ok": "✅", "failed": "❌", "empty": "⚠️", "skipped": "—", "timeout": "⏱"}.get(str(s), str(s) or "—")
-
-                detail_rows = []
-                for _, pr in partial_manifest.iterrows():
-                    detail_rows.append({
-                        "rank":       int(pr.get("rank", 0)),
-                        "ticker":     pr.get("ticker", ""),
-                        "company":    pr.get("company", ""),
-                        "WRDS":       _status_icon(pr.get("wrds_status", "")),
-                        "Yahoo":      _status_icon(pr.get("yahoo_status", "")),
-                        "RavenPack":  _status_icon(pr.get("ravenpack_status", "")),
-                        "Refinitiv":  _status_icon(pr.get("refinitiv_status", "")),
-                    })
-                st.dataframe(
-                    pd.DataFrame(detail_rows),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-    st.divider()
-
-    # ── Per-ticker progress table ─────────────────────────────────────────────
-    st.subheader("Per-Ticker Status")
-
-    # Prepend a live row for the ticker currently being processed so it shows
-    # immediately without waiting for the manifest to be written.
-    if is_running and batch_status:
-        live_rank   = batch_status.get("current_rank")
-        live_ticker = batch_status.get("current_ticker", "")
-        live_step   = batch_status.get("current_step", "starting…")
-        psf         = batch_status.get("providers_so_far", {})  # partial provider results
-        if live_ticker and live_rank:
-            # Compute real elapsed
-            try:
-                from datetime import datetime, timezone as _tz2
-                _ts = batch_status.get("ticker_started_at", "")
-                _live_elapsed = round((datetime.now(_tz2.utc) - datetime.fromisoformat(_ts)).total_seconds()) if _ts else 0
-            except Exception:
-                _live_elapsed = 0
-
-            def _psf_status(p):
-                if p not in psf:
-                    return "…"        # not started yet
-                return psf[p].get("status", "…")
-
-            def _psf_rows(p):
-                if p not in psf:
-                    return ""
-                return psf[p].get("rows", 0)
-
-            live_row = pd.DataFrame([{
-                "rank": live_rank, "ticker": live_ticker, "company": "⚡ in progress",
-                "status": f"⚡ {live_step}",
-                "wrds_status":      _psf_status("wrds"),
-                "wrds_rows":        _psf_rows("wrds"),
-                "yahoo_status":     _psf_status("yahoo"),
-                "yahoo_rows":       _psf_rows("yahoo"),
-                "ravenpack_status": _psf_status("ravenpack"),
-                "ravenpack_rows":   _psf_rows("ravenpack"),
-                "refinitiv_status": _psf_status("refinitiv"),
-                "refinitiv_rows":   _psf_rows("refinitiv"),
-                "ok": sum(1 for p in psf if psf[p].get("status") == "ok"),
-                "fail": sum(1 for p in psf if psf[p].get("status") in ("failed", "timeout")),
-                "created_at": f"{_live_elapsed}s elapsed",
-            }])
-            # Only prepend if this ticker isn't already in the manifests table
-            if manifests_df.empty or live_ticker not in manifests_df["ticker"].values:
-                manifests_df = pd.concat([live_row, manifests_df], ignore_index=True)
-
-    if not manifests_df.empty:
-        # Filter controls
-        filter_cols = st.columns([2, 1, 1, 1])
-        status_filter = filter_cols[0].multiselect(
-            "Filter by status",
-            options=["complete", "partial", "failed", "error"],
-            default=[],
-            key="batch_status_filter",
-            placeholder="All statuses",
-        )
-        show_ticker = filter_cols[1].text_input("Filter ticker", value="", key="batch_ticker_filter").strip().upper()
-        show_only_failed_providers = filter_cols[2].checkbox("Only show provider failures", key="batch_prov_fail_filter")
-
-        view_df = manifests_df.copy()
-        if status_filter:
-            view_df = view_df[view_df["status"].isin(status_filter)]
-        if show_ticker:
-            view_df = view_df[view_df["ticker"].str.upper().str.contains(show_ticker)]
-        if show_only_failed_providers:
-            view_df = view_df[view_df["fail"] > 0]
-
-        # Build display table
-        display = view_df[[
-            "rank", "ticker", "company", "status",
-            "wrds_status", "wrds_rows",
-            "yahoo_status", "yahoo_rows",
-            "ravenpack_status", "ravenpack_rows",
-            "refinitiv_status", "refinitiv_rows",
-            "created_at",
-        ]].copy()
-        display.columns = [
-            "Rank", "Ticker", "Company", "Status",
-            "WRDS", "WRDS rows",
-            "Yahoo", "Yahoo rows",
-            "RavenPack", "RP rows",
-            "Refinitiv", "RF rows",
-            "Cached at",
-        ]
-        display["Status"] = display["Status"].apply(lambda s: f"{_status_color(s)} {s}")
-        for col in ["WRDS", "Yahoo", "RavenPack", "Refinitiv"]:
-            display[col] = display[col].apply(lambda s: ("✅" if s == "ok" else ("❌" if s == "failed" else ("—" if not s else s))))
-
-        st.dataframe(display, use_container_width=True, height=480)
-        st.caption(f"Showing {len(view_df):,} of {len(manifests_df):,} cached tickers")
-
-        # ── Ticker detail expander ────────────────────────────────────────────
-        st.subheader("Ticker Detail")
-        ticker_options = sorted(manifests_df["ticker"].dropna().unique().tolist())
-        selected_detail = st.selectbox("Select ticker for detail", options=[""] + ticker_options, key="batch_detail_ticker")
-        if selected_detail:
-            row = manifests_df[manifests_df["ticker"] == selected_detail]
-            if not row.empty:
-                r = row.iloc[0]
-                rank_dir = None
-                slug = "".join(ch if ch.isalnum() else "_" for ch in selected_detail.upper().strip())
-                for d in TOP1K_BY_TICKER_DIR.glob(f"rank_{int(r['rank']):04d}_{slug}"):
-                    rank_dir = d
-                    break
-
-                d_cols = st.columns(4)
-                d_cols[0].metric("Rank",    r["rank"])
-                d_cols[1].metric("Ticker",  r["ticker"])
-                d_cols[2].metric("Status",  r["status"])
-                d_cols[3].metric("OK / Fail providers", f"{int(r['ok'])} / {int(r['fail'])}")
-                st.caption(f"Company: {r['company']}   |   Cached: {r['created_at']}")
-
-                # Per-provider detail table
-                prov_rows = []
-                for pname in ["wrds", "yahoo", "ravenpack", "refinitiv"]:
-                    prov_rows.append({
-                        "Provider":  pname,
-                        "Status":    r[f"{pname}_status"] or "—",
-                        "Rows":      int(r[f"{pname}_rows"]) if r[f"{pname}_rows"] else 0,
-                    })
-                st.dataframe(pd.DataFrame(prov_rows), use_container_width=True, hide_index=True)
-
-                # Show output files
-                if rank_dir and (rank_dir / "manifest.json").exists():
-                    try:
-                        full_manifest = json.loads((rank_dir / "manifest.json").read_text(encoding="utf-8"))
-                        outputs = full_manifest.get("outputs", {})
-                        if outputs:
-                            st.markdown("**Cached files**")
-                            for key, path in outputs.items():
-                                st.code(path)
-                    except Exception:
-                        pass
-    elif progress_df is not None:
-        st.info("Progress CSV exists but no manifest files found yet — the batch may still be on the first few tickers.")
-    else:
-        st.info("No ticker data cached yet.")
 
     # ── Full log (collapsed) ──────────────────────────────────────────────────
     log_path = TOP1K_OUTPUT_DIR / "batch_runner.log"
@@ -2501,7 +2682,7 @@ def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI
 
     # ── Auto-refresh trigger ──────────────────────────────────────────────────
     if auto_refresh and is_running:
-        time.sleep(1)
+        time.sleep(5)
         st.rerun()
 
 

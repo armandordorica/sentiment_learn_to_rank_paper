@@ -34,6 +34,10 @@ load_dotenv(PROJECT_ROOT / ".env")
 import pandas as pd
 
 from sentiment_ltr.data import live_data
+from sentiment_ltr.data.provider_reason_codes import (
+    annotate_provider_results,
+    build_provider_context,
+)
 
 TOP1K_UNIVERSE_PATH = PROJECT_ROOT / "app_data" / "crsp_top_volume_universe.csv"
 TOP1K_OUTPUT_DIR = PROJECT_ROOT / "data" / "raw" / "data_explorer_top1k"
@@ -230,6 +234,8 @@ def save_ticker_result(row: pd.Series, result: dict) -> dict:
             "status": payload.get("status"),
             "rows": row_count,
             "error": payload.get("error"),
+            "fail_reason": payload.get("fail_reason"),
+            "fail_reason_label": payload.get("fail_reason_label"),
         })
     status_df = pd.DataFrame(status_rows)
     status_df.to_parquet(out_dir / "provider_status.parquet", index=False)
@@ -600,6 +606,11 @@ def main() -> None:
                     "ravenpack": args.ravenpack,
                 },
             }
+            _permno = int(row["permno"]) if "permno" in row.index else None
+            _ctx = build_provider_context(
+                ticker, _permno, args.start, args.end, prov_results,
+            )
+            annotate_provider_results(prov_results, _ctx)
             manifest = save_ticker_result(row, assembled)
             run_status = manifest["status"]
             ok_n = manifest["ok_provider_count"]

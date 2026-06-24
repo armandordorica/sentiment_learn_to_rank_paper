@@ -845,7 +845,9 @@ def run_ticker_data_query(
     if query_ravenpack:
         if wrds_credentials_available():
             try:
-                ravenpack_articles = query_ravenpack_articles(ticker_clean, start_s, end_s)
+                ravenpack_articles = query_ravenpack_articles(
+                    ticker_clean, start_s, end_s, permno=permno,
+                )
                 providers["ravenpack"] = {
                     "status": "ok" if not ravenpack_articles.empty else "empty",
                     "error": None if not ravenpack_articles.empty else "No RavenPack articles in the selected date range.",
@@ -869,6 +871,21 @@ def run_ticker_data_query(
         for provider, result in providers.items()
         if isinstance(result.get("prices"), pd.DataFrame) and not result["prices"].empty
     }
+
+    from sentiment_ltr.data.provider_reason_codes import (
+        annotate_provider_results,
+        build_provider_context,
+    )
+
+    ctx = build_provider_context(
+        ticker_clean,
+        permno,
+        start_s,
+        end_s,
+        providers,
+        current_ticker=current_ticker,
+    )
+    annotate_provider_results(providers, ctx)
 
     return {
         "ticker": ticker_clean,
