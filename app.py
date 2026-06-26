@@ -34,6 +34,18 @@ if str(SRC_PATH) not in sys.path:
 
 from sentiment_ltr.data import live_data
 from sentiment_ltr.data.provider_reason_codes import enrich_provider_status_records, reason_label
+from sentiment_ltr.data.crsp_delisting import (
+    DELISTING_CACHE_PATH,
+    load_delisting_cache,
+    update_delisting_cache,
+)
+from sentiment_ltr.data.cash_merger_exits import (
+    CASH_MERGER_CACHE_PATH,
+    CASH_MERGER_CODES,
+    get_cash_merger_summary,
+    load_cash_merger_cache,
+    update_cash_merger_cache,
+)
 
 REFINITIV_IMPORT_ERROR: str | None = None
 
@@ -2009,6 +2021,7 @@ def _load_all_manifests() -> pd.DataFrame:
                 provider_reason_map[pname] = ps.get("fail_reason") or ""
             rows.append({
                 "rank":       m.get("volume_rank"),
+                "permno":     m.get("permno"),
                 "ticker":     m.get("ticker"),
                 "company":    m.get("company_name", ""),
                 "status":     m.get("status"),
@@ -2101,6 +2114,104 @@ def _provider_status_cell(status: str, rows: object, fail_reason: str = "") -> s
     if fail_reason:
         return f"{icon} {fail_reason}"
     return f"{icon} {status}"
+
+
+def _load_top1k_universe() -> pd.DataFrame:
+    """Load the committed top-1k universe (permno, ticker, rank, company)."""
+    if not TOP1K_UNIVERSE_PATH.exists():
+        return pd.DataFrame()
+    u = pd.read_csv(TOP1K_UNIVERSE_PATH)
+    u["volume_rank"] = u["volume_rank"].astype(int)
+    return u.sort_values("volume_rank").reset_index(drop=True)
+
+
+def _build_delisting_lookup() -> dict[int, dict]:
+    """Map permno → cached CRSP delisting info (empty when nothing cached yet)."""
+    try:
+        cache = load_delisting_cache()
+    except Exception:
+        return {}
+    if cache.empty or "permno" not in cache.columns:
+        return {}
+    lookup: dict[int, dict] = {}
+    for rec in cache.to_dict(orient="records"):
+        try:
+            permno = int(rec["permno"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        lookup[permno] = rec
+    return lookup
+
+
+def _delisting_cell(permno: object, lookup: dict[int, dict]) -> str:
+    """One-line CRSP delisting summary for the per-ticker table."""
+    try:
+        rec = lookup[int(permno)]
+    except (TypeError, ValueError, KeyError):
+        return "…"  # PERMNO not looked up yet
+    delisted = bool(rec.get("delisted"))
+    code = rec.get("dlstcd")
+    label = rec.get("delisting_label") or ""
+    if not delisted:
+        return "🟢 active"
+    dlret = rec.get("dlret")
+    try:
+        ret_str = f"  ({float(dlret):+.1%})" if pd.notna(dlret) else ""
+    except (TypeError, ValueError):
+        ret_str = ""
+    try:
+        code_str = f"{int(code)} " if pd.notna(code) else ""
+    except (TypeError, ValueError):
+        code_str = ""
+    return f"⛔ {code_str}{label}{ret_str}"
+
+
+_EXIT_SOURCE_ICONS: dict[str, str] = {
+    "crsp_dlret": "✅",
+    "sdc_pricepersh": "🟡",
+    "crsp_dlprc_fallback": "⬜",
+}
+
+
+def _build_cash_merger_lookup() -> dict[int, dict]:
+    """Map permno → cached cash-merger exit info (empty when nothing cached yet)."""
+    try:
+        cache = load_cash_merger_cache()
+    except Exception:
+        return {}
+    if cache.empty or "permno" not in cache.columns:
+        return {}
+    lookup: dict[int, dict] = {}
+    for rec in cache.to_dict(orient="records"):
+        try:
+            permno = int(rec["permno"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        lookup[permno] = rec
+    return lookup
+
+
+def _exit_cell(permno: object, lookup: dict[int, dict]) -> str:
+    """Cash-merger exit summary for the per-ticker table: icon + return + price."""
+    try:
+        rec = lookup[int(permno)]
+    except (TypeError, ValueError, KeyError):
+        return "—"  # no cash-merger record (not a merger / not checked)
+    source = rec.get("exit_source")
+    icon = _EXIT_SOURCE_ICONS.get(str(source))
+    if not icon:
+        return "—"
+    try:
+        ret = float(rec.get("exit_return"))
+        ret_str = f"{ret:+.1%}"
+    except (TypeError, ValueError):
+        ret_str = "n/a"
+    try:
+        price = abs(float(rec.get("dlprc")))
+        price_str = f" @ ${price:,.2f}"
+    except (TypeError, ValueError):
+        price_str = ""
+    return f"{icon} {ret_str}{price_str}"
 
 
 def _render_cache_snapshot(manifests_df: pd.DataFrame, universe_size: int = 1_000) -> None:
@@ -2248,6 +2359,243 @@ def _render_fail_reasons_by_provider(manifests_df: pd.DataFrame) -> None:
             st.plotly_chart(fig, use_container_width=True)
 
 
+def _render_delisting_section(manifests_df: pd.DataFrame) -> None:
+    """CRSP delisting reasons for the full top-1k universe, with on-disk caching."""
+    st.markdown("### Delisting reasons (CRSP)")
+    st.caption(
+        "CRSP `crsp.msedelist` records *why* a stock left the market (`dlstcd`) and the "
+        "return on exit (`dlret`). Cached for all **1,000** universe PERMNOs — only missing "
+        "names are queried from WRDS."
+    )
+
+    universe = _load_top1k_universe()
+    if universe.empty:
+        st.warning(f"Universe file not found: `{TOP1K_UNIVERSE_PATH}`")
+        return
+
+    target_permnos = {int(p) for p in universe["permno"].dropna().tolist()}
+
+    cache = load_delisting_cache()
+    cached_set = (
+        {int(p) for p in cache["permno"].dropna().tolist()} if not cache.empty else set()
+    )
+    missing = sorted(target_permnos - cached_set)
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Universe tickers", f"{len(target_permnos):,}")
+    m2.metric("Delisting info cached", f"{len(target_permnos & cached_set):,}")
+    m3.metric("Missing (not yet checked)", f"{len(missing):,}")
+    m4.metric("Cache rows total", f"{len(cache):,}")
+
+    creds_ok = wrds_credentials_available()
+    btn_cols = st.columns([2, 2, 4])
+    fetch_missing = btn_cols[0].button(
+        f"⬇️ Fetch missing ({len(missing):,})",
+        disabled=(not creds_ok or not missing),
+        help=None if creds_ok else "WRDS credentials are required to query CRSP.",
+    )
+    refetch_all = btn_cols[1].button(
+        "🔄 Re-fetch entire universe",
+        disabled=not creds_ok,
+        help="Ignore the cache and re-query all 1,000 PERMNOs from CRSP.",
+    )
+    if not creds_ok:
+        st.warning("WRDS credentials not configured — set `WRDS_USERNAME` / `WRDS_PASSWORD` to fetch.")
+
+    if fetch_missing or refetch_all:
+        permnos_to_pull = target_permnos if refetch_all else set(missing)
+        with st.spinner(f"Querying CRSP delisting info for {len(permnos_to_pull):,} PERMNOs…"):
+            try:
+                cache, n_new = update_delisting_cache(permnos_to_pull, force=refetch_all)
+                st.success(f"Updated delisting cache — queried {n_new:,} PERMNO(s). "
+                           f"Saved to `{DELISTING_CACHE_PATH.relative_to(PROJECT_ROOT)}`.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Delisting lookup failed: {exc}")
+
+    if cache.empty:
+        st.info("No delisting info cached yet. Click **Fetch missing** to pull it from CRSP.")
+        return
+
+    view = cache[cache["permno"].isin(target_permnos)].copy()
+    if view.empty:
+        st.caption("No cached delisting rows match the universe.")
+        return
+
+    n_delisted = int(view["delisted"].fillna(False).astype(bool).sum())
+    n_active = len(view) - n_delisted
+    s1, s2, s3 = st.columns(3)
+    s1.metric("Delisted (CRSP exit)", f"{n_delisted:,}")
+    s2.metric("Still active", f"{n_active:,}")
+    delisted_only = view[view["delisted"].fillna(False).astype(bool)]
+    avg_dlret = pd.to_numeric(delisted_only["dlret"], errors="coerce").mean()
+    s3.metric("Mean delisting return", f"{avg_dlret:.3f}" if pd.notna(avg_dlret) else "—")
+
+    if not delisted_only.empty:
+        cat_counts = (
+            delisted_only["delisting_category"].fillna("unknown")
+            .value_counts().rename_axis("Category").reset_index(name="Count")
+        )
+        fig = px.bar(
+            cat_counts.sort_values("Count"),
+            x="Count", y="Category", orientation="h",
+            labels={"Category": "Delisting category", "Count": "Tickers"},
+        )
+        fig.update_traces(
+            hovertemplate="Category: %{y}<br>Tickers: %{x}<extra></extra>",
+        )
+        fig.update_layout(
+            hovermode="closest",
+            height=max(200, 40 * len(cat_counts)),
+            margin=dict(l=10, r=10, t=30, b=10),
+            showlegend=False,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        code_counts = (
+            delisted_only[["dlstcd", "delisting_label"]]
+            .value_counts().rename_axis(["dlstcd", "delisting_label"]).reset_index(name="Count")
+            .sort_values("Count", ascending=False)
+        )
+        st.dataframe(code_counts, use_container_width=True, hide_index=True)
+
+    # Per-ticker detail: universe + optional manifest status + delisting fields.
+    detail = universe.rename(columns={"volume_rank": "rank", "comnam": "company"}).copy()
+    if not manifests_df.empty and "permno" in manifests_df.columns:
+        status_map = manifests_df[["permno", "status"]].drop_duplicates("permno")
+        detail = detail.merge(status_map, on="permno", how="left")
+    detail = detail.merge(
+        view[["permno", "delisted", "dlstdt", "dlstcd", "delisting_category",
+              "delisting_label", "dlret", "nwperm"]],
+        on="permno", how="left",
+    )
+    detail_cols = [c for c in [
+        "rank", "ticker", "company", "status", "delisted", "dlstdt", "dlstcd",
+        "delisting_category", "delisting_label", "dlret", "nwperm",
+    ] if c in detail.columns]
+    with st.expander(f"📋 Per-ticker delisting detail ({len(detail):,} universe tickers)", expanded=False):
+        st.dataframe(
+            detail[detail_cols].sort_values("rank"),
+            use_container_width=True, hide_index=True,
+        )
+
+
+def _render_cash_merger_section(manifests_df: pd.DataFrame) -> None:
+    """Cash-merger exit returns (CRSP dlstcd 232/233) for the top-1k universe."""
+    with st.expander("💵 Cash Merger Exits", expanded=False):
+        st.caption(
+            "For stocks that left the market via a **cash merger** (CRSP `dlstcd` 232/233), "
+            "the final-week return is recovered from CRSP `dlret`, estimated from the SDC "
+            "M&A deal price, or set to 0 as a last-price fallback. Only missing PERMNOs are "
+            "queried from WRDS."
+        )
+
+        universe = _load_top1k_universe()
+        if universe.empty:
+            st.warning(f"Universe file not found: `{TOP1K_UNIVERSE_PATH}`")
+            return
+
+        # Cash-merger candidates come from the CRSP delisting cache (dlstcd 232/233).
+        delist = load_delisting_cache()
+        candidate_permnos: set[int] = set()
+        if not delist.empty and "dlstcd" in delist.columns:
+            mask = delist["dlstcd"].isin(CASH_MERGER_CODES)
+            candidate_permnos = {int(p) for p in delist.loc[mask, "permno"].dropna().tolist()}
+
+        exit_cache = load_cash_merger_cache()
+        checked_permnos = (
+            {int(p) for p in exit_cache["permno"].dropna().tolist()}
+            if not exit_cache.empty else set()
+        )
+        missing = sorted(candidate_permnos - checked_permnos)
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Cash-merger candidates", f"{len(candidate_permnos):,}")
+        m2.metric("Resolved (cached)", f"{len(candidate_permnos & checked_permnos):,}")
+        m3.metric("Missing (not yet checked)", f"{len(missing):,}")
+
+        if not candidate_permnos:
+            st.info(
+                "No cash-merger candidates found yet. Populate the **Delisting reasons (CRSP)** "
+                "cache first so dlstcd 232/233 names can be identified."
+            )
+            return
+
+        creds_ok = wrds_credentials_available()
+        btn_cols = st.columns([2, 2, 4])
+        fetch_missing = btn_cols[0].button(
+            f"⬇️ Resolve missing ({len(missing):,})",
+            disabled=(not creds_ok or not missing),
+            help=None if creds_ok else "WRDS credentials are required to query CRSP/SDC.",
+            key="cash_merger_fetch_missing",
+        )
+        refetch_all = btn_cols[1].button(
+            "🔄 Re-resolve all candidates",
+            disabled=not creds_ok,
+            help="Ignore the cache and re-query every cash-merger PERMNO.",
+            key="cash_merger_refetch_all",
+        )
+        if not creds_ok:
+            st.warning("WRDS credentials not configured — set `WRDS_USERNAME` / `WRDS_PASSWORD` to fetch.")
+
+        if fetch_missing or refetch_all:
+            permnos_to_pull = candidate_permnos if refetch_all else set(missing)
+            with st.spinner(f"Resolving cash-merger exits for {len(permnos_to_pull):,} PERMNOs…"):
+                try:
+                    exit_cache, n_new = update_cash_merger_cache(
+                        permnos_to_pull, force=refetch_all
+                    )
+                    st.success(
+                        f"Updated cash-merger cache — checked {n_new:,} PERMNO(s). "
+                        f"Saved to `{CASH_MERGER_CACHE_PATH.relative_to(PROJECT_ROOT)}`."
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Cash-merger resolution failed: {exc}")
+
+        if exit_cache.empty:
+            st.info("No cash-merger exits resolved yet. Click **Resolve missing** to compute them.")
+            return
+
+        # Merger rows only (exclude the "not_cash_merger" bookkeeping rows).
+        resolved = exit_cache[
+            exit_cache["exit_source"].isin(list(_EXIT_SOURCE_ICONS.keys()))
+        ].copy()
+        if resolved.empty:
+            st.caption("No resolved cash-merger exits in the cache yet.")
+            return
+
+        summary = get_cash_merger_summary(resolved)
+        if not summary.empty:
+            summary_display = summary.copy()
+            summary_display["exit_source"] = summary_display["exit_source"].map(
+                lambda s: f"{_EXIT_SOURCE_ICONS.get(s, '')} {s}".strip()
+            )
+            st.dataframe(summary_display, use_container_width=True, hide_index=True)
+
+        counts = resolved["exit_source"].value_counts()
+        n_crsp = int(counts.get("crsp_dlret", 0))
+        n_sdc = int(counts.get("sdc_pricepersh", 0))
+        n_fallback = int(counts.get("crsp_dlprc_fallback", 0))
+        st.markdown(
+            f"**{n_crsp} of {len(resolved)}** cash merger tickers resolved via CRSP `dlret` "
+            f"| **{n_sdc}** via SDC deal price | **{n_fallback}** fallback (last price)."
+        )
+
+        # Attach ticker/company for readability before download.
+        export = resolved.merge(
+            universe.rename(columns={"comnam": "company"})[["permno", "ticker", "company"]],
+            on="permno", how="left",
+        )
+        st.download_button(
+            "⬇️ Download cash-merger exits (CSV)",
+            data=export.to_csv(index=False).encode("utf-8"),
+            file_name="cash_merger_exits.csv",
+            mime="text/csv",
+            key="cash_merger_download",
+        )
+
+
 def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI function
     # Force Refinitiv off by default so stale session state never auto-enables it
     if "batch_use_refinitiv" not in st.session_state:
@@ -2353,7 +2701,11 @@ def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI
     # ── Cache snapshot (always visible — what's on disk right now) ───────────
     _render_cache_snapshot(manifests_df)
     st.divider()
+    _render_cash_merger_section(manifests_df)
+    st.divider()
     _render_fail_reasons_by_provider(manifests_df)
+    st.divider()
+    _render_delisting_section(manifests_df)
 
     # ── Refresh / auto-refresh controls ─────────────────────────────────────
     ctrl_cols = st.columns([1, 5])
@@ -2443,14 +2795,29 @@ def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI
             view_df = view_df[view_df["fail"] > 0]
 
         # Build display table — each provider column shows status + fail_reason inline
-        display = view_df[[
+        keep = [
             "rank", "ticker", "company", "status",
             "wrds_status", "wrds_rows", "wrds_fail_reason",
             "yahoo_status", "yahoo_rows", "yahoo_fail_reason",
             "ravenpack_status", "ravenpack_rows", "ravenpack_fail_reason",
             "refinitiv_status", "refinitiv_rows", "refinitiv_fail_reason",
             "created_at",
-        ]].copy()
+        ]
+        if "permno" in view_df.columns:
+            keep.insert(3, "permno")
+        display = view_df[keep].copy()
+        delist_lookup = _build_delisting_lookup()
+        display["CRSP"] = (
+            display["permno"].apply(lambda p: _delisting_cell(p, delist_lookup))
+            if "permno" in display.columns
+            else "…"
+        )
+        exit_lookup = _build_cash_merger_lookup()
+        display["Exit"] = (
+            display["permno"].apply(lambda p: _exit_cell(p, exit_lookup))
+            if "permno" in display.columns
+            else "—"
+        )
         display["Status"] = display["status"].apply(lambda s: f"{_status_color(s)} {s}")
         display["WRDS"] = display.apply(
             lambda r: _provider_status_cell(r["wrds_status"], r["wrds_rows"], r["wrds_fail_reason"]), axis=1,
@@ -2470,17 +2837,36 @@ def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI
         )
         display = display[[
             "rank", "ticker", "company", "Status",
-            "WRDS", "Yahoo", "RavenPack", "Refinitiv", "created_at",
+            "WRDS", "Exit", "Yahoo", "RavenPack", "Refinitiv", "CRSP", "created_at",
         ]]
         display.columns = [
             "Rank", "Ticker", "Company", "Status",
-            "WRDS", "Yahoo", "RavenPack", "Refinitiv", "Cached at",
+            "WRDS", "Exit", "Yahoo", "RavenPack", "Refinitiv", "CRSP delisting", "Cached at",
         ]
 
-        st.dataframe(display, use_container_width=True, height=480)
+        st.dataframe(
+            display,
+            use_container_width=True,
+            height=480,
+            column_config={
+                "Exit": st.column_config.TextColumn(
+                    "Exit",
+                    width="medium",
+                    help=(
+                        "Cash-merger exit (CRSP dlstcd 232/233): icon + exit return + delisting price.  "
+                        "✅ from CRSP dlret · 🟡 estimated from SDC deal price · "
+                        "⬜ fallback (last price, return = 0) · — not a cash merger / not checked"
+                    ),
+                ),
+            },
+        )
         st.caption(
             f"Showing {len(view_df):,} of {len(manifests_df):,} cached tickers. "
-            "Provider cells: ✅ ok + row count · ❌/⚠️ fail_reason code (hover row in Ticker Detail for full label)."
+            "Provider cells: ✅ ok + row count · ❌/⚠️ fail_reason code. "
+            "Exit (cash mergers): icon + exit return + delisting price — "
+            "✅ CRSP dlret · 🟡 SDC deal price · ⬜ fallback · — n/a. "
+            "CRSP delisting: 🟢 active · ⛔ code + reason + delisting return (dlret); "
+            "`…` = not looked up yet (use the Delisting reasons section to fetch)."
         )
 
         # ── Ticker detail expander ────────────────────────────────────────────
@@ -2516,6 +2902,39 @@ def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI
                         "Reason (label)": reason_label(reason) if reason else "",
                     })
                 st.dataframe(pd.DataFrame(prov_rows), use_container_width=True, hide_index=True)
+
+                # CRSP delisting detail for this ticker
+                st.markdown("**CRSP delisting (crsp.msedelist)**")
+                detail_lookup = _build_delisting_lookup()
+                rec = detail_lookup.get(int(r["permno"])) if pd.notna(r.get("permno")) else None
+                if rec is None:
+                    st.caption(
+                        "Not looked up yet — use the **Delisting reasons (CRSP)** section "
+                        "above to fetch this ticker's delisting code."
+                    )
+                elif not bool(rec.get("delisted")):
+                    st.success("🟢 Still active — no CRSP delisting record (dlstcd 100).")
+                else:
+                    dl_cols = st.columns(4)
+                    dl_cols[0].metric("Delisting code", str(rec.get("dlstcd") or "—"))
+                    dlret = rec.get("dlret")
+                    dl_cols[1].metric(
+                        "Delisting return",
+                        f"{float(dlret):+.2%}" if pd.notna(dlret) else "—",
+                    )
+                    dlstdt = rec.get("dlstdt")
+                    dl_cols[2].metric(
+                        "Delisting date",
+                        pd.Timestamp(dlstdt).strftime("%Y-%m-%d") if pd.notna(dlstdt) else "—",
+                    )
+                    nwperm = rec.get("nwperm")
+                    dl_cols[3].metric(
+                        "Successor PERMNO",
+                        str(int(nwperm)) if pd.notna(nwperm) else "—",
+                    )
+                    st.caption(
+                        f"**{rec.get('delisting_category', '')}** — {rec.get('delisting_label', '')}"
+                    )
 
                 # Show output files
                 if rank_dir and (rank_dir / "manifest.json").exists():

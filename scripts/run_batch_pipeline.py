@@ -38,6 +38,11 @@ from sentiment_ltr.data.provider_reason_codes import (
     annotate_provider_results,
     build_provider_context,
 )
+from sentiment_ltr.data.cash_merger_exits import (
+    CASH_MERGER_CODES,
+    get_cash_merger_exit_returns,
+)
+from sentiment_ltr.data.crsp_delisting import load_delisting_cache
 
 TOP1K_UNIVERSE_PATH = PROJECT_ROOT / "app_data" / "crsp_top_volume_universe.csv"
 TOP1K_OUTPUT_DIR = PROJECT_ROOT / "data" / "raw" / "data_explorer_top1k"
@@ -193,6 +198,31 @@ def write_status(
     STATUS_FILE.write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8")
 
 
+def _append_exit_row(prices: object, ticker: str, permno: int, exit_row: pd.Series) -> pd.DataFrame:
+    """Append a cash-merger exit row to a WRDS price frame.
+
+    The exit row carries the delisting date as its ``date``, the (abs) delisting
+    price as ``close_price``, and the ``exit_return`` / ``exit_source`` so the
+    cash-out is preserved for backtests. Non-exit rows keep NaN for those columns.
+    """
+    base = prices.copy() if isinstance(prices, pd.DataFrame) else pd.DataFrame()
+    dlprc = pd.to_numeric(exit_row.get("dlprc"), errors="coerce")
+    new_row = {
+        "date": pd.to_datetime(exit_row.get("dlstdt"), errors="coerce"),
+        "close_price": abs(dlprc) if pd.notna(dlprc) else pd.NA,
+        "vol": pd.NA,
+        "provider": "wrds_exit",
+        "ticker": ticker,
+        "permno": permno,
+        "exit_return": float(exit_row.get("exit_return", 0.0)),
+        "exit_source": str(exit_row.get("exit_source")),
+    }
+    combined = pd.concat([base, pd.DataFrame([new_row])], ignore_index=True)
+    if "date" in combined.columns:
+        combined = combined.sort_values("date").reset_index(drop=True)
+    return combined
+
+
 def _save_frame(frame: object, path: Path, saved: dict, key: str) -> None:
     if isinstance(frame, pd.DataFrame) and not frame.empty:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -246,6 +276,8 @@ def save_ticker_result(row: pd.Series, result: dict) -> dict:
     n_selected = sum(bool(v) for v in result.get("selected_providers", {}).values())
     run_status = "complete" if ok_count == n_selected else ("partial" if ok_count else "failed")
 
+    cash_merger = result.get("cash_merger") or {}
+
     manifest = {
         "created_at": datetime.now(timezone.utc).isoformat(),
         "status": run_status,
@@ -259,6 +291,9 @@ def save_ticker_result(row: pd.Series, result: dict) -> dict:
         "ok_provider_count": ok_count,
         "failed_provider_count": fail_count,
         "provider_status": status_df.to_dict(orient="records"),
+        "cash_merger_exit_applied": bool(cash_merger.get("applied", False)),
+        "cash_merger_exit_source": cash_merger.get("source"),
+        "cash_merger_exit_return": cash_merger.get("exit_return"),
         "outputs": saved,
     }
     (out_dir / "manifest.json").write_text(
@@ -353,6 +388,30 @@ def main() -> None:
     _log(f"[batch] Providers active: {providers_label}")
     _log(f"[batch] Window: {args.start} → {args.end}")
     _log("-" * 60)
+
+    # ── Cash-merger exit support (CRSP dlstcd 232/233) ─────────────────────────
+    # Build a PERMNO → dlstcd map from the local delisting cache so we only open a
+    # WRDS connection for the handful of tickers that actually merged for cash.
+    cash_merger_permnos: set[int] = set()
+    if args.wrds:
+        try:
+            _dl = load_delisting_cache()
+            if not _dl.empty and "dlstcd" in _dl.columns:
+                _mask = _dl["dlstcd"].isin(CASH_MERGER_CODES)
+                cash_merger_permnos = {
+                    int(p) for p in _dl.loc[_mask, "permno"].dropna().tolist()
+                }
+            _log(f"[batch] Cash-merger candidates from delisting cache: {len(cash_merger_permnos)}")
+        except Exception as exc:
+            _log(f"[batch] Could not load delisting cache for cash mergers: {exc}")
+
+    _merger_db_holder: dict[str, object] = {"db": None}
+
+    def _merger_db():
+        """Lazily open (and reuse) a WRDS connection for cash-merger lookups."""
+        if _merger_db_holder["db"] is None:
+            _merger_db_holder["db"] = live_data.open_wrds_connection()
+        return _merger_db_holder["db"]
 
     for i, (_, row) in enumerate(selected.iterrows()):
         ticker = str(row["ticker"]).upper().strip()
@@ -587,6 +646,39 @@ def main() -> None:
                              total=total, done=i, ticker_started_at=ticker_started_at,
                              providers_so_far=_prov_summary())
 
+            # ── Cash-merger exit return (CRSP dlstcd 232/233) ─────────────────────
+            # For tickers that left the market via a cash merger, append the exit
+            # return row to the WRDS price frame so the final-week cash-out is not
+            # lost. Skip if a prior run already applied it.
+            cash_merger_info: dict = {"applied": False, "source": None, "exit_return": None}
+            _permno_int = int(row["permno"]) if "permno" in row.index else None
+            _already_applied = bool(prior_manifest.get("cash_merger_exit_applied"))
+            _wrds_ok = prov_results.get("wrds", {}).get("status") == "ok"
+            if _already_applied:
+                cash_merger_info = {
+                    "applied": True,
+                    "source": prior_manifest.get("cash_merger_exit_source"),
+                    "exit_return": prior_manifest.get("cash_merger_exit_return"),
+                }
+            elif (_permno_int is not None and _wrds_ok
+                  and _permno_int in cash_merger_permnos):
+                try:
+                    exit_df = get_cash_merger_exit_returns([_permno_int], _merger_db())
+                    if not exit_df.empty:
+                        er = exit_df.iloc[0]
+                        prov_results["wrds"]["prices"] = _append_exit_row(
+                            prov_results["wrds"].get("prices"), ticker, _permno_int, er
+                        )
+                        cash_merger_info = {
+                            "applied": True,
+                            "source": str(er["exit_source"]),
+                            "exit_return": float(er["exit_return"]),
+                        }
+                        _log(f"{prefix}    ↳ cash-merger exit  ✓  "
+                             f"{er['exit_source']}  ret={float(er['exit_return']):.4f}")
+                except Exception as exc:
+                    _log(f"{prefix}    ↳ cash-merger exit  ⚠️  skipped: {exc}")
+
             # ── Build result dict and save ────────────────────────────────────────
             write_status("running", current_rank=rank, current_ticker=ticker,
                          current_step="saving results",
@@ -599,6 +691,7 @@ def main() -> None:
                 "start_date": args.start,
                 "end_date": args.end,
                 "providers": prov_results,
+                "cash_merger": cash_merger_info,
                 "selected_providers": {
                     "refinitiv": args.refinitiv,
                     "wrds": args.wrds,
@@ -653,6 +746,12 @@ def main() -> None:
 
         if args.sleep > 0 and i + 1 < total:
             time.sleep(args.sleep)
+
+    if _merger_db_holder["db"] is not None:
+        try:
+            _merger_db_holder["db"].close()
+        except Exception:
+            pass
 
     if args.combined_parquets:
         _log("[batch] Writing combined parquets …")
