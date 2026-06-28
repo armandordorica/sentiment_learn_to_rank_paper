@@ -47,11 +47,12 @@ The project is past the "can we pull data?" stage and into "can we pull it relia
 
 ### What Works Today
 
-**Streamlit app (`app.py`)** — three tabs:
+**Streamlit app (`app.py`)** — four tabs:
 
 1. **Data Explorer** — single-ticker queries across Refinitiv, WRDS/CRSP, Yahoo, and RavenPack with combined price charts, news coverage, sentiment panes, and raw schema inspection.
 2. **Batch Pipeline (Top-1K)** — launch, monitor, and inspect bulk fetches for all 1,000 universe tickers; live status banner, cache snapshot, per-provider failure breakdown, and per-ticker manifest table.
-3. **Paper Validation (2003-2014)** — bundled universe CSV and validation charts without a live WRDS connection.
+3. **Sentiment Lab** — fine-tuning workflow for the news-sentiment model (TRNA substitute): Financial PhraseBank metrics, headline scoring, in-app training, and a compute-device report/benchmark (CUDA / Apple MPS / CPU).
+4. **Paper Validation (2003-2014)** — bundled universe CSV and validation charts without a live WRDS connection.
 
 **Batch caching** — `scripts/run_batch_pipeline.py` writes one directory per ticker under:
 
@@ -87,18 +88,28 @@ For replication, **WRDS/CRSP is the authoritative price source**; Yahoo and Refi
 
 **Still to decide and document:** delisting-return handling in the backtest (`msedelist` / `dlret`), point-in-time vs static 512-stock universe, and how to chain RavenPack entities across mergers.
 
-### Development Log (recent)
+### Journal (what we did, decisions, and why)
 
-| Date | Milestone |
+This is the running journal of the project. Each entry records **what** changed,
+the **decision** behind it, and **why** — so the rationale survives even after the
+code does. Keep it updated as part of every commit (see
+`.cursor/skills/validate-before-commit/SKILL.md`).
+
+| Date | What / Decision / Why |
 | --- | --- |
-| 2026-06 | **CRSP top-1k universe** — `notebooks/build_top1k_volume_universe.ipynb` + committed `app_data/crsp_top_volume_universe.csv`. |
-| 2026-06 | **Unified data pulls** — shared `live_data.py` for Streamlit and notebooks; multi-API dashboard. |
-| 2026-06 | **Batch pipeline v1** — `run_batch_pipeline.py` + Batch Pipeline tab; per-ticker manifests and parquets. |
-| 2026-06 | **Live batch UX** — real-time `batch_status.json`, in-progress row in ticker table, incremental RavenPack year chunks. |
-| 2026-06 | **Data Explorer fixes** — CRSP `cfacpr` adjustment, wider date inputs, PERMNO-based rename fallback (FB→META), RavenPack headline hover fix. |
-| 2026-06 | **Smart partial retry** — `partial` tickers re-fetch only failed providers; `load_cached_providers()` preserves ok data. |
-| 2026-06 | **Provider fail reasons** — machine codes + labels in manifests; cache snapshot and per-API failure tabs in Batch Pipeline UI. |
-| 2026-06 | **Manifest load performance** — fixed UI hang during active batch runs (cache token + session state; no WRDS lookups on page load). |
+| 2026-06 | **CRSP top-1k universe** — built `notebooks/build_top1k_volume_universe.ipynb` + committed `app_data/crsp_top_volume_universe.csv`. *Why:* a static, version-controlled candidate set keeps the universe reproducible and avoids survivorship bias at construction. |
+| 2026-06 | **Unified data pulls** — shared `live_data.py` for Streamlit and notebooks; multi-API dashboard. *Why:* one code path for fetching prevents app/notebook drift. |
+| 2026-06 | **Batch pipeline v1** — `run_batch_pipeline.py` + Batch Pipeline tab; per-ticker manifests and parquets. *Why:* the full universe is too large to fetch interactively; caching per ticker makes runs resumable. |
+| 2026-06 | **Live batch UX** — real-time `batch_status.json`, in-progress row in ticker table, incremental RavenPack year chunks. *Why:* long batch runs need visible progress and partial persistence. |
+| 2026-06 | **Data Explorer fixes** — CRSP `cfacpr` adjustment, wider date inputs, PERMNO-based rename fallback (FB→META), RavenPack headline hover fix. *Why:* CRSP vs Yahoo must be comparable, and renamed tickers must resolve via PERMNO, not symbol. |
+| 2026-06 | **Smart partial retry** — `partial` tickers re-fetch only failed providers; `load_cached_providers()` preserves ok data. *Why:* avoid re-paying for data already cached when only one provider failed. |
+| 2026-06 | **Provider fail reasons** — machine codes + labels in manifests; cache snapshot and per-API failure tabs in Batch Pipeline UI. *Why:* separate expected delistings from real collection errors at a glance. |
+| 2026-06 | **Manifest load performance** — fixed UI hang during active batch runs (cache token + session state; no WRDS lookups on page load). *Why:* the page must stay responsive while a batch writes manifests. |
+| 2026-06 | **Cash-merger exit returns** — `src/sentiment_ltr/data/cash_merger_exits.py`, batch integration, and an Exit column / expander in the app for CRSP `dlstcd` 232/233. *Why:* cash mergers end a security's price history; modeling needs the realized exit return, not a silent gap. Dropped `exchcd` from the `crsp.dsedelist` query because that column isn't present there. |
+| 2026-06 | **Fine-tuning prep** — `docs/news_sentiment_finetuning_plan.md` (kanban + progress log), `notebooks/liquidAI_prep.ipynb`, and split env files (`requirements-finetuning.txt`, `environment.yml`/`.lock.yml`). Baseline: 1-epoch DistilBERT on Financial PhraseBank (~80.6% test). *Why:* a custom sentiment model is the TRNA substitute. Used the `atrost/financial_phrasebank` Parquet mirror because the canonical script-based dataset breaks on `datasets` v5. |
+| 2026-06 | **Sentiment Lab tab + module** — `src/sentiment_ltr/models/phrasebank_sentiment.py` (load/train/predict, `device_report`, `benchmark_matmul`) surfaced as a 4th app tab. *Why:* make the fine-tuning workflow runnable and demoable from the app, with a device report so GPU/MPS/CPU is explicit. Narrowed `.gitignore` from `models/` to `data/models/` so source under `src/sentiment_ltr/models/` is tracked while trained weights stay local. |
+| 2026-06 | **Demo URL sharing** — `share.sh` Cloudflare quick tunnel (default port 8501) + README docs. *Why:* a one-command temporary public URL for sharing the app without deploying; URLs are ephemeral and regenerate each run. |
+| 2026-06 | **README Journal + commit skill** — renamed Development Log to a Journal section (what / decision / why), backfilled recent milestones, updated tab list to four tabs, and required Journal updates in `validate-before-commit` skill. *Why:* decisions and rationale were scattered across chat/commits; a structured journal keeps the README as the single source of project history. |
 
 ### Immediate Next Steps
 
@@ -671,7 +682,7 @@ Use these statuses while building the replication:
 | --- | --- | --- |
 | Define data schema and file formats | Pending Review | Per-ticker manifest + parquet layout under `data/raw/data_explorer_top1k/`; see **Current State** above. |
 | Maintain reproducible environment | Pending Review | Conda environment, lock file, and notebook kernel are in place; update when dependencies change. |
-| Document replication limitations | In Progress | Development log and delisting/survivorship notes in README; corporate-events backtest policy still TBD. |
+| Document replication limitations | In Progress | Journal and delisting/survivorship notes in README; corporate-events backtest policy still TBD. |
 
 ### Market Data And Universe
 
