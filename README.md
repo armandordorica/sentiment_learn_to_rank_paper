@@ -146,6 +146,35 @@ pip install -r requirements.txt
 
 The recommended environment uses Python 3.11 because the optional legacy Alpaca client may not resolve cleanly on Python 3.13.
 
+### Optional extras (install only what you need)
+
+The base environment runs the data pipeline and Streamlit app. Heavier or
+vendor-specific stacks are split into separate requirements files so a fresh
+machine only installs what it needs:
+
+| Extra | File | For |
+| --- | --- | --- |
+| **Fine-tuning** | `requirements-finetuning.txt` | Hugging Face + PyTorch news-sentiment model (`notebooks/liquidAI_prep.ipynb`, the TRNA substitute). Included automatically by `environment.yml`. |
+| Refinitiv/LSEG | `requirements-refinitiv.txt` | Refinitiv prices/news in the Data Explorer. |
+| Alpaca (legacy) | `requirements-alpaca.txt` | Optional legacy market-data client. |
+
+`conda env create -f environment.yml` already pulls in the fine-tuning stack. For a
+pip-only setup, add it explicitly:
+
+```bash
+pip install -r requirements-finetuning.txt
+```
+
+This installs `torch`, `transformers`, `datasets`, `evaluate`, and `accelerate`.
+Verified working on Python 3.11 with numpy 2.4 / pandas 2.2 / pyarrow 21 /
+scikit-learn 1.9 (clean `pip check`): torch 2.12, transformers 5.12, datasets 5.0,
+evaluate 0.4, accelerate 1.14. Runs on CUDA, Apple MPS, or CPU (auto-detected in the
+notebook).
+
+> **Dataset note:** the canonical `financial_phrasebank` ships as a loading script,
+> which `datasets` v4/v5 no longer supports. Load a Parquet mirror instead (e.g.
+> `atrost/financial_phrasebank`); `notebooks/liquidAI_prep.ipynb` already does this.
+
 For WRDS/CRSP access, add your WRDS credentials to a local `.env` file:
 
 ```bash
