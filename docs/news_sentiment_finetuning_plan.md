@@ -34,12 +34,10 @@
 - [ ] Package the inference path into `src/sentiment_ltr/` with tests
 
 ### 📋 To Do
-- [x] **0.1** Env ready — deps installed into `sentiment-ltr-paper` (pip-check clean); notebook runs on MPS
 - [ ] **0.2** Skim the HF docs you'll touch: `AutoTokenizer`, `AutoModelForSequenceClassification`, `Trainer`, `TrainingArguments`, `datasets.load_dataset`
-- [x] **1.1** Load Financial PhraseBank (Parquet mirror `atrost/financial_phrasebank`); inspect rows + labels + class balance — done in `notebooks/liquidAI_prep.ipynb`
-- [ ] **1.2** Tokenize with `distilbert-base-uncased` tokenizer (`truncation=True`, sensible `max_length`)
-- [ ] **1.3** `AutoModelForSequenceClassification(num_labels=3)` + `Trainer`; train 1 epoch; print accuracy
-- [ ] **2.1** Proper train/val/test split (stratified); set seed for reproducibility
+- [ ] **1.2** Tokenize the **full dataset** with `distilbert-base-uncased` tokenizer (`truncation=True`, `max_length≈128`) — note: notebook currently only tokenizes 3 sample sentences for the sanity check
+- [ ] **1.3** Add `Trainer`; train 1 epoch on PhraseBank; print accuracy (first real baseline)
+- [ ] **2.1** Use/confirm train/val/test split (the `atrost` mirror already ships 3100/776/970); set seed for reproducibility
 - [ ] **2.2** Add `compute_metrics` → accuracy + **macro-F1** (dataset is imbalanced)
 - [ ] **2.3** `TrainingArguments`: `eval_strategy="epoch"`, `load_best_model_at_end=True`, tuned `lr`, `epochs`, `batch_size`
 - [ ] **2.4** Swap in `ProsusAI/finbert`; compare metrics; read its model card for label order
@@ -56,7 +54,11 @@
 - _(move the card you're actively working on here)_
 
 ### ✅ Done
-- _(move finished cards here, keep them checked for your record)_
+- [x] **0.1** Env ready — `torch`/`transformers`/`datasets`/`evaluate`/`accelerate`/`ipywidgets` installed into the `sentiment-ltr-paper` conda env (clean `pip check`); pinned in `requirements-finetuning.txt` + `environment.yml`/`environment.lock.yml`; notebook auto-detects and runs on Apple **MPS**
+- [x] **1.1** Load Financial PhraseBank via Parquet mirror `atrost/financial_phrasebank` (datasets-v5 safe); inspect schema, labels, samples, class balance (neutral 59.7% / positive 27.9% / negative 12.3%), token-length stats — `notebooks/liquidAI_prep.ipynb`
+- [x] **1.1b** Load + inspect tokenizer & `distilbert-base-uncased` head (66.9M params, `768→3`), wire label maps into config, and run a one-batch untrained **forward-pass sanity check** — `notebooks/liquidAI_prep.ipynb`
+- [x] **Notebook executes end-to-end** with zero error outputs (verified via `nbconvert --execute`)
+- [x] **Reproducibility committed** — README "Optional extras" section + dataset-mirror caveat; pushed to GitHub (`e399e7e`)
 
 ---
 
@@ -155,6 +157,20 @@ pyarrow 21, scikit-learn 1.9, fsspec 2026.4 — **none downgraded**):
 Install: `pip install torch transformers datasets evaluate accelerate` (scikit-learn already present).
 The setup notebook runs end-to-end locally on Apple **MPS**; Colab GPU also works.
 (Cosmetic: `pip install ipywidgets` silences a tqdm progress-bar warning in Jupyter.)
+
+---
+
+## Progress Log
+
+| Date | Milestone |
+| --- | --- |
+| 2026-06-28 | **Plan + tracker created** (`docs/news_sentiment_finetuning_plan.md`). |
+| 2026-06-28 | **Env set up & verified** — fine-tuning stack installed into `sentiment-ltr-paper` (clean `pip check`, no downgrades); pinned in `requirements-finetuning.txt` + `environment.yml`/`environment.lock.yml`; README replication notes added. |
+| 2026-06-28 | **Setup notebook built** (`notebooks/liquidAI_prep.ipynb`) — imports/device check, PhraseBank load+inspect (datasets-v5 Parquet mirror), tokenizer+model load+inspect, forward-pass sanity check. Runs end-to-end on MPS with zero errors. |
+| 2026-06-28 | **Committed & pushed** to GitHub (`e399e7e`). |
+
+**Next up:** card **1.2/1.3** — tokenize the full dataset and run the first `Trainer`
+baseline (1 epoch, print accuracy).
 
 ---
 
