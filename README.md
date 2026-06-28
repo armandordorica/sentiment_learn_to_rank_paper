@@ -197,6 +197,67 @@ python -m streamlit run app.py
 
 Then open the local URL printed by Streamlit, usually `http://localhost:8501`.
 
+### Sharing a demo URL
+
+To give someone (e.g. an advisor) temporary access to the locally-running app, use the
+`share.sh` helper, which opens a [Cloudflare quick tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/)
+(no Cloudflare account required). Start the app first, then in a second terminal:
+
+```bash
+./share.sh          # tunnels http://localhost:8501 (the Streamlit app)
+./share.sh 7860     # tunnels a different port
+```
+
+The script prints a public `https://<random>.trycloudflare.com` URL. Keep that terminal
+open and press `Ctrl-C` to stop sharing. Requires `cloudflared`
+(`brew install cloudflared`).
+
+Things to know:
+
+- The URL is **temporary** and **changes every run** — share the fresh one each time.
+- Your **laptop must stay awake** and the **webapp must keep running** for the URL to
+  work; if either stops, the link goes dead.
+- The URL is **public** — anyone who has it can access your app while the tunnel is up,
+  so only share it deliberately and stop the tunnel when the demo is over.
+
+#### How the public URL works (what `share.sh` actually does)
+
+The app only listens on `localhost`, which is not reachable from the internet (or even
+from your phone on the same Wi-Fi, in general). A **Cloudflare quick tunnel** bridges
+that gap without any firewall changes, port forwarding, or DNS setup:
+
+1. **Local server.** Streamlit serves the app on `http://localhost:8501` on your machine
+   only.
+2. **`cloudflared` makes an outbound connection.** `share.sh` runs
+   `cloudflared tunnel --url http://localhost:8501`. The `cloudflared` client opens an
+   *outbound* connection from your laptop to Cloudflare's edge network. Because the
+   connection originates from your machine, no inbound ports need to be opened — this is
+   why it works behind home routers, NAT, and most firewalls.
+3. **Cloudflare assigns a public hostname.** Cloudflare hands back a random
+   `https://<random>.trycloudflare.com` address and terminates HTTPS for you (the public
+   link is encrypted even though your local app is plain HTTP).
+4. **Traffic is proxied back down the tunnel.** When your advisor opens the URL,
+   Cloudflare forwards each request through the established tunnel to `cloudflared` on
+   your laptop, which hands it to `localhost:8501` and relays the response back. To the
+   visitor it looks like a normal website; under the hood every request round-trips to
+   your machine.
+
+What `share.sh` adds on top of raw `cloudflared`:
+
+- Defaults to port **8501** (this repo's Streamlit app); accepts any port as `$1`.
+- Pre-flight check with `lsof` that **something is actually listening** on the port, so
+  you don't publish a dead tunnel.
+- Captures `cloudflared`'s log, **extracts the `*.trycloudflare.com` URL**, and prints it
+  in a highlighted box so it's easy to copy.
+- Installs a `trap` so pressing **Ctrl-C** cleanly shuts down `cloudflared` and tears the
+  tunnel down.
+
+Because the tunnel is just a proxy to your local process, the moment you stop `share.sh`
+(or your laptop sleeps / the app stops), the public URL stops resolving. This is ideal
+for a quick live demo and intentionally *not* a way to host the app permanently — for
+that you would deploy to a server or a platform like Streamlit Community Cloud or
+Hugging Face Spaces.
+
 ### What You Can Do
 
 The app has three top-level tabs:

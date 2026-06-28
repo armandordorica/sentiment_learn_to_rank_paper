@@ -23,7 +23,7 @@ data/interim/
 data/processed/
 reports/
 artifacts/
-models/
+data/models/
 
 # Large serialized outputs
 *.parquet

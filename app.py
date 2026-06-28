@@ -46,6 +46,19 @@ from sentiment_ltr.data.cash_merger_exits import (
     load_cash_merger_cache,
     update_cash_merger_cache,
 )
+from sentiment_ltr.models.phrasebank_sentiment import (
+    DEFAULT_MODEL_DIR,
+    benchmark_matmul,
+    dataset_class_balance,
+    device_report,
+    finetuning_deps_available,
+    load_classifier,
+    load_metrics,
+    load_phrasebank,
+    model_is_saved,
+    predict_sentences,
+    train_baseline,
+)
 
 REFINITIV_IMPORT_ERROR: str | None = None
 
@@ -2596,6 +2609,179 @@ def _render_cash_merger_section(manifests_df: pd.DataFrame) -> None:
         )
 
 
+@st.cache_resource(show_spinner=False)
+def _cached_sentiment_classifier(model_dir: str):
+    """Load the fine-tuned PhraseBank classifier once per Streamlit session."""
+    tokenizer, model, device = load_classifier(Path(model_dir))
+    return tokenizer, model, device
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_phrasebank_summary():
+    """Load PhraseBank class balance (cached — dataset is small and static)."""
+    raw = load_phrasebank()
+    balance = dataset_class_balance(raw)
+    splits = {name: int(raw[name].num_rows) for name in raw}
+    return balance, splits
+
+
+def render_sentiment_lab_tab() -> None:
+    """Interactive view of notebooks/liquidAI_prep.ipynb — dataset, metrics, inference."""
+    st.header("News Sentiment Lab")
+    st.caption(
+        "Web version of `notebooks/liquidAI_prep.ipynb`: Financial PhraseBank + "
+        "DistilBERT fine-tuning for 3-way finance sentiment (negative / neutral / positive). "
+        "This is the TRNA-substitute sentiment model for the paper replication."
+    )
+
+    if not finetuning_deps_available():
+        st.warning(
+            "Fine-tuning dependencies are not installed. Run:\n\n"
+            "`pip install -r requirements-finetuning.txt`\n\n"
+            "or recreate the conda env from `environment.yml`."
+        )
+        return
+
+    # ── Compute device ────────────────────────────────────────────────────────
+    st.markdown("### Compute device")
+    try:
+        dev = device_report()
+        d1, d2, d3 = st.columns(3)
+        d1.metric("CUDA (NVIDIA)", "✅" if dev["cuda_available"] else "—")
+        d2.metric("MPS (Apple GPU)", "✅" if dev["mps_available"] else "—")
+        accel = dev["selected"].upper()
+        d3.metric("Active device", accel if accel != "CPU" else "CPU (no GPU)")
+        st.caption(
+            f"Selected **{dev['selected']}** — {dev['device_name']} · torch {dev['torch_version']}. "
+            "Training and inference below run on this device."
+        )
+        with st.expander("Run GPU benchmark (CPU vs active device)", expanded=False):
+            st.caption(
+                "Times the same 10× (4096×4096) matmul on CPU vs the active device. "
+                "GPU calls are synchronized and warmed up first for a fair measurement."
+            )
+            if st.button("Run benchmark", key="sentiment_lab_benchmark"):
+                with st.spinner("Benchmarking…"):
+                    try:
+                        cpu_t = benchmark_matmul("cpu")
+                        if dev["selected"] != "cpu":
+                            gpu_t = benchmark_matmul(dev["selected"])
+                            b1, b2, b3 = st.columns(3)
+                            b1.metric("CPU", f"{cpu_t:.3f}s")
+                            b2.metric(accel, f"{gpu_t:.3f}s")
+                            b3.metric("Speed-up", f"{cpu_t / gpu_t:.1f}×" if gpu_t else "—")
+                        else:
+                            st.metric("CPU", f"{cpu_t:.3f}s")
+                            st.info("No GPU detected to compare against.")
+                    except Exception as exc:
+                        st.error(f"Benchmark failed: {exc}")
+    except Exception as exc:
+        st.warning(f"Could not query compute device: {exc}")
+
+    st.divider()
+
+    metrics = load_metrics(DEFAULT_MODEL_DIR)
+    has_model = model_is_saved(DEFAULT_MODEL_DIR)
+
+    # ── Baseline metrics ──────────────────────────────────────────────────────
+    st.markdown("### Baseline metrics")
+    m1, m2, m3, m4 = st.columns(4)
+    val_acc = metrics.get("validation", {}).get("eval_accuracy")
+    test_acc = metrics.get("test", {}).get("eval_accuracy")
+    m1.metric("Val accuracy", f"{val_acc:.1%}" if val_acc is not None else "—")
+    m2.metric("Test accuracy", f"{test_acc:.1%}" if test_acc is not None else "—")
+    m3.metric("Train loss", f"{metrics.get('train_loss', 0):.3f}" if metrics.get("train_loss") else "—")
+    m4.metric("Model on disk", "✅ saved" if has_model else "⚠️ not saved")
+
+    if not has_model:
+        st.info(
+            "No saved checkpoint yet — metrics above may be from the documented notebook run. "
+            "Use **Train / refresh model** below to write a checkpoint to disk."
+        )
+
+    with st.expander("Training configuration", expanded=False):
+        st.json(metrics)
+
+    st.divider()
+
+    # ── Dataset snapshot ──────────────────────────────────────────────────────
+    st.markdown("### Dataset — Financial PhraseBank")
+    st.caption(
+        "Loaded from the script-free Parquet mirror `atrost/financial_phrasebank` "
+        "(datasets v5 compatible). Train / validation / test splits are pre-defined."
+    )
+    try:
+        balance, splits = _cached_phrasebank_summary()
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Train", f"{splits.get('train', 0):,}")
+        s2.metric("Validation", f"{splits.get('validation', 0):,}")
+        s3.metric("Test", f"{splits.get('test', 0):,}")
+        s4.metric("Total", f"{sum(splits.values()):,}")
+
+        fig = px.bar(
+            balance.sort_values("count"),
+            x="count", y="label", orientation="h",
+            labels={"label": "Class", "count": "Train rows"},
+            title="Class balance (train split)",
+        )
+        fig.update_traces(hovertemplate="Class: %{y}<br>Count: %{x}<extra></extra>")
+        fig.update_layout(hovermode="closest", showlegend=False, height=220)
+        st.plotly_chart(fig, use_container_width=True)
+    except Exception as exc:
+        st.error(f"Could not load PhraseBank: {exc}")
+
+    st.divider()
+
+    # ── Inference demo ────────────────────────────────────────────────────────
+    st.markdown("### Try it — score a headline")
+    default_examples = (
+        "The company reported record quarterly profit and raised its dividend.\n"
+        "Shares plunged after the firm warned of widening losses and layoffs.\n"
+        "The board will meet on Thursday to review the quarterly filing."
+    )
+    text_in = st.text_area(
+        "Enter one sentence per line",
+        value=default_examples,
+        height=140,
+        key="sentiment_lab_input",
+    )
+    run_pred = st.button("Score sentiment", type="primary", disabled=not has_model)
+
+    if run_pred:
+        sentences = [ln.strip() for ln in text_in.splitlines() if ln.strip()]
+        if not sentences:
+            st.warning("Enter at least one sentence.")
+        else:
+            try:
+                tokenizer, model, device = _cached_sentiment_classifier(str(DEFAULT_MODEL_DIR))
+                preds = predict_sentences(sentences, tokenizer, model, device)
+                st.dataframe(preds, use_container_width=True, hide_index=True)
+            except Exception as exc:
+                st.error(f"Inference failed: {exc}")
+
+    st.divider()
+
+    # ── Train / refresh ───────────────────────────────────────────────────────
+    with st.expander("Train / refresh model (~1 min on Apple Silicon)", expanded=not has_model):
+        st.caption(
+            "Runs the same 1-epoch DistilBERT baseline as the notebook and saves the "
+            f"checkpoint to `{DEFAULT_MODEL_DIR.relative_to(PROJECT_ROOT)}`."
+        )
+        if st.button("Train baseline now", key="sentiment_lab_train"):
+            with st.spinner("Training DistilBERT on Financial PhraseBank…"):
+                try:
+                    new_metrics = train_baseline()
+                    _cached_sentiment_classifier.clear()
+                    _cached_phrasebank_summary.clear()
+                    st.success(
+                        f"Done — test accuracy {new_metrics['test']['eval_accuracy']:.1%}. "
+                        "Scroll up to score headlines."
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Training failed: {exc}")
+
+
 def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI function
     # Force Refinitiv off by default so stale session state never auto-enables it
     if "batch_use_refinitiv" not in st.session_state:
@@ -3109,12 +3295,14 @@ def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI
 
 st.info(
     "The **Data Explorer** tab uses one ticker/date-range form for prices, Refinitiv news, and RavenPack sentiment. "
+    "The **Sentiment Lab** tab hosts the Financial PhraseBank fine-tuning demo from `notebooks/liquidAI_prep.ipynb`. "
     "The **Paper Validation** tab uses bundled 2003-2014 CSVs from `app_data/`."
 )
 
-tab_dashboard, tab_batch, tab_validation = st.tabs([
+tab_dashboard, tab_batch, tab_sentiment, tab_validation = st.tabs([
     "Data Explorer",
     "Batch Pipeline (Top-1K)",
+    "Sentiment Lab",
     "Paper Validation (2003-2014)",
 ])
 
@@ -3123,6 +3311,9 @@ with tab_dashboard:
 
 with tab_batch:
     render_batch_pipeline_tab()
+
+with tab_sentiment:
+    render_sentiment_lab_tab()
 
 with tab_validation:
     universe = load_bundled_csv(DEFAULT_UNIVERSE_PATHS)

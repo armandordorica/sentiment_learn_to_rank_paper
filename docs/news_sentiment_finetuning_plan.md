@@ -35,11 +35,10 @@
 
 ### 📋 To Do
 - [ ] **0.2** Skim the HF docs you'll touch: `AutoTokenizer`, `AutoModelForSequenceClassification`, `Trainer`, `TrainingArguments`, `datasets.load_dataset`
-- [ ] **1.2** Tokenize the **full dataset** with `distilbert-base-uncased` tokenizer (`truncation=True`, `max_length≈128`) — note: notebook currently only tokenizes 3 sample sentences for the sanity check
-- [ ] **1.3** Add `Trainer`; train 1 epoch on PhraseBank; print accuracy (first real baseline)
-- [ ] **2.1** Use/confirm train/val/test split (the `atrost` mirror already ships 3100/776/970); set seed for reproducibility
-- [ ] **2.2** Add `compute_metrics` → accuracy + **macro-F1** (dataset is imbalanced)
-- [ ] **2.3** `TrainingArguments`: `eval_strategy="epoch"`, `load_best_model_at_end=True`, tuned `lr`, `epochs`, `batch_size`
+- [ ] **2.1** Confirm split seed/reproducibility (splits come from `atrost` mirror; document that choice)
+- [ ] **2.2** Add **macro-F1** to `compute_metrics` (accuracy is in the baseline; dataset is imbalanced)
+- [ ] **2.3** `TrainingArguments`: `load_best_model_at_end=True`, tune `epochs` (2–4), compare runs
+- [ ] **2.4** Swap in `ProsusAI/finbert`; compare metrics; read its model card for label order
 - [ ] **2.4** Swap in `ProsusAI/finbert`; compare metrics; read its model card for label order
 - [ ] **3.1** Plot class balance + confusion matrix; write down what each error type means
 - [ ] **3.2** Debug drill: list "what I'd check if val acc were stuck at chance" (label dtype, mapping, LR, logits shape, leakage)
@@ -57,6 +56,8 @@
 - [x] **0.1** Env ready — `torch`/`transformers`/`datasets`/`evaluate`/`accelerate`/`ipywidgets` installed into the `sentiment-ltr-paper` conda env (clean `pip check`); pinned in `requirements-finetuning.txt` + `environment.yml`/`environment.lock.yml`; notebook auto-detects and runs on Apple **MPS**
 - [x] **1.1** Load Financial PhraseBank via Parquet mirror `atrost/financial_phrasebank` (datasets-v5 safe); inspect schema, labels, samples, class balance (neutral 59.7% / positive 27.9% / negative 12.3%), token-length stats — `notebooks/liquidAI_prep.ipynb`
 - [x] **1.1b** Load + inspect tokenizer & `distilbert-base-uncased` head (66.9M params, `768→3`), wire label maps into config, and run a one-batch untrained **forward-pass sanity check** — `notebooks/liquidAI_prep.ipynb`
+- [x] **1.2** Tokenize full train/val/test splits (`max_length=128`, fixed-length padding) — `notebooks/liquidAI_prep.ipynb`
+- [x] **1.3** First `Trainer` baseline — 1 epoch, `lr=2e-5`, `batch=16`, `eval_strategy=epoch` — **val acc 78.9%**, **test acc 80.6%**, train loss 0.67 (~41s on MPS) — `notebooks/liquidAI_prep.ipynb`
 - [x] **Notebook executes end-to-end** with zero error outputs (verified via `nbconvert --execute`)
 - [x] **Reproducibility committed** — README "Optional extras" section + dataset-mirror caveat; pushed to GitHub (`e399e7e`)
 
@@ -168,9 +169,9 @@ The setup notebook runs end-to-end locally on Apple **MPS**; Colab GPU also work
 | 2026-06-28 | **Env set up & verified** — fine-tuning stack installed into `sentiment-ltr-paper` (clean `pip check`, no downgrades); pinned in `requirements-finetuning.txt` + `environment.yml`/`environment.lock.yml`; README replication notes added. |
 | 2026-06-28 | **Setup notebook built** (`notebooks/liquidAI_prep.ipynb`) — imports/device check, PhraseBank load+inspect (datasets-v5 Parquet mirror), tokenizer+model load+inspect, forward-pass sanity check. Runs end-to-end on MPS with zero errors. |
 | 2026-06-28 | **Committed & pushed** to GitHub (`e399e7e`). |
+| 2026-06-28 | **First training baseline (1.2 + 1.3)** — full-dataset tokenization + 1-epoch `Trainer` on DistilBERT; **val acc 78.9%**, **test acc 80.6%** (~41s on MPS). |
 
-**Next up:** card **1.2/1.3** — tokenize the full dataset and run the first `Trainer`
-baseline (1 epoch, print accuracy).
+**Next up:** card **2.2** — add macro-F1 to `compute_metrics` and run 2–4 epochs with `load_best_model_at_end` (Iteration 2). Then **3.3** raw PyTorch loop for interview prep.
 
 ---
 
