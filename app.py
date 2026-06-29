@@ -829,8 +829,21 @@ def _selected_date_from_plotly(selection: object | None) -> pd.Timestamp | None:
     return pd.Timestamp(x_value).normalize()
 
 
-def render_refinitiv_story_body(story_id: str, headline: str | None = None, *, close_key: str) -> None:
-    """Render the full Refinitiv story text for one storyId."""
+def _render_readonly_story_text(story_text: str) -> None:
+    """Display story body without a Streamlit input widget (avoids stale widget state)."""
+    with st.container(height=420, border=True):
+        st.write(story_text)
+
+
+def render_refinitiv_story_body(
+    story_id: str,
+    headline: str | None = None,
+    *,
+    close_key: str,
+    story_id_key: str = "refinitiv_open_story_id",
+    story_headline_key: str = "refinitiv_open_story_headline",
+) -> None:
+    """Render the full Refinitiv news story text for one storyId."""
     st.markdown("---")
     st.markdown(f"**{headline or 'Selected headline'}**")
     with st.spinner("Loading full Refinitiv story..."):
@@ -840,16 +853,11 @@ def render_refinitiv_story_body(story_id: str, headline: str | None = None, *, c
             st.error(f"Could not load story: {exc}")
             return
 
-    st.text_area(
-        "Full story",
-        value=story_text,
-        height=420,
-        disabled=True,
-        label_visibility="collapsed",
-    )
+    _render_readonly_story_text(story_text)
     if st.button("Close story", key=close_key):
-        st.session_state.pop("refinitiv_open_story_id", None)
-        st.session_state.pop("refinitiv_open_story_headline", None)
+        st.session_state.pop(story_id_key, None)
+        st.session_state.pop(story_headline_key, None)
+        st.session_state.pop("dashboard_news_story_text", None)  # legacy widget key
         st.query_params.pop("refinitiv_story", None)
         st.query_params.pop("news_date", None)
         st.rerun()
@@ -860,6 +868,10 @@ def render_refinitiv_news_coverage_section(
     daily_counts: pd.DataFrame,
     news_summary: dict[str, object] | None,
     ticker: str,
+    *,
+    story_id_key: str = "refinitiv_open_story_id",
+    story_headline_key: str = "refinitiv_open_story_headline",
+    embed_story: bool = True,
 ) -> None:
     """Render daily news counts with drill-down into headline rows for one day."""
     news_date_param = st.query_params.get("news_date")
@@ -951,6 +963,9 @@ def render_refinitiv_news_coverage_section(
         day_news,
         table_key_suffix=f"_{selected_date.strftime('%Y%m%d')}",
         show_section_title=False,
+        story_id_key=story_id_key,
+        story_headline_key=story_headline_key,
+        embed_story=embed_story,
     )
 
 
@@ -959,6 +974,9 @@ def render_refinitiv_news_headlines(
     *,
     table_key_suffix: str = "",
     show_section_title: bool = True,
+    story_id_key: str = "refinitiv_open_story_id",
+    story_headline_key: str = "refinitiv_open_story_headline",
+    embed_story: bool = True,
 ) -> None:
     """Render Refinitiv headlines with clickable links to read full stories."""
     if news_df.empty:
@@ -1006,25 +1024,29 @@ def render_refinitiv_news_headlines(
             type="tertiary",
             use_container_width=True,
         ):
-            st.session_state["refinitiv_open_story_id"] = str(row["storyId"])
-            st.session_state["refinitiv_open_story_headline"] = str(row["headline"])
+            st.session_state[story_id_key] = str(row["storyId"])
+            st.session_state[story_headline_key] = str(row["headline"])
+            st.session_state.pop("dashboard_news_story_text", None)  # legacy widget key
             st.rerun()
         source_code = row.get("sourceCode", "")
         cols[3].write("" if pd.isna(source_code) else str(source_code))
 
-    story_id = st.session_state.get("refinitiv_open_story_id") or st.query_params.get("refinitiv_story")
-    if story_id:
-        match = display_df[display_df["storyId"].astype(str) == str(story_id)]
-        headline = st.session_state.get("refinitiv_open_story_headline")
-        if headline is None and not match.empty:
-            headline = str(match.iloc[0]["headline"])
-        render_refinitiv_story_body(
-            str(story_id),
-            str(headline) if headline is not None else None,
-            close_key=f"close_story_{table_key_suffix}_{story_id}",
-        )
-    else:
-        st.caption("Click a headline link to read the full story below.")
+    if embed_story:
+        story_id = st.session_state.get(story_id_key) or st.query_params.get("refinitiv_story")
+        if story_id:
+            match = display_df[display_df["storyId"].astype(str) == str(story_id)]
+            headline = st.session_state.get(story_headline_key)
+            if headline is None and not match.empty:
+                headline = str(match.iloc[0]["headline"])
+            render_refinitiv_story_body(
+                str(story_id),
+                str(headline) if headline is not None else None,
+                close_key=f"close_story_{table_key_suffix}_{story_id}",
+                story_id_key=story_id_key,
+                story_headline_key=story_headline_key,
+            )
+        else:
+            st.caption("Click a headline link to read the full story below.")
 
 
 def render_live_api_results(query_result: dict[str, object]) -> None:
@@ -1592,6 +1614,8 @@ def render_dashboard_news_pane(live_result: dict[str, object]) -> None:
     news_df = refinitiv.get("news")
     daily_counts = refinitiv.get("news_daily_counts")
     news_summary = refinitiv.get("news_summary")
+    story_id_key = "dashboard_news_story_id"
+    story_headline_key = "dashboard_news_story_headline"
 
     if isinstance(news_df, pd.DataFrame) and not news_df.empty:
         if isinstance(daily_counts, pd.DataFrame) and not daily_counts.empty:
@@ -1600,6 +1624,9 @@ def render_dashboard_news_pane(live_result: dict[str, object]) -> None:
                 daily_counts,
                 news_summary if isinstance(news_summary, dict) else None,
                 ticker,
+                story_id_key=story_id_key,
+                story_headline_key=story_headline_key,
+                embed_story=False,
             )
 
         st.markdown("#### Full Refinitiv Headline List")
@@ -1626,32 +1653,28 @@ def render_dashboard_news_pane(live_result: dict[str, object]) -> None:
             if 0 <= row_idx < len(display):
                 row = display.iloc[row_idx]
                 if "storyId" in row and pd.notna(row["storyId"]):
-                    st.session_state.dashboard_news_story_id = str(row["storyId"])
-                    st.session_state.dashboard_news_story_headline = str(row.get("headline", "Selected headline"))
+                    new_story_id = str(row["storyId"])
+                    new_headline = str(row.get("headline", "Selected headline"))
+                    if (
+                        st.session_state.get(story_id_key) != new_story_id
+                        or st.session_state.get(story_headline_key) != new_headline
+                    ):
+                        st.session_state[story_id_key] = new_story_id
+                        st.session_state[story_headline_key] = new_headline
+                        st.session_state.pop("dashboard_news_story_text", None)  # legacy widget key
+                        st.session_state.pop("refinitiv_open_story_id", None)
+                        st.session_state.pop("refinitiv_open_story_headline", None)
 
-        story_id = st.session_state.get("dashboard_news_story_id")
+        story_id = st.session_state.get(story_id_key)
         if story_id:
-            headline = st.session_state.get("dashboard_news_story_headline", "Selected headline")
-            st.markdown("---")
-            st.markdown(f"**{headline}**")
-            with st.spinner("Loading full Refinitiv story..."):
-                try:
-                    story_text = load_refinitiv_story_text(str(story_id))
-                except Exception as exc:
-                    st.error(f"Could not load story: {exc}")
-                else:
-                    st.text_area(
-                        "Full story",
-                        value=story_text,
-                        height=420,
-                        disabled=True,
-                        label_visibility="collapsed",
-                        key="dashboard_news_story_text",
-                    )
-            if st.button("Close story", key="dashboard_close_news_story"):
-                st.session_state.pop("dashboard_news_story_id", None)
-                st.session_state.pop("dashboard_news_story_headline", None)
-                st.rerun()
+            headline = st.session_state.get(story_headline_key, "Selected headline")
+            render_refinitiv_story_body(
+                str(story_id),
+                str(headline),
+                close_key=f"dashboard_close_story_{story_id}",
+                story_id_key=story_id_key,
+                story_headline_key=story_headline_key,
+            )
     else:
         error = refinitiv.get("error")
         if error:
@@ -1738,6 +1761,179 @@ def render_dashboard_raw_data_pane(live_result: dict[str, object], ravenpack_art
             st.caption("No RavenPack article frame available.")
 
 
+def _dashboard_cache_dir(ticker: str) -> Path | None:
+    """Find the batch-cache directory for a ticker (rank_XXXX_SLUG), if any."""
+    slug = "".join(ch if ch.isalnum() else "_" for ch in ticker.upper().strip())
+    if not slug or not TOP1K_BY_TICKER_DIR.exists():
+        return None
+    matches = sorted(TOP1K_BY_TICKER_DIR.glob(f"rank_*_{slug}"))
+    for directory in matches:
+        manifest = directory / "manifest.json"
+        if not manifest.exists():
+            continue
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if str(data.get("ticker", "")).strip().upper() == ticker.strip().upper():
+            return directory
+    return matches[0] if matches else None
+
+
+def _dashboard_cache_info(ticker: str) -> dict[str, object] | None:
+    """Lightweight cache summary for a ticker (no parquet reads)."""
+    directory = _dashboard_cache_dir(ticker)
+    if directory is None:
+        return None
+    manifest_path = directory / "manifest.json"
+    manifest: dict[str, object] = {}
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            manifest = {}
+    ok_providers = [
+        str(p.get("provider"))
+        for p in manifest.get("provider_status", [])
+        if isinstance(p, dict) and p.get("status") == "ok"
+    ]
+    return {
+        "dir": directory,
+        "manifest": manifest,
+        "ok_providers": ok_providers,
+        "created_at": manifest.get("created_at"),
+        "company_name": manifest.get("company_name"),
+        "volume_rank": manifest.get("volume_rank"),
+        "start_date": manifest.get("start_date"),
+        "end_date": manifest.get("end_date"),
+    }
+
+
+def _filter_cached_frame(
+    df: pd.DataFrame, date_col: str, start_date: str, end_date: str
+) -> pd.DataFrame:
+    """Filter a cached frame to [start_date, end_date] on date_col when present."""
+    if not isinstance(df, pd.DataFrame) or df.empty or date_col not in df.columns:
+        return df
+    try:
+        dates = pd.to_datetime(df[date_col], utc=True, errors="coerce").dt.tz_localize(None)
+        start = pd.Timestamp(start_date)
+        end = pd.Timestamp(end_date) + pd.Timedelta(days=1)
+        return df[(dates >= start) & (dates < end)]
+    except Exception:
+        return df
+
+
+def load_cached_dashboard_result(
+    ticker: str, start_date: str, end_date: str
+) -> dict[str, object] | None:
+    """Build a dashboard result dict from cached parquet files (no network/login).
+
+    Returns the same shape as run_live_api_query so the same renderers work.
+    Returns None when no cache directory exists for the ticker.
+    """
+    directory = _dashboard_cache_dir(ticker)
+    if directory is None:
+        return None
+
+    ticker_clean = ticker.upper().strip()
+    start_s = to_query_date(start_date)
+    end_s = to_query_date(end_date)
+
+    manifest: dict[str, object] = {}
+    manifest_path = directory / "manifest.json"
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            manifest = {}
+
+    status_by_provider: dict[str, str] = {}
+    ps_path = directory / "provider_status.parquet"
+    if ps_path.exists():
+        try:
+            ps = pd.read_parquet(ps_path)
+            status_by_provider = {
+                str(r["provider"]): str(r.get("status", "")) for _, r in ps.iterrows()
+            }
+        except Exception:
+            status_by_provider = {}
+
+    def _read(name: str) -> pd.DataFrame:
+        path = directory / name
+        if not path.exists():
+            return pd.DataFrame()
+        try:
+            return pd.read_parquet(path)
+        except Exception:
+            return pd.DataFrame()
+
+    refinitiv_prices = _filter_cached_frame(_read("refinitiv_prices.parquet"), "date", start_s, end_s)
+    refinitiv_news = _filter_cached_frame(_read("refinitiv_news.parquet"), "date", start_s, end_s)
+    refinitiv_daily = _filter_cached_frame(_read("refinitiv_news_daily_counts.parquet"), "date", start_s, end_s)
+    wrds_prices = _filter_cached_frame(_read("wrds_prices.parquet"), "date", start_s, end_s)
+    wrds_names = _read("wrds_names.parquet")
+    yahoo_prices = _filter_cached_frame(_read("yahoo_prices.parquet"), "date", start_s, end_s)
+    ravenpack_articles = _filter_cached_frame(_read("ravenpack_articles.parquet"), "timestamp_utc", start_s, end_s)
+
+    def _status(provider: str, frame: pd.DataFrame) -> str:
+        if provider not in status_by_provider and frame.empty:
+            return "skipped"
+        if frame.empty:
+            return "empty"
+        return "ok"
+
+    providers: dict[str, dict[str, object]] = {
+        "refinitiv": {
+            "status": _status("refinitiv", refinitiv_prices),
+            "error": None if not refinitiv_prices.empty else "No cached Refinitiv price history.",
+            "prices": refinitiv_prices,
+            "news": refinitiv_news,
+            "news_daily_counts": refinitiv_daily,
+            "news_summary": None,
+            "ric": None,
+            "session_info": None,
+        },
+        "wrds": {
+            "status": _status("wrds", wrds_prices),
+            "error": None if not wrds_prices.empty else "No cached CRSP rows.",
+            "prices": wrds_prices,
+            "names": wrds_names,
+        },
+        "yahoo": {
+            "status": _status("yahoo", yahoo_prices),
+            "error": None if not yahoo_prices.empty else "No cached Yahoo rows.",
+            "prices": yahoo_prices,
+        },
+        "ravenpack": {
+            "status": _status("ravenpack", ravenpack_articles),
+            "error": None if not ravenpack_articles.empty else "No cached RavenPack articles.",
+            "articles": ravenpack_articles,
+        },
+    }
+
+    price_frames = {
+        provider: result["prices"]
+        for provider, result in providers.items()
+        if isinstance(result.get("prices"), pd.DataFrame) and not result["prices"].empty
+    }
+
+    selected = manifest.get("selected_providers") if isinstance(manifest.get("selected_providers"), dict) else None
+
+    return {
+        "ticker": ticker_clean,
+        "start_date": start_s,
+        "end_date": end_s,
+        "providers": providers,
+        "price_frames": price_frames,
+        "selected_providers": selected or {p: True for p in providers},
+        "source": "cache",
+        "cache_dir": str(directory),
+        "cache_created_at": manifest.get("created_at"),
+        "cache_window": (manifest.get("start_date"), manifest.get("end_date")),
+    }
+
+
 def render_multi_api_dashboard_tab() -> None:
     """Render a ticker/date dashboard that combines all available APIs into panes."""
     st.subheader("Unified Ticker Data Explorer")
@@ -1774,6 +1970,26 @@ def render_multi_api_dashboard_tab() -> None:
     if dash_date_cols[2].button("Full history (1990 → today)", key="dash_full_history"):
         st.session_state.dashboard_start_date = pd.Timestamp("1990-01-01").date()
         st.session_state.dashboard_end_date = default_live_api_end().date()
+
+    current_ticker_input = str(st.session_state.get("dashboard_ticker", "")).strip().upper()
+    cache_info = _dashboard_cache_info(current_ticker_input) if current_ticker_input else None
+    if cache_info:
+        rank = cache_info.get("volume_rank")
+        company = cache_info.get("company_name") or current_ticker_input
+        created = str(cache_info.get("created_at") or "")[:10]
+        providers_ok = ", ".join(cache_info.get("ok_providers") or []) or "none"
+        win = cache_info.get("start_date"), cache_info.get("end_date")
+        st.success(
+            f"✅ **Cached data available** for {current_ticker_input} ({company}"
+            + (f", rank {rank}" if rank else "")
+            + f"). Pulled {created or 'n/a'}; window {win[0]}→{win[1]}; providers: {providers_ok}. "
+            "**Load cached data** is instant and needs no API login."
+        )
+    elif current_ticker_input:
+        st.info(
+            f"ℹ️ No cached data for {current_ticker_input}. **Load data** will pull live "
+            "from the online APIs (requires WRDS / Refinitiv access)."
+        )
 
     with st.form("multi_api_dashboard_query", clear_on_submit=False):
         control_cols = st.columns([1, 1, 1])
@@ -1813,41 +2029,62 @@ def render_multi_api_dashboard_tab() -> None:
             value=refinitiv_configured(PROJECT_ROOT),
             key="dashboard_include_refinitiv_news",
         )
-        submitted = st.form_submit_button("Retrieve Dashboard Data", type="primary")
+        st.caption(
+            "**Load data** uses the local cache when available (instant, no login) and "
+            "only pulls live when nothing is cached. **Re-pull live** ignores the cache "
+            "and re-fetches from the online APIs. Provider checkboxes apply to live pulls."
+        )
+        button_cols = st.columns(2)
+        load_clicked = button_cols[0].form_submit_button("Load data", type="primary")
+        relive_clicked = button_cols[1].form_submit_button("Re-pull live (ignore cache)")
 
+    submitted = load_clicked or relive_clicked
     if submitted:
         if start_date > end_date:
             st.error("Start date must be on or before end date.")
             return
-        if not any([use_refinitiv, use_wrds, use_yahoo, use_ravenpack]):
-            st.error("Select at least one data source.")
-            return
 
-        latest_crsp_date: pd.Timestamp | None = None
-        if wrds_credentials_available():
-            try:
-                latest_crsp_date = get_latest_crsp_date()
-            except Exception:
-                latest_crsp_date = None
-
-        with st.spinner(f"Retrieving dashboard data for {ticker}..."):
-            # 10 000 rows ≈ 40 years of daily data — enough for any date window.
-            live_result = run_live_api_query(
-                ticker,
-                to_query_date(start_date),
-                to_query_date(end_date),
-                query_refinitiv=use_refinitiv,
-                query_wrds=use_wrds,
-                query_yahoo=use_yahoo,
-                query_ravenpack=use_ravenpack,
-                news_count=1 if include_refinitiv_news else 0,
-                latest_crsp_date=latest_crsp_date,
-                wrds_limit=10_000,
+        # Prefer cache unless the user explicitly asked to re-pull live.
+        cached_result: dict[str, object] | None = None
+        if not relive_clicked:
+            cached_result = load_cached_dashboard_result(
+                ticker, to_query_date(start_date), to_query_date(end_date)
             )
 
-        st.session_state.dashboard_result = {
-            "live": live_result,
-        }
+        if cached_result is not None:
+            st.session_state.dashboard_result = {"live": cached_result, "source": "cache"}
+        else:
+            if not any([use_refinitiv, use_wrds, use_yahoo, use_ravenpack]):
+                st.error("Select at least one data source for a live pull.")
+                return
+            if not relive_clicked:
+                st.info(
+                    f"No cached data for {ticker} — pulling live from the selected providers."
+                )
+
+            latest_crsp_date: pd.Timestamp | None = None
+            if use_wrds and wrds_credentials_available():
+                try:
+                    latest_crsp_date = get_latest_crsp_date()
+                except Exception:
+                    latest_crsp_date = None
+
+            with st.spinner(f"Retrieving dashboard data for {ticker}..."):
+                # 10 000 rows ≈ 40 years of daily data — enough for any date window.
+                live_result = run_live_api_query(
+                    ticker,
+                    to_query_date(start_date),
+                    to_query_date(end_date),
+                    query_refinitiv=use_refinitiv,
+                    query_wrds=use_wrds,
+                    query_yahoo=use_yahoo,
+                    query_ravenpack=use_ravenpack,
+                    news_count=1 if include_refinitiv_news else 0,
+                    latest_crsp_date=latest_crsp_date,
+                    wrds_limit=10_000,
+                )
+
+            st.session_state.dashboard_result = {"live": live_result, "source": "live"}
 
     dashboard_result = st.session_state.get("dashboard_result")
     if not dashboard_result:
@@ -1855,6 +2092,7 @@ def render_multi_api_dashboard_tab() -> None:
         return
 
     live_result = dashboard_result["live"]
+    source = dashboard_result.get("source", "live")
     ravenpack_result = live_result["providers"].get("ravenpack", {})
     ravenpack_articles = ravenpack_result.get("articles", pd.DataFrame())
     if not isinstance(ravenpack_articles, pd.DataFrame):
@@ -1871,7 +2109,18 @@ def render_multi_api_dashboard_tab() -> None:
         "RavenPack",
         "OK" if not ravenpack_articles.empty else ("Failed" if ravenpack_error else "No rows"),
     )
-    st.caption(f"Dashboard window: **{live_result['start_date']}** to **{live_result['end_date']}** for **{ticker}**")
+    if source == "cache":
+        created = str(live_result.get("cache_created_at") or "")[:10]
+        st.caption(
+            f"📦 Source: **local cache** (no live API call){' · pulled ' + created if created else ''}. "
+            f"Window **{live_result['start_date']}** to **{live_result['end_date']}** for **{ticker}**. "
+            "Use **Re-pull live** above to refresh from the online APIs."
+        )
+    else:
+        st.caption(
+            f"🌐 Source: **live API pull**. Window **{live_result['start_date']}** to "
+            f"**{live_result['end_date']}** for **{ticker}**"
+        )
 
     pane_overview, pane_prices, pane_news, pane_sentiment, pane_raw = st.tabs([
         "Overview",
@@ -2710,6 +2959,44 @@ def render_sentiment_lab_tab() -> None:
         "Loaded from the script-free Parquet mirror `atrost/financial_phrasebank` "
         "(datasets v5 compatible). Train / validation / test splits are pre-defined."
     )
+
+    with st.expander("ℹ️ What is Financial PhraseBank?", expanded=False):
+        st.markdown(
+            "**What it is** — ~4,840 English **financial-news sentences**, each labeled "
+            "with sentiment *from an investor's view* (would the news move the stock "
+            "price?): `negative` / `neutral` / `positive`. Sentence-level, finance-specific.\n\n"
+            "**Who & why** — built by Malo, Sinha, Korhonen, Wallenius & Takala "
+            "(Aalto University, 2014) as a human-annotated benchmark, because a "
+            "sentence's overall sentiment often differs from its individual words "
+            "(*\"cost reduction\"* = positive; *\"dividend cut\"* = negative).\n\n"
+            "**Schema** — two columns: `sentence` (string) and `label` "
+            "(`0=negative`, `1=neutral`, `2=positive`)."
+        )
+        st.dataframe(
+            pd.DataFrame(
+                {
+                    "sentence": [
+                        "Pretax profit rose to EUR 0.6 mn from EUR 0.4 mn …",
+                        "The total headcount reduction will be 50 persons …",
+                        "Investment management and investment advisory …",
+                    ],
+                    "label": ["positive", "negative", "neutral"],
+                }
+            ),
+            hide_index=True,
+            use_container_width=True,
+        )
+        st.markdown(
+            "**How labels were built** — 16 finance-background annotators; each "
+            "sentence got 5–8 independent annotations; gold label = **majority vote**. "
+            "The `50agree` config we use keeps sentences with ≥50% agreement (most "
+            "data, noisiest labels).\n\n"
+            "**Read more** — "
+            "[detailed notes](https://github.com/armandordorica/sentiment_learn_to_rank_paper/blob/main/docs/financial_phrasebank.md) · "
+            "[dataset card](https://huggingface.co/datasets/takala/financial_phrasebank) · "
+            "[original paper](https://arxiv.org/abs/1307.5336)"
+        )
+
     try:
         balance, splits = _cached_phrasebank_summary()
         s1, s2, s3, s4 = st.columns(4)
