@@ -47,12 +47,13 @@ The project is past the "can we pull data?" stage and into "can we pull it relia
 
 ### What Works Today
 
-**Streamlit app (`app.py`)** — four tabs:
+**Streamlit app (`app.py`)** — five tabs:
 
 1. **Data Explorer** — single-ticker queries across Refinitiv, WRDS/CRSP, Yahoo, and RavenPack with combined price charts, news coverage, sentiment panes, and raw schema inspection.
 2. **Batch Pipeline (Top-1K)** — launch, monitor, and inspect bulk fetches for all 1,000 universe tickers; live status banner, cache snapshot, per-provider failure breakdown, and per-ticker manifest table.
-3. **Sentiment Lab** — fine-tuning workflow for the news-sentiment model (TRNA substitute): Financial PhraseBank metrics, headline scoring, in-app training, and a compute-device report/benchmark (CUDA / Apple MPS / CPU).
-4. **Paper Validation (2003-2014)** — bundled universe CSV and validation charts without a live WRDS connection.
+3. **PhraseBank HF Baseline** — Hugging Face DistilBERT benchmark on Financial PhraseBank: dataset dashboard (gold labels, box + p50 probability charts), training metrics, and checkpoint details.
+4. **Sentiment Lab** — fine-tuning workflow for the news-sentiment model (TRNA substitute): RavenPack article browser, PhraseBank/RavenPack training, headline scoring, and compute-device report.
+5. **Paper Validation (2003-2014)** — bundled universe CSV and validation charts without a live WRDS connection.
 
 **Batch caching** — `scripts/run_batch_pipeline.py` writes one directory per ticker under:
 
@@ -113,6 +114,9 @@ code does. Keep it updated as part of every commit (see
 | 2026-06 | **PhraseBank dataset explainer** — added an "ℹ️ What is Financial PhraseBank?" expander in the Sentiment Lab tab (what / who / why / schema sample / label construction) plus a full `docs/financial_phrasebank.md` reference, linked via "Read more" to the doc, HF dataset card, and the Malo et al. paper. *Why:* viewers should understand the training data's provenance and labeling without leaving the app, with deep detail one click away. |
 | 2026-06 | **Cache-aware Data Explorer** — the Unified Ticker Data Explorer now has **Load data** (prefers the local batch cache, instant, no API login; falls back to live only when nothing is cached) and **Re-pull live (ignore cache)**; added `load_cached_dashboard_result()` that rebuilds the dashboard result shape from cached parquets with date filtering, plus a cache-status banner and a source (cache/live) indicator. *Why:* live pulls for high-volume names (e.g. Citigroup: ~865k RavenPack rows over 12 years) hang on sequential, no-timeout queries and require Refinitiv/WRDS auth; most tickers are already cached, so reading the cache is the fast, offline default. |
 | 2026-06 | **Refinitiv story panel fix** — unified dashboard News tab on one story session state, removed duplicate story renderers (coverage drill-down vs full headline table), and replaced sticky `st.text_area` with read-only `st.write` display. *Why:* clicking a new headline kept showing the first loaded story (widget state) or a story from the other panel. |
+| 2026-06 | **Iteration 2 fine-tuning** — macro-F1 + accuracy in `compute_metrics`, 3-epoch training with `load_best_model_at_end` on val F1 (`phrasebank_distilbert_best/`); test **F1 82.1%**, **acc 83.9%** vs 1-epoch baseline 80.6% acc. Documented atrost pre-defined splits (no re-split). *Why:* neutral class dominates PhraseBank; accuracy alone is misleading, and multi-epoch + best checkpoint beats the 1-epoch smoke test. |
+| 2026-07 | **PhraseBank HF Baseline tab + dataset dashboard** — new top-level tab documenting the Hugging Face DistilBERT benchmark (dataset provenance, metrics, gold-label charts, box + p50 predicted-probability charts). *Why:* separate reference UI from interactive Sentiment Lab training/inference. |
+| 2026-07 | **RavenPack fine-tuning path** — `ravenpack_sentiment.py`, Sentiment Lab RavenPack article browser + train UI, `finetune_on_ravenpack.ipynb`, news data coverage section, optional RavenPack `include_text` live pull. *Why:* adapt the PhraseBank checkpoint to RavenPack headline labels (TRNA substitute) for Iteration 4. |
 
 ### Immediate Next Steps
 

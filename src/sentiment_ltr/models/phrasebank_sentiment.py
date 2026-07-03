@@ -15,20 +15,33 @@ import numpy as np
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_MODEL_DIR = PROJECT_ROOT / "data" / "models" / "phrasebank_distilbert_1ep"
 METRICS_FILENAME = "metrics.json"
 
 PRIMARY_DATASET = "atrost/financial_phrasebank"
 FALLBACK_DATASET = "warwickai/financial_phrasebank_mirror"
 LABEL_NAMES_FALLBACK = ["negative", "neutral", "positive"]
 
+# Pre-defined train/validation/test splits ship with the atrost Parquet mirror
+# (3100 / 776 / 970 = 4846 rows, sentences_50agree). We use them as-is rather than
+# re-splitting so results stay comparable to other published benchmarks.
+SPLIT_SOURCE = (
+    "atrost/financial_phrasebank pre-defined splits "
+    "(sentences_50agree; no re-split)"
+)
+
 MODEL_NAME = "distilbert-base-uncased"
 MAX_LENGTH = 128
+DEFAULT_TRAIN_EPOCHS = 3
+PHRASEBANK_PROB_COLS = ["p(negative)", "p(neutral)", "p(positive)"]
+PHRASEBANK_SPLIT_ORDER = ["train", "validation", "test"]
 
+DEFAULT_MODEL_DIR = PROJECT_ROOT / "data" / "models" / "phrasebank_distilbert_best"
+LEGACY_MODEL_DIR = PROJECT_ROOT / "data" / "models" / "phrasebank_distilbert_1ep"
 # Recorded from the first successful 1-epoch baseline (MPS, 2026-06-28).
 FALLBACK_METRICS: dict[str, Any] = {
     "model_name": MODEL_NAME,
     "dataset": PRIMARY_DATASET,
+    "split_source": SPLIT_SOURCE,
     "epochs": 1,
     "learning_rate": 2e-5,
     "per_device_train_batch_size": 16,
@@ -152,8 +165,45 @@ def metrics_path(model_dir: Path = DEFAULT_MODEL_DIR) -> Path:
     return model_dir / METRICS_FILENAME
 
 
-def load_metrics(model_dir: Path = DEFAULT_MODEL_DIR) -> dict[str, Any]:
+def resolve_model_dir() -> Path:
+    """Return the best available saved checkpoint directory."""
+    for directory in (DEFAULT_MODEL_DIR, LEGACY_MODEL_DIR):
+        if (directory / "config.json").exists() and (
+            (directory / "model.safetensors").exists()
+            or (directory / "pytorch_model.bin").exists()
+        ):
+            return directory
+    return DEFAULT_MODEL_DIR
+
+
+def model_is_saved(model_dir: Path | None = None) -> bool:
+    directory = Path(model_dir) if model_dir is not None else resolve_model_dir()
+    return (directory / "config.json").exists() and (
+        (directory / "model.safetensors").exists()
+        or (directory / "pytorch_model.bin").exists()
+    )
+
+
+def build_compute_metrics():
+    """Return a Trainer ``compute_metrics`` fn with accuracy + macro-F1."""
+    import evaluate
+
+    accuracy_metric = evaluate.load("accuracy")
+    f1_metric = evaluate.load("f1")
+
+    def compute_metrics(eval_pred):
+        logits, labels = eval_pred
+        preds = np.argmax(logits, axis=-1)
+        acc = accuracy_metric.compute(predictions=preds, references=labels)
+        f1 = f1_metric.compute(predictions=preds, references=labels, average="macro")
+        return {**acc, **f1}
+
+    return compute_metrics
+
+
+def load_metrics(model_dir: Path | None = None) -> dict[str, Any]:
     """Load saved training metrics, or return documented fallback."""
+    model_dir = resolve_model_dir() if model_dir is None else Path(model_dir)
     path = metrics_path(model_dir)
     if path.exists():
         try:
@@ -161,12 +211,6 @@ def load_metrics(model_dir: Path = DEFAULT_MODEL_DIR) -> dict[str, Any]:
         except Exception:
             pass
     return FALLBACK_METRICS.copy()
-
-
-def model_is_saved(model_dir: Path = DEFAULT_MODEL_DIR) -> bool:
-    return (model_dir / "config.json").exists() and (
-        (model_dir / "model.safetensors").exists() or (model_dir / "pytorch_model.bin").exists()
-    )
 
 
 def tokenize_dataset(raw, tokenizer):
@@ -185,14 +229,13 @@ def tokenize_dataset(raw, tokenizer):
 
 def train_baseline(
     *,
-    output_dir: Path = DEFAULT_MODEL_DIR,
-    num_train_epochs: int = 1,
+    output_dir: Path | None = None,
+    num_train_epochs: int = DEFAULT_TRAIN_EPOCHS,
     learning_rate: float = 2e-5,
     per_device_train_batch_size: int = 16,
     seed: int = 42,
 ) -> dict[str, Any]:
-    """Fine-tune DistilBERT on PhraseBank and persist model + metrics."""
-    import evaluate
+    """Fine-tune DistilBERT on PhraseBank and persist the best val-F1 checkpoint."""
     from transformers import (
         AutoModelForSequenceClassification,
         AutoTokenizer,
@@ -201,7 +244,7 @@ def train_baseline(
     )
 
     device = pick_device()
-    output_dir = Path(output_dir)
+    output_dir = Path(output_dir or DEFAULT_MODEL_DIR)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     raw = load_phrasebank()
@@ -216,12 +259,6 @@ def train_baseline(
     )
 
     tokenized = tokenize_dataset(raw, tokenizer)
-    accuracy_metric = evaluate.load("accuracy")
-
-    def compute_metrics(eval_pred):
-        logits, labels = eval_pred
-        preds = np.argmax(logits, axis=-1)
-        return accuracy_metric.compute(predictions=preds, references=labels)
 
     training_args = TrainingArguments(
         output_dir=str(output_dir),
@@ -231,8 +268,12 @@ def train_baseline(
         learning_rate=learning_rate,
         weight_decay=0.01,
         eval_strategy="epoch",
+        save_strategy="epoch",
+        load_best_model_at_end=True,
+        metric_for_best_model="f1",
+        greater_is_better=True,
+        save_total_limit=1,
         logging_steps=50,
-        save_strategy="no",
         report_to="none",
         seed=seed,
     )
@@ -243,7 +284,7 @@ def train_baseline(
         train_dataset=tokenized["train"],
         eval_dataset=tokenized["validation"],
         processing_class=tokenizer,
-        compute_metrics=compute_metrics,
+        compute_metrics=build_compute_metrics(),
     )
 
     train_result = trainer.train()
@@ -256,10 +297,12 @@ def train_baseline(
     metrics = {
         "model_name": MODEL_NAME,
         "dataset": PRIMARY_DATASET,
+        "split_source": SPLIT_SOURCE,
         "epochs": num_train_epochs,
         "learning_rate": learning_rate,
         "per_device_train_batch_size": per_device_train_batch_size,
         "max_length": MAX_LENGTH,
+        "metric_for_best_model": "f1",
         "train_loss": float(train_result.training_loss),
         "train_runtime_s": float(train_result.metrics.get("train_runtime", 0)),
         "validation": {k: float(v) if isinstance(v, (int, float)) else v for k, v in val_metrics.items()},
@@ -271,11 +314,11 @@ def train_baseline(
     return metrics
 
 
-def load_classifier(model_dir: Path = DEFAULT_MODEL_DIR):
+def load_classifier(model_dir: Path | None = None):
     """Load a saved tokenizer + classification model."""
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-    model_dir = Path(model_dir)
+    model_dir = resolve_model_dir() if model_dir is None else Path(model_dir)
     if not model_is_saved(model_dir):
         raise FileNotFoundError(
             f"No saved model at {model_dir}. Run training from the Sentiment Lab tab "
@@ -325,3 +368,42 @@ def predict_sentences(
             row[f"p({name})"] = round(float(probs[i, j]), 4)
         rows.append(row)
     return pd.DataFrame(rows)
+
+
+def phrasebank_probability_chart_frame(model_dir: Path | None = None) -> pd.DataFrame:
+    """Long-form predicted class probabilities for all PhraseBank splits (box plot)."""
+    model_dir = resolve_model_dir() if model_dir is None else Path(model_dir)
+    tokenizer, model, device = load_classifier(model_dir)
+    raw = load_phrasebank()
+
+    frames: list[pd.DataFrame] = []
+    for split_name in PHRASEBANK_SPLIT_ORDER:
+        preds = predict_sentences(list(raw[split_name]["sentence"]), tokenizer, model, device)
+        part = preds[PHRASEBANK_PROB_COLS].copy()
+        part["split"] = split_name
+        frames.append(part)
+
+    probs_all = pd.concat(frames, ignore_index=True)
+    long_probs = probs_all.melt(
+        id_vars=["split"],
+        value_vars=PHRASEBANK_PROB_COLS,
+        var_name="class",
+        value_name="probability",
+    )
+    long_probs["class"] = long_probs["class"].str.replace(r"p\(|\)", "", regex=True)
+    long_probs["split"] = pd.Categorical(
+        long_probs["split"],
+        categories=PHRASEBANK_SPLIT_ORDER,
+        ordered=True,
+    )
+    return long_probs
+
+
+def phrasebank_probability_p50_frame(model_dir: Path | None = None) -> pd.DataFrame:
+    """Median (p50) predicted class probability per PhraseBank split."""
+    long_probs = phrasebank_probability_chart_frame(model_dir)
+    return (
+        long_probs.groupby(["split", "class"], as_index=False, observed=True)["probability"]
+        .median()
+        .rename(columns={"probability": "p50"})
+    )

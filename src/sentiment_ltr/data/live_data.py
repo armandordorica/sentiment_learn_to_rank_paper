@@ -510,6 +510,8 @@ def query_ravenpack_articles(
     permno: int | None = None,
     year_progress_callback: Callable[[int, int, float, "str | None"], None] | None = None,
     year_timeout_s: int = 90,
+    *,
+    include_text: bool = False,
 ) -> pd.DataFrame:
     """Fetch RavenPack sentiment articles for a ticker from WRDS.
 
@@ -591,11 +593,19 @@ def query_ravenpack_articles(
                 rp_entity_id = best_id
 
         # ── Year-by-year fetch with per-query server-side timeout ───────────────
-        # headline / event_text are omitted — large text columns that multiply
-        # transfer size while the paper models only need the numeric scores.
-        cols = ("timestamp_utc, rp_story_id, relevance, event_sentiment_score, "
+        # Batch pulls omit headline / event_text to keep parquet size down; UI pulls
+        # can request them via include_text=True.
+        if include_text:
+            cols = (
+                "timestamp_utc, rp_story_id, relevance, event_sentiment_score, headline, event_text, "
+                "source_name, topic, \"group\", \"type\", sub_type, news_type, css, nip"
+            )
+        else:
+            cols = (
+                "timestamp_utc, rp_story_id, relevance, event_sentiment_score, "
                 "source_name, topic, \"group\", \"type\", "
-                "sub_type, news_type, css, nip")
+                "sub_type, news_type, css, nip"
+            )
 
         # Apply statement_timeout once; re-apply after each rollback.
         def _set_timeout():

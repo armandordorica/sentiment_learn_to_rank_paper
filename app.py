@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -48,6 +49,9 @@ from sentiment_ltr.data.cash_merger_exits import (
 )
 from sentiment_ltr.models.phrasebank_sentiment import (
     DEFAULT_MODEL_DIR,
+    MODEL_NAME,
+    PRIMARY_DATASET,
+    SPLIT_SOURCE,
     benchmark_matmul,
     dataset_class_balance,
     device_report,
@@ -56,9 +60,33 @@ from sentiment_ltr.models.phrasebank_sentiment import (
     load_metrics,
     load_phrasebank,
     model_is_saved,
+    phrasebank_probability_chart_frame,
     predict_sentences,
+    resolve_model_dir,
     train_baseline,
 )
+from sentiment_ltr.models.ravenpack_sentiment import (
+    DEFAULT_RAVENPACK_MODEL_DIR,
+    DEFAULT_RAVENPACK_TRAIN_EPOCHS,
+    discover_ravenpack_article_files,
+    load_ravenpack_labeled_frame,
+    load_ravenpack_metrics,
+    ravenpack_class_balance,
+    ravenpack_model_is_saved,
+    ravenpack_split_summary,
+    resolve_ravenpack_model_dir,
+    train_ravenpack,
+)
+
+# 1-epoch baseline numbers for the progress comparison table (Iteration 1).
+PHRASEBANK_BASELINE_METRICS: dict[str, object] = {
+    "epochs": 1,
+    "validation": {"eval_accuracy": 0.7887},
+    "test": {"eval_accuracy": 0.8062},
+}
+DEFAULT_TRAIN_EPOCHS_UI = 3
+DEFAULT_RAVENPACK_TRAIN_EPOCHS_UI = DEFAULT_RAVENPACK_TRAIN_EPOCHS
+PHRASEBANK_SPLIT_ORDER = ["train", "validation", "test"]
 
 REFINITIV_IMPORT_ERROR: str | None = None
 
@@ -198,6 +226,8 @@ BATCH_STATUS_FILE   = TOP1K_OUTPUT_DIR / "batch_status.json"
 BATCH_PID_FILE      = TOP1K_OUTPUT_DIR / "batch.pid"
 BATCH_RUNNER_SCRIPT = PROJECT_ROOT / "scripts" / "run_batch_pipeline.py"
 TOP1K_UNIVERSE_PATH = PROJECT_ROOT / "app_data" / "crsp_top_volume_universe.csv"
+NEWS_RAVENPACK_DIR = PROJECT_ROOT / "data" / "raw" / "news" / "ravenpack"
+NEWS_REFINITIV_DIR = PROJECT_ROOT / "data" / "raw" / "news" / "refinitiv"
 DATE_RANGE_PRESETS = {
     "Last 7 calendar days": {"mode": "calendar", "days": 7},
     "Last 30 calendar days": {"mode": "calendar", "days": 30},
@@ -2874,14 +2904,965 @@ def _cached_phrasebank_summary():
     return balance, splits
 
 
+def _clean_news_text(value: object) -> str:
+    text = str(value or "").strip()
+    if text.lower() in {"", "none", "nan"}:
+        return ""
+    return text
+
+
+def _normalize_headline_key(value: object) -> str:
+    return re.sub(r"\s+", " ", _clean_news_text(value).lower())
+
+
+def _event_text_matches_headline(headline: str, event_text: str) -> bool:
+    """Heuristic: RavenPack event_text often tags the AAPL mention, not the headline subject."""
+    if not headline or not event_text:
+        return True
+    stop = {
+        "the", "a", "an", "and", "or", "for", "to", "of", "in", "on", "at", "by",
+        "market", "talk", "press", "release", "update", "dj", "wsj",
+    }
+    h_tokens = {
+        t for t in re.findall(r"[a-z0-9]+", headline.lower())
+        if t not in stop and len(t) > 2
+    }
+    e_tokens = {
+        t for t in re.findall(r"[a-z0-9]+", event_text.lower())
+        if t not in stop and len(t) > 2
+    }
+    if not h_tokens or not e_tokens:
+        return True
+    return bool(h_tokens & e_tokens)
+
+
+def _meaningful_event_text(headline: str, event_text: str) -> bool:
+    """True when RavenPack provides a non-empty summary that isn't just the headline repeated."""
+    if not event_text:
+        return False
+    if event_text == headline:
+        return False
+    return len(event_text) >= 15
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_refinitiv_story_lookup(ticker: str) -> dict[str, str]:
+    """Map normalized Refinitiv headline -> cached full story text (when available)."""
+    slug = ticker.strip().lower()
+    headlines_path = NEWS_REFINITIV_DIR / f"{slug}_headlines_checkpoint.parquet"
+    stories_path = NEWS_REFINITIV_DIR / f"{slug}_story_text_checkpoint.parquet"
+    if not headlines_path.exists() or not stories_path.exists():
+        return {}
+    try:
+        headlines = pd.read_parquet(headlines_path)
+        stories = pd.read_parquet(stories_path)
+        story_col = "story_id" if "story_id" in stories.columns else "storyId"
+        headline_col = "story_id" if "story_id" in headlines.columns else "storyId"
+        text_col = "article_text" if "article_text" in stories.columns else "story_text"
+        merged = headlines.merge(stories, left_on=headline_col, right_on=story_col, how="inner")
+        lookup: dict[str, str] = {}
+        for _, row in merged.iterrows():
+            text = _clean_news_text(row.get(text_col))
+            if not text:
+                continue
+            lookup[_normalize_headline_key(row.get("headline"))] = text
+        return lookup
+    except Exception:
+        return {}
+
+
+def _attach_refinitiv_stories(articles: pd.DataFrame, ticker: str) -> pd.DataFrame:
+    """Add cached Refinitiv full-story text when the headline matches exactly."""
+    if articles.empty:
+        return articles
+    lookup = _load_refinitiv_story_lookup(ticker)
+    if not lookup:
+        articles = articles.copy()
+        articles["full_story_text"] = None
+        articles["refinitiv_story_id"] = None
+        return articles
+
+    out = articles.copy()
+    out["full_story_text"] = out["headline"].map(
+        lambda h: lookup.get(_normalize_headline_key(h))
+    )
+    out["refinitiv_story_id"] = None
+    return out
+
+
+def _ravenpack_polarity(score: object) -> str:
+    """Map RavenPack event_sentiment_score to a coarse polarity label."""
+    try:
+        val = float(score)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return "—"
+    if pd.isna(val):
+        return "—"
+    if val > 0.05:
+        return "Positive"
+    if val < -0.05:
+        return "Negative"
+    return "Neutral"
+
+
+def _normalize_ravenpack_frame(df: pd.DataFrame) -> pd.DataFrame:
+    """Unify RavenPack frames from rich cache, batch cache, or live WRDS."""
+    if df.empty:
+        return df
+
+    out = df.copy()
+    if "article_time" not in out.columns:
+        if "timestamp_utc" in out.columns:
+            out["article_time"] = pd.to_datetime(out["timestamp_utc"], utc=True, errors="coerce")
+        else:
+            out["article_time"] = pd.NaT
+    else:
+        out["article_time"] = pd.to_datetime(out["article_time"], utc=True, errors="coerce")
+
+    if "relevance_score" not in out.columns and "relevance" in out.columns:
+        out["relevance_score"] = pd.to_numeric(out["relevance"], errors="coerce") / 100
+    else:
+        out["relevance_score"] = pd.to_numeric(out.get("relevance_score"), errors="coerce")
+
+    out["event_sentiment_score"] = pd.to_numeric(out.get("event_sentiment_score"), errors="coerce")
+    if "sentiment_score" not in out.columns:
+        out["sentiment_score"] = out["relevance_score"] * out["event_sentiment_score"]
+    else:
+        out["sentiment_score"] = pd.to_numeric(out["sentiment_score"], errors="coerce")
+
+    if "headline" in out.columns:
+        out["headline"] = out["headline"].map(_clean_news_text)
+    else:
+        out["headline"] = ""
+    if "event_text" in out.columns:
+        out["event_text"] = out["event_text"].map(_clean_news_text)
+    else:
+        out["event_text"] = ""
+
+    out["text"] = out.apply(
+        lambda row: row["event_text"] or row["headline"] or "",
+        axis=1,
+    )
+    out["has_event_summary"] = out.apply(
+        lambda row: _meaningful_event_text(str(row["headline"]), str(row["event_text"])),
+        axis=1,
+    )
+    out["event_text_matches_headline"] = out.apply(
+        lambda row: _event_text_matches_headline(str(row["headline"]), str(row["event_text"])),
+        axis=1,
+    )
+    out["polarity"] = out["event_sentiment_score"].map(_ravenpack_polarity)
+    out["date_str"] = out["article_time"].dt.strftime("%Y-%m-%d %H:%M").fillna("—")
+    out["text_preview"] = (
+        out["text"].astype(str).str.slice(0, 120).str.replace("\n", " ", regex=False)
+    )
+    return out
+
+
+def _load_ravenpack_articles_for_display(
+    ticker: str,
+    start_date: str,
+    end_date: str,
+    *,
+    live: bool,
+    max_rows: int,
+) -> tuple[pd.DataFrame, str]:
+    """Load RavenPack articles, preferring rich per-ticker cache with headline/event_text."""
+    ticker_clean = ticker.strip().upper()
+    if not ticker_clean:
+        return pd.DataFrame(), "Enter a ticker."
+
+    start_s = to_query_date(start_date)
+    end_s = to_query_date(end_date)
+    slug = ticker_clean.lower()
+    source_notes: list[str] = []
+    articles = pd.DataFrame()
+
+    if not live:
+        rich_candidates = [
+            NEWS_RAVENPACK_DIR / f"{slug}_articles_2003_2014.parquet",
+            NEWS_RAVENPACK_DIR / f"{slug}_rp_checkpoint.parquet",
+        ]
+        for path in rich_candidates:
+            if not path.exists():
+                continue
+            frame = pd.read_parquet(path)
+            frame = _normalize_ravenpack_frame(frame)
+            frame = _filter_cached_frame(frame, "article_time", start_s, end_s)
+            if not frame.empty:
+                articles = frame
+                source_notes.append(f"rich cache `{path.name}`")
+                break
+
+        if articles.empty:
+            cached = load_cached_dashboard_result(ticker_clean, start_s, end_s)
+            if cached:
+                rp_block = cached.get("providers", {}).get("ravenpack", {})
+                batch_frame = rp_block.get("articles")
+                if isinstance(batch_frame, pd.DataFrame) and not batch_frame.empty:
+                    articles = _normalize_ravenpack_frame(batch_frame)
+                    articles = _filter_cached_frame(articles, "article_time", start_s, end_s)
+                    if not articles.empty:
+                        source_notes.append("batch cache (scores only — no headline/event_text)")
+
+        if not source_notes:
+            source_notes.append("no cached RavenPack for this ticker/range")
+    else:
+        if not wrds_credentials_available():
+            return pd.DataFrame(), "WRDS not configured — add credentials to `.env`."
+        try:
+            live_frame = live_data.query_ravenpack_articles(
+                ticker_clean,
+                start_s,
+                end_s,
+                include_text=True,
+            )
+            articles = _normalize_ravenpack_frame(live_frame)
+            articles = _filter_cached_frame(articles, "article_time", start_s, end_s)
+            if not articles.empty:
+                source_notes.append("live WRDS (with headline/event_text)")
+            else:
+                source_notes.append("live WRDS returned no rows")
+        except Exception as exc:
+            return pd.DataFrame(), f"RavenPack live pull failed: {exc}"
+
+    if not articles.empty and max_rows > 0:
+        articles = articles.sort_values("article_time", ascending=False).head(int(max_rows))
+    articles = articles.reset_index(drop=True)
+    return _attach_refinitiv_stories(articles, ticker_clean), "; ".join(source_notes)
+
+
+def _enrich_ravenpack_with_model(articles: pd.DataFrame, model_dir: Path) -> pd.DataFrame:
+    """Optionally add PhraseBank model labels alongside RavenPack scores."""
+    if articles.empty:
+        return articles
+    scorable = articles["text"].astype(str).str.strip()
+    if not scorable.any():
+        return articles
+    tokenizer, model, device = _cached_sentiment_classifier(str(model_dir))
+    preds = predict_sentences(scorable.tolist(), tokenizer, model, device)
+    out = articles.copy()
+    out["model_label"] = preds["pred"].values
+    for col in preds.columns:
+        if col.startswith("p("):
+            out[col] = preds[col].values
+    return out
+
+
+def _render_ravenpack_article_side_by_side(row: pd.Series) -> None:
+    """Two-column layout: article text (left) and RavenPack scores (right)."""
+    text_col, label_col = st.columns([3, 1])
+
+    with text_col:
+        st.markdown("##### Article")
+        headline = _clean_news_text(row.get("headline"))
+        body = _clean_news_text(row.get("event_text"))
+        news_type = _clean_news_text(row.get("news_type"))
+        source_name = _clean_news_text(row.get("source_name"))
+
+        if headline:
+            st.markdown(f"**{headline}**")
+
+        if body and body != headline:
+            if not _event_text_matches_headline(headline, body):
+                st.warning(
+                    "RavenPack's `event_text` does **not** describe this headline — it is the "
+                    "AAPL-tagged snippet from the same news item (common in *Market Talk* / "
+                    "market-wrap columns). This is **not** a full article body."
+                )
+            st.markdown("**RavenPack `event_text`** *(short entity-tagged snippet, avg ~37 chars)*")
+            st.write(body)
+            st.caption(
+                "This is the richest text RavenPack stores for most rows. It is **not** the full "
+                "Reuters/Dow Jones article."
+            )
+        elif headline:
+            st.info(
+                "RavenPack provides **headline only** for this row — there is no `event_text` "
+                "sentence in the dataset. "
+                + (
+                    f"This row is tagged `{news_type}` (tabular/market data, not a news article). "
+                    if news_type == "TABULAR-MATERIAL"
+                    else "Roughly **78%** of RavenPack rows are headline-only; enable "
+                    "**Only rows with RP summary** above to browse entries with a snippet."
+                )
+            )
+        else:
+            fallback = _clean_news_text(row.get("text"))
+            if fallback:
+                st.write(fallback)
+            else:
+                st.warning(
+                    "No text available. Batch cache stores scores only — run "
+                    "`notebooks/fetch_news_articles.ipynb` or **Re-pull live** for headlines."
+                )
+
+        meta_bits = [bit for bit in [source_name, news_type] if bit]
+        if meta_bits:
+            st.caption("Source · " + " · ".join(meta_bits))
+
+        full_story = _clean_news_text(row.get("full_story_text"))
+        if full_story and full_story not in {headline, body}:
+            st.markdown("**Full story (Refinitiv cache)**")
+            st.write(full_story)
+        elif headline and not full_story:
+            with st.expander("Need the full article text?", expanded=False):
+                st.markdown(
+                    "RavenPack does not store full wire stories. Options:\n"
+                    "- Check whether this headline exists in the Refinitiv cache "
+                    f"(`{NEWS_REFINITIV_DIR.relative_to(PROJECT_ROOT)}/`)\n"
+                    "- Pull story text via **Data Explorer → Refinitiv news** (live API)\n"
+                    "- Re-run `notebooks/fetch_news_articles.ipynb` to expand story checkpoints"
+                )
+                ref_story_id = _clean_news_text(row.get("refinitiv_story_id"))
+                if ref_story_id and refinitiv_configured(PROJECT_ROOT):
+                    if st.button(
+                        "Fetch full story from Refinitiv (live)",
+                        key=f"rp_fetch_story_{row.name}",
+                    ):
+                        try:
+                            st.write(load_refinitiv_story_text(ref_story_id))
+                        except Exception as exc:
+                            st.error(f"Could not load story: {exc}")
+
+    with label_col:
+        st.markdown("##### TRNA substitute")
+        st.caption("RavenPack → paper Eq. 8: `relevance × (pos − neg)`")
+        rel = row.get("relevance_score")
+        ess = row.get("event_sentiment_score")
+        ss = row.get("sentiment_score")
+        st.metric("Relevance (0–1)", f"{rel:.2f}" if pd.notna(rel) else "—")
+        st.metric("Event sentiment (−1 to +1)", f"{ess:.3f}" if pd.notna(ess) else "—")
+        st.metric("Sentiment score", f"{ss:.3f}" if pd.notna(ss) else "—")
+        st.metric("Polarity", str(row.get("polarity", "—")))
+
+        if pd.notna(row.get("model_label")):
+            st.divider()
+            st.markdown("##### PhraseBank model")
+            st.metric("Model label", str(row["model_label"]))
+            if pd.notna(row.get("p(positive)")):
+                st.caption(
+                    f"P(pos) {row['p(positive)']:.1%} · "
+                    f"P(neu) {row['p(neutral)']:.1%} · "
+                    f"P(neg) {row['p(negative)']:.1%}"
+                )
+
+
+def _render_ravenpack_articles_browser(articles: pd.DataFrame) -> None:
+    """Browse RavenPack articles with a summary table and side-by-side detail view."""
+    with_summary = int(articles.get("has_event_summary", pd.Series(dtype=bool)).sum())
+    with_full_story = int(
+        articles["full_story_text"].apply(lambda x: bool(_clean_news_text(x))).sum()
+        if "full_story_text" in articles.columns
+        else 0
+    )
+    with_scores = int(articles["event_sentiment_score"].notna().sum())
+    with_headline = int(articles["headline"].astype(str).str.strip().ne("").sum())
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Articles", f"{len(articles):,}")
+    m2.metric("With RP summary", f"{with_summary:,}")
+    m3.metric("Full Refinitiv story", f"{with_full_story:,}")
+    m4.metric("Headline only", f"{with_headline - with_summary:,}")
+
+    filter_cols = st.columns([2, 1])
+    polarity_filter = filter_cols[0].multiselect(
+        "Filter by RavenPack polarity",
+        options=["Positive", "Neutral", "Negative", "—"],
+        default=["Positive", "Neutral", "Negative", "—"],
+        key="ravenpack_polarity_filter",
+    )
+    only_event_text = filter_cols[1].checkbox(
+        "Only rows with RP summary",
+        value=False,
+        help="RavenPack `event_text` is a short entity-tagged snippet (~37 chars on average), "
+        "not a full article. This filter hides headline-only rows.",
+        key="ravenpack_only_event_text",
+    )
+    filter_token = (tuple(sorted(polarity_filter)), only_event_text)
+    if st.session_state.get("ravenpack_polarity_filter_token") != filter_token:
+        st.session_state["ravenpack_polarity_filter_token"] = filter_token
+        st.session_state.pop("ravenpack_articles_table_selected_idx", None)
+    view = articles[articles["polarity"].isin(polarity_filter)].copy()
+    if only_event_text and "has_event_summary" in view.columns:
+        view = view[view["has_event_summary"]]
+    view = view.reset_index(drop=True)
+    if view.empty:
+        st.info("No articles match the selected polarity filter.")
+        return
+
+    table_cols = [
+        c
+        for c in [
+            "date_str",
+            "polarity",
+            "relevance_score",
+            "event_sentiment_score",
+            "sentiment_score",
+            "model_label",
+            "has_event_summary",
+            "event_text_matches_headline",
+            "text_preview",
+        ]
+        if c in view.columns
+    ]
+    display_df = view[table_cols].rename(
+        columns={
+            "date_str": "Date",
+            "polarity": "Polarity",
+            "relevance_score": "Relevance",
+            "event_sentiment_score": "Event sent.",
+            "sentiment_score": "Sent. score",
+            "model_label": "Model label",
+            "has_event_summary": "RP summary",
+            "event_text_matches_headline": "Summary≈headline",
+            "text_preview": "Text preview",
+        }
+    )
+    table_key = "ravenpack_articles_table"
+    selection_event = st.dataframe(
+        display_df,
+        on_select="rerun",
+        selection_mode="single-row",
+        key=table_key,
+        use_container_width=True,
+        hide_index=True,
+        height=320,
+    )
+    selected_rows = (
+        selection_event.selection.rows
+        if selection_event.selection is not None
+        else []
+    )
+    if not selected_rows:
+        prior = st.session_state.get(f"{table_key}_selected_idx")
+        selected_idx = int(prior) if isinstance(prior, int) and 0 <= prior < len(view) else 0
+    else:
+        selected_idx = int(selected_rows[0])
+        st.session_state[f"{table_key}_selected_idx"] = selected_idx
+
+    st.caption("Click any row (e.g. **Text preview**) to inspect the full article below.")
+    _render_ravenpack_article_side_by_side(view.iloc[selected_idx])
+
+
+def _news_inventory_cache_token() -> str:
+    """Invalidate news-inventory cache when batch manifests or news exports change."""
+    parts = [_manifest_cache_token()]
+    for directory in (NEWS_RAVENPACK_DIR, NEWS_REFINITIV_DIR):
+        if directory.exists():
+            parquet_files = list(directory.glob("*.parquet"))
+            latest = max((p.stat().st_mtime for p in parquet_files), default=0.0)
+            parts.append(f"{len(parquet_files)}:{latest:.0f}")
+        else:
+            parts.append("0")
+    return "|".join(parts)
+
+
+def _parquet_row_count(path: Path) -> int:
+    import pyarrow.parquet as pq
+
+    return int(pq.ParquetFile(path).metadata.num_rows)
+
+
+def _parquet_non_null_count(path: Path, column: str) -> tuple[int, int]:
+    import pyarrow.parquet as pq
+
+    parquet_file = pq.ParquetFile(path)
+    rows = int(parquet_file.metadata.num_rows)
+    if column not in parquet_file.schema_arrow.names:
+        return rows, 0
+    series = parquet_file.read(columns=[column])[column]
+    return rows, rows - int(series.null_count)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _scan_news_data_inventory(cache_token: str) -> dict[str, object]:
+    """Aggregate local news/sentiment coverage from batch cache and rich exports."""
+    del cache_token  # cache-bust token only
+
+    window_start = DEFAULT_LOOKUP_START
+    window_end = DEFAULT_LOOKUP_END
+
+    rp_batch = {
+        "tickers": 0,
+        "rows": 0,
+        "with_relevance": 0,
+        "with_sentiment": 0,
+    }
+    rf_batch = {"tickers": 0, "rows": 0}
+    wrds_tickers = 0
+
+    if TOP1K_BY_TICKER_DIR.exists():
+        for ticker_dir in TOP1K_BY_TICKER_DIR.glob("rank_*"):
+            manifest_path = ticker_dir / "manifest.json"
+            if manifest_path.exists():
+                try:
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    window_start = str(manifest.get("start_date") or window_start)
+                    window_end = str(manifest.get("end_date") or window_end)
+                    for provider in manifest.get("provider_status", []):
+                        if provider.get("provider") == "wrds" and provider.get("status") == "ok":
+                            wrds_tickers += 1
+                            break
+                except Exception:
+                    pass
+
+            rp_path = ticker_dir / "ravenpack_articles.parquet"
+            if rp_path.exists():
+                rows, with_relevance = _parquet_non_null_count(rp_path, "relevance")
+                _, with_sentiment = _parquet_non_null_count(rp_path, "event_sentiment_score")
+                rp_batch["tickers"] += 1
+                rp_batch["rows"] += rows
+                rp_batch["with_relevance"] += with_relevance
+                rp_batch["with_sentiment"] += with_sentiment
+
+            rf_path = ticker_dir / "refinitiv_news.parquet"
+            if rf_path.exists():
+                rf_batch["tickers"] += 1
+                rf_batch["rows"] += _parquet_row_count(rf_path)
+
+    rp_rich: list[dict[str, object]] = []
+    if NEWS_RAVENPACK_DIR.exists():
+        for path in sorted(NEWS_RAVENPACK_DIR.glob("*_articles_*.parquet")):
+            ticker = path.name.split("_articles_")[0].upper()
+            rows, with_headlines = _parquet_non_null_count(path, "headline")
+            _, with_sentiment = _parquet_non_null_count(path, "event_sentiment_score")
+            _, with_event_text = _parquet_non_null_count(path, "event_text")
+            rp_rich.append({
+                "ticker": ticker,
+                "rows": rows,
+                "with_headlines": with_headlines,
+                "with_sentiment": with_sentiment,
+                "with_event_text": with_event_text,
+            })
+
+    rf_checkpoints: list[dict[str, object]] = []
+    if NEWS_REFINITIV_DIR.exists():
+        for path in sorted(NEWS_REFINITIV_DIR.glob("*_story_text_checkpoint.parquet")):
+            ticker = path.name.replace("_story_text_checkpoint.parquet", "").upper()
+            stories, with_text = _parquet_non_null_count(path, "article_text")
+            headlines_path = NEWS_REFINITIV_DIR / f"{ticker.lower()}_headlines_checkpoint.parquet"
+            headline_rows = _parquet_row_count(headlines_path) if headlines_path.exists() else 0
+            rf_checkpoints.append({
+                "ticker": ticker,
+                "stories": stories,
+                "with_full_text": with_text,
+                "headlines_checkpoint": headline_rows,
+            })
+
+    return {
+        "window_start": window_start,
+        "window_end": window_end,
+        "wrds_tickers": wrds_tickers,
+        "ravenpack_batch": rp_batch,
+        "refinitiv_batch": rf_batch,
+        "ravenpack_rich": rp_rich,
+        "refinitiv_checkpoints": rf_checkpoints,
+    }
+
+
+def _fmt_count(value: object) -> str:
+    if value is None:
+        return "—"
+    try:
+        return f"{int(value):,}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def render_news_data_coverage_section() -> None:
+    """Summarize which news/sentiment datasets are cached locally and what they contain."""
+    st.markdown("### Local news & sentiment data — coverage")
+    st.caption(
+        "Snapshot of datasets on **this machine** under `data/raw/`. "
+        f"Paper replication window: **{DEFAULT_LOOKUP_START}** → **{DEFAULT_LOOKUP_END}** "
+        "(top-1,000 CRSP tickers by volume). "
+        "**TRNA** (Thomson Reuters News Analytics) is proprietary and **not** cached here — "
+        "RavenPack scores are our TRNA substitute."
+    )
+
+    with st.expander("What is each dataset?", expanded=False):
+        st.markdown(
+            "| Source | Role | Text | Labels |\n"
+            "|---|---|---|---|\n"
+            "| **Financial PhraseBank** | Fine-tune a 3-way sentiment classifier | Short finance sentences | Human `negative` / `neutral` / `positive` |\n"
+            "| **RavenPack (WRDS)** | TRNA substitute — relevance + sentiment scores | Headlines + short `event_text` snippets in rich exports; **batch cache stores scores only** | `relevance` on all rows; `event_sentiment_score` / `sentiment_score` on a subset |\n"
+            "| **Refinitiv / LSEG** | Wire headlines + optional full stories | Headlines in batch cache; full story text only when explicitly fetched | **No** TRNA-style sentiment labels |\n"
+            "| **WRDS CRSP** | Prices, delistings, universe metadata | Not news | Not sentiment |\n\n"
+            "RavenPack `event_text` is **not** a full article — it is typically a short "
+            "entity-tagged snippet (~37 characters on average for AAPL), not the wire story body."
+        )
+
+    try:
+        inventory = _scan_news_data_inventory(_news_inventory_cache_token())
+    except Exception as exc:
+        st.warning(f"Could not scan local news caches: {exc}")
+        return
+
+    window = f"{inventory['window_start']} → {inventory['window_end']}"
+    rp_batch = inventory["ravenpack_batch"]
+    rf_batch = inventory["refinitiv_batch"]
+    rp_rich = inventory["ravenpack_rich"]
+    rf_chk = inventory["refinitiv_checkpoints"]
+
+    rich_tickers = ", ".join(str(r["ticker"]) for r in rp_rich) or "—"
+    story_tickers = ", ".join(str(r["ticker"]) for r in rf_chk) or "—"
+    rich_headlines = sum(int(r["with_headlines"]) for r in rp_rich)
+    rich_sentiment = sum(int(r["with_sentiment"]) for r in rp_rich)
+    rich_event_text = sum(int(r["with_event_text"]) for r in rp_rich)
+    story_full_text = sum(int(r["with_full_text"]) for r in rf_chk)
+
+    phrasebank_total: int | None = None
+    try:
+        _, splits = _cached_phrasebank_summary()
+        phrasebank_total = int(sum(splits.values()))
+    except Exception:
+        pass
+
+    overview_rows = [
+        {
+            "Dataset": "Financial PhraseBank",
+            "Role": "Classifier training (not ticker news)",
+            "Tickers": "—",
+            "Date window": "Static benchmark",
+            "Rows / articles": _fmt_count(phrasebank_total),
+            "Headlines / titles": _fmt_count(phrasebank_total),
+            "Sentiment labels": _fmt_count(phrasebank_total),
+            "Full article text": _fmt_count(phrasebank_total),
+        },
+        {
+            "Dataset": "RavenPack — batch cache",
+            "Role": "TRNA substitute (scores only)",
+            "Tickers": _fmt_count(rp_batch["tickers"]),
+            "Date window": window,
+            "Rows / articles": _fmt_count(rp_batch["rows"]),
+            "Headlines / titles": "0 (not stored)",
+            "Sentiment labels": (
+                f"{_fmt_count(rp_batch['with_relevance'])} relevance · "
+                f"{_fmt_count(rp_batch['with_sentiment'])} event_sentiment"
+            ),
+            "Full article text": "0",
+        },
+        {
+            "Dataset": "RavenPack — rich export (text + scores)",
+            "Role": "TRNA substitute + readable text",
+            "Tickers": rich_tickers,
+            "Date window": window,
+            "Rows / articles": _fmt_count(sum(int(r["rows"]) for r in rp_rich) or None),
+            "Headlines / titles": _fmt_count(rich_headlines or None),
+            "Sentiment labels": _fmt_count(rich_sentiment or None),
+            "Full article text": f"{_fmt_count(rich_event_text or None)} RP snippets (not full stories)",
+        },
+        {
+            "Dataset": "Refinitiv — batch headlines",
+            "Role": "Wire headlines (no sentiment)",
+            "Tickers": _fmt_count(rf_batch["tickers"]),
+            "Date window": window,
+            "Rows / articles": _fmt_count(rf_batch["rows"]),
+            "Headlines / titles": _fmt_count(rf_batch["rows"]),
+            "Sentiment labels": "0",
+            "Full article text": "0",
+        },
+        {
+            "Dataset": "Refinitiv — story text checkpoints",
+            "Role": "Full wire stories (on-demand fetch)",
+            "Tickers": story_tickers,
+            "Date window": "Partial (per ticker)",
+            "Rows / articles": _fmt_count(sum(int(r["stories"]) for r in rf_chk) or None),
+            "Headlines / titles": _fmt_count(sum(int(r["headlines_checkpoint"]) for r in rf_chk) or None),
+            "Sentiment labels": "0",
+            "Full article text": _fmt_count(story_full_text or None),
+        },
+    ]
+
+    st.dataframe(pd.DataFrame(overview_rows), hide_index=True, use_container_width=True)
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("WRDS universe tickers", _fmt_count(inventory["wrds_tickers"]))
+    m2.metric("RavenPack tickers (batch)", _fmt_count(rp_batch["tickers"]))
+    m3.metric("Refinitiv tickers (batch)", _fmt_count(rf_batch["tickers"]))
+    m4.metric("Rich text exports", f"{len(rp_rich)} ticker(s)")
+
+    if rp_rich:
+        st.caption(
+            "**RavenPack rich exports:** "
+            + " · ".join(
+                f"{r['ticker']}: {_fmt_count(r['rows'])} rows, "
+                f"{_fmt_count(r['with_headlines'])} headlines, "
+                f"{_fmt_count(r['with_sentiment'])} scored, "
+                f"{_fmt_count(r['with_event_text'])} with RP snippet"
+                for r in rp_rich
+            )
+        )
+    if rf_chk:
+        st.caption(
+            "**Refinitiv story checkpoints:** "
+            + " · ".join(
+                f"{r['ticker']}: {_fmt_count(r['headlines_checkpoint'])} headlines cached, "
+                f"{_fmt_count(r['with_full_text'])} full stories"
+                for r in rf_chk
+            )
+        )
+
+
+def _phrasebank_model_cache_token() -> str:
+    """Invalidate probability-chart cache when the saved checkpoint changes."""
+    model_dir = resolve_model_dir()
+    parts: list[str] = []
+    for name in ("config.json", "model.safetensors", "pytorch_model.bin", "metrics.json"):
+        path = model_dir / name
+        if path.exists():
+            parts.append(f"{name}:{path.stat().st_mtime:.0f}")
+    return "|".join(parts) or "none"
+
+
+@st.cache_data(ttl=3600, show_spinner="Scoring PhraseBank splits for probability chart…")
+def _cached_phrasebank_probability_chart(cache_token: str) -> pd.DataFrame:
+    del cache_token  # cache-bust token only
+    return phrasebank_probability_chart_frame()
+
+
+def render_phrasebank_hf_baseline_tab() -> None:
+    """Standalone overview of the Hugging Face PhraseBank baseline model."""
+    st.header("PhraseBank HF Baseline")
+    st.caption(
+        "Benchmark classifier: **`distilbert-base-uncased`** fine-tuned on Financial PhraseBank "
+        "(Hugging Face). Documents the training dataset, evaluation metrics, and predicted class "
+        "probabilities across PhraseBank splits. For live inference and RavenPack fine-tuning, "
+        "use the **Sentiment Lab** tab."
+    )
+
+    if not finetuning_deps_available():
+        st.warning(
+            "Fine-tuning dependencies are not installed. Run "
+            "`pip install -r requirements-finetuning.txt` to load the dataset and chart."
+        )
+        return
+
+    metrics = load_metrics()
+    model_dir = resolve_model_dir()
+    has_model = model_is_saved(model_dir)
+
+    # ── Training summary ────────────────────────────────────────────────────────
+    st.markdown("### Model & training")
+    epochs = metrics.get("epochs")
+    t1, t2, t3, t4 = st.columns(4)
+    t1.metric("Backbone", str(metrics.get("model_name", MODEL_NAME)).split("/")[-1])
+    t2.metric("Epochs trained", str(epochs) if epochs is not None else "—")
+    t3.metric("Learning rate", str(metrics.get("learning_rate", "—")))
+    t4.metric("Batch size", str(metrics.get("per_device_train_batch_size", "—")))
+
+    st.markdown(
+        f"| Item | Value |\n"
+        f"| --- | --- |\n"
+        f"| **Checkpoint** | `{model_dir.relative_to(PROJECT_ROOT)}` "
+        f"({'on disk' if has_model else 'not saved — metrics from notebook run'}) |\n"
+        f"| **Base weights** | `{metrics.get('model_name', MODEL_NAME)}` (Hugging Face) |\n"
+        f"| **Task** | 3-way sequence classification (`negative` / `neutral` / `positive`) |\n"
+        f"| **Max tokens** | {metrics.get('max_length', 128)} |\n"
+        f"| **Best checkpoint** | validation **macro-F1** (`load_best_model_at_end`) |\n"
+        f"| **Training device** | {str(metrics.get('device', '—')).upper()} |\n"
+        f"| **Notebook** | `notebooks/liquidAI_prep.ipynb` |\n"
+        f"| **RavenPack adapt** | `notebooks/finetune_on_ravenpack.ipynb` (next step) |"
+    )
+
+    # ── Performance metrics ─────────────────────────────────────────────────────
+    st.markdown("### Performance metrics")
+    val_f1 = metrics.get("validation", {}).get("eval_f1")
+    test_f1 = metrics.get("test", {}).get("eval_f1")
+    val_acc = metrics.get("validation", {}).get("eval_accuracy")
+    test_acc = metrics.get("test", {}).get("eval_accuracy")
+    val_loss = metrics.get("validation", {}).get("eval_loss")
+    test_loss = metrics.get("test", {}).get("eval_loss")
+    train_loss = metrics.get("train_loss")
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Test macro-F1", f"{test_f1:.1%}" if test_f1 is not None else "—")
+    m2.metric("Test accuracy", f"{test_acc:.1%}" if test_acc is not None else "—")
+    m3.metric("Val macro-F1", f"{val_f1:.1%}" if val_f1 is not None else "—")
+    m4.metric("Val accuracy", f"{val_acc:.1%}" if val_acc is not None else "—")
+    loss_bits: list[str] = []
+    if train_loss is not None:
+        loss_bits.append(f"Train loss: {train_loss:.3f}")
+    if val_loss is not None and test_loss is not None:
+        loss_bits.append(f"Val loss: {val_loss:.3f} · Test loss: {test_loss:.3f}")
+    st.caption(
+        "**macro-F1** is the primary metric (equal weight per class)."
+        + (f" {' · '.join(loss_bits)}" if loss_bits else "")
+    )
+
+    with st.expander("Raw training metrics (metrics.json)", expanded=False):
+        st.json(metrics)
+
+    st.divider()
+
+    # ── Dataset dashboard ───────────────────────────────────────────────────────
+    st.markdown("### Dataset dashboard")
+    st.caption(
+        f"Financial PhraseBank (`{PRIMARY_DATASET}`): gold-label composition, split sizes, "
+        "and how the saved checkpoint scores every sentence in each split."
+    )
+
+    with st.expander("Where it comes from & how labels were built", expanded=False):
+        st.markdown(
+            "**Source** — Malo et al. (Aalto University, 2014); "
+            "[original paper](https://arxiv.org/abs/1307.5336). "
+            "~4,840 English financial-news sentences, 3 classes.\n\n"
+            "**Annotation** — 16 finance-background annotators; 5–8 votes per sentence; "
+            "gold label = majority vote. We use the **`sentences_50agree`** subset "
+            "(≥50% annotator agreement — most data, noisiest labels).\n\n"
+            "**Canonical HF dataset** — `takala/financial_phrasebank` is script-based and "
+            "no longer loads on `datasets` v4/v5; this repo uses the Parquet mirror above.\n\n"
+            "**Splits** — " + SPLIT_SOURCE + "\n\n"
+            "**Read more** — "
+            "[`docs/financial_phrasebank.md`](https://github.com/armandordorica/"
+            "sentiment_learn_to_rank_paper/blob/main/docs/financial_phrasebank.md) · "
+            "[dataset card](https://huggingface.co/datasets/takala/financial_phrasebank)"
+        )
+
+    try:
+        balance, splits = _cached_phrasebank_summary()
+        st.markdown("#### Gold labels & splits")
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Train rows", f"{splits.get('train', 0):,}")
+        s2.metric("Validation rows", f"{splits.get('validation', 0):,}")
+        s3.metric("Test rows", f"{splits.get('test', 0):,}")
+        s4.metric("Total", f"{sum(splits.values()):,}")
+
+        split_df = pd.DataFrame(
+            {
+                "split": ["train", "validation", "test"],
+                "rows": [splits.get("train", 0), splits.get("validation", 0), splits.get("test", 0)],
+            }
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            fig_bal = px.bar(
+                balance.sort_values("count"),
+                x="count",
+                y="label",
+                orientation="h",
+                labels={"label": "Class", "count": "Train rows"},
+                title="Gold label balance (train split)",
+            )
+            fig_bal.update_traces(hovertemplate="Class: %{y}<br>Count: %{x}<extra></extra>")
+            fig_bal.update_layout(hovermode="closest", showlegend=False, height=240)
+            st.plotly_chart(fig_bal, use_container_width=True)
+        with c2:
+            fig_splits = px.bar(
+                split_df,
+                x="split",
+                y="rows",
+                labels={"split": "Split", "rows": "Sentences"},
+                title="Dataset size by split",
+                color="split",
+            )
+            fig_splits.update_traces(hovertemplate="Split: %{x}<br>Rows: %{y}<extra></extra>")
+            fig_splits.update_layout(hovermode="closest", showlegend=False, height=240)
+            st.plotly_chart(fig_splits, use_container_width=True)
+
+        st.dataframe(
+            pd.DataFrame(
+                {
+                    "column": ["sentence", "label"],
+                    "type": ["string", "ClassLabel"],
+                    "meaning": [
+                        "One financial-news sentence",
+                        "0=negative, 1=neutral, 2=positive",
+                    ],
+                }
+            ),
+            hide_index=True,
+            use_container_width=True,
+        )
+    except Exception as exc:
+        st.error(f"Could not load PhraseBank dataset summary: {exc}")
+
+    st.markdown("#### Predicted probabilities on each split")
+    st.caption(
+        "Scores from the saved checkpoint on every sentence (not gold-label accuracy). "
+        "Whisker plot = full distribution; bar chart = **median (p50)** per class."
+    )
+
+    if not has_model:
+        st.info(
+            "No saved checkpoint — train the model in **Sentiment Lab** to populate the charts below."
+        )
+    else:
+        try:
+            long_probs = _cached_phrasebank_probability_chart(_phrasebank_model_cache_token())
+            chart_orders = {
+                "split": PHRASEBANK_SPLIT_ORDER,
+                "class": ["negative", "neutral", "positive"],
+            }
+            chart_labels = {
+                "split": "PhraseBank split",
+                "probability": "Predicted probability",
+                "p50": "Median predicted probability",
+                "class": "Class",
+            }
+
+            fig_box = px.box(
+                long_probs,
+                x="split",
+                y="probability",
+                color="class",
+                category_orders=chart_orders,
+                labels=chart_labels,
+                title="Class probabilities by split (box & whisker)",
+                points="outliers",
+            )
+            fig_box.update_layout(hovermode="closest", boxmode="group", yaxis_range=[0, 1])
+            fig_box.update_traces(
+                hovertemplate="Split: %{x}<br>Class: %{fullData.name}<br>Probability: %{y:.3f}<extra></extra>"
+            )
+            st.plotly_chart(fig_box, use_container_width=True)
+
+            p50 = (
+                long_probs.groupby(["split", "class"], as_index=False, observed=True)["probability"]
+                .median()
+                .rename(columns={"probability": "p50"})
+            )
+            fig_p50 = px.bar(
+                p50,
+                x="split",
+                y="p50",
+                color="class",
+                barmode="group",
+                category_orders=chart_orders,
+                labels=chart_labels,
+                title="Median class probability by split (p50)",
+                text="p50",
+            )
+            fig_p50.update_traces(
+                texttemplate="%{y:.2f}",
+                textposition="outside",
+                hovertemplate="Split: %{x}<br>Class: %{fullData.name}<br>p50: %{y:.3f}<extra></extra>",
+            )
+            fig_p50.update_layout(hovermode="closest", yaxis_range=[0, 1])
+            st.plotly_chart(fig_p50, use_container_width=True)
+
+            st.dataframe(
+                p50.pivot(index="split", columns="class", values="p50").reset_index(),
+                hide_index=True,
+                use_container_width=True,
+            )
+        except Exception as exc:
+            st.error(f"Could not build probability charts: {exc}")
+
+
 def render_sentiment_lab_tab() -> None:
     """Interactive view of notebooks/liquidAI_prep.ipynb — dataset, metrics, inference."""
     st.header("News Sentiment Lab")
     st.caption(
         "Web version of `notebooks/liquidAI_prep.ipynb`: Financial PhraseBank + "
         "DistilBERT fine-tuning for 3-way finance sentiment (negative / neutral / positive). "
-        "This is the TRNA-substitute sentiment model for the paper replication."
+        "This is the TRNA-substitute sentiment model for the paper replication. "
+        "Below you can see **what was trained**, the **results** (test macro-F1 / accuracy), "
+        "the experiment's **inputs & outputs**, and **try the model live** on your own headlines."
     )
+
+    render_news_data_coverage_section()
+    st.divider()
 
     if not finetuning_deps_available():
         st.warning(
@@ -2929,26 +3910,125 @@ def render_sentiment_lab_tab() -> None:
 
     st.divider()
 
-    metrics = load_metrics(DEFAULT_MODEL_DIR)
-    has_model = model_is_saved(DEFAULT_MODEL_DIR)
+    metrics = load_metrics()
+    model_dir = resolve_model_dir()
+    has_model = model_is_saved(model_dir)
 
-    # ── Baseline metrics ──────────────────────────────────────────────────────
-    st.markdown("### Baseline metrics")
-    m1, m2, m3, m4 = st.columns(4)
+    # ── Latest training run ────────────────────────────────────────────────────
+    epochs = metrics.get("epochs")
+    st.markdown("### Latest training run — results")
+    st.caption(
+        "Fine-tuned **DistilBERT** on Financial PhraseBank for 3-way sentiment. "
+        f"This run: **{epochs} epoch(s)**, learning rate {metrics.get('learning_rate', '—')}, "
+        f"batch {metrics.get('per_device_train_batch_size', '—')}, on **{str(metrics.get('device', '—')).upper()}**. "
+        + (
+            "Multi-epoch with the best **validation macro-F1** checkpoint kept "
+            "(`load_best_model_at_end`)."
+            if metrics.get("metric_for_best_model")
+            else "Single-epoch smoke baseline."
+        )
+    )
+
+    val_f1 = metrics.get("validation", {}).get("eval_f1")
+    test_f1 = metrics.get("test", {}).get("eval_f1")
     val_acc = metrics.get("validation", {}).get("eval_accuracy")
     test_acc = metrics.get("test", {}).get("eval_accuracy")
-    m1.metric("Val accuracy", f"{val_acc:.1%}" if val_acc is not None else "—")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Test macro-F1", f"{test_f1:.1%}" if test_f1 is not None else "—")
     m2.metric("Test accuracy", f"{test_acc:.1%}" if test_acc is not None else "—")
-    m3.metric("Train loss", f"{metrics.get('train_loss', 0):.3f}" if metrics.get("train_loss") else "—")
-    m4.metric("Model on disk", "✅ saved" if has_model else "⚠️ not saved")
+    m3.metric("Val macro-F1", f"{val_f1:.1%}" if val_f1 is not None else "—")
+    m4.metric("Val accuracy", f"{val_acc:.1%}" if val_acc is not None else "—")
+    st.caption(
+        "**macro-F1** is the primary metric (averages all three classes equally, so the "
+        "dominant *neutral* class can't hide weak *negative*/*positive* performance); "
+        "accuracy is secondary."
+    )
 
     if not has_model:
         st.info(
-            "No saved checkpoint yet — metrics above may be from the documented notebook run. "
+            "No saved checkpoint yet — metrics above are from the documented notebook run. "
             "Use **Train / refresh model** below to write a checkpoint to disk."
         )
 
-    with st.expander("Training configuration", expanded=False):
+    # ── What was done: inputs → process → outputs ──────────────────────────────
+    with st.expander("🧪 What this experiment did (inputs → process → outputs)", expanded=False):
+        in_col, out_col = st.columns(2)
+        with in_col:
+            st.markdown("**Inputs**")
+            st.markdown(
+                f"- **Base model:** `{metrics.get('model_name', '—')}` (pretrained)\n"
+                f"- **Dataset:** `{metrics.get('dataset', '—')}`\n"
+                f"- **Splits:** {metrics.get('split_source', 'pre-defined train/val/test')}\n"
+                f"- **Max tokens:** {metrics.get('max_length', '—')}\n"
+                f"- **Epochs / LR / batch:** {epochs} / {metrics.get('learning_rate', '—')} / "
+                f"{metrics.get('per_device_train_batch_size', '—')}"
+            )
+        with out_col:
+            st.markdown("**Outputs**")
+            saved_at = str(metrics.get("saved_at", ""))[:19].replace("T", " ")
+            try:
+                rel_dir = model_dir.relative_to(PROJECT_ROOT)
+            except ValueError:
+                rel_dir = model_dir
+            train_loss = metrics.get("train_loss")
+            train_loss_str = f"{train_loss:.4f}" if isinstance(train_loss, (int, float)) else "—"
+            runtime = metrics.get("train_runtime_s")
+            runtime_str = f"{runtime:.0f}s" if isinstance(runtime, (int, float)) else "—"
+            st.markdown(
+                f"- **Saved checkpoint:** `{rel_dir}`\n"
+                f"- **Metrics file:** `metrics.json` in that folder\n"
+                f"- **Train loss:** {train_loss_str}\n"
+                f"- **Train runtime:** {runtime_str} on {str(metrics.get('device', '—')).upper()}\n"
+                f"- **Saved at:** {saved_at or '—'} UTC"
+            )
+        st.markdown("**Process**")
+        st.markdown(
+            "1. Load PhraseBank → 2. tokenize all splits (`max_length` padding) → "
+            "3. fine-tune with Hugging Face `Trainer`, evaluating **accuracy + macro-F1** each "
+            "epoch → 4. keep the best validation-F1 checkpoint → 5. report on validation **and** "
+            "the held-out **test** split → 6. save model + `metrics.json`."
+        )
+        st.caption("Mirrors `notebooks/liquidAI_prep.ipynb`; see `docs/news_sentiment_finetuning_plan.md`.")
+
+    # ── Comparison vs the 1-epoch baseline ─────────────────────────────────────
+    baseline = PHRASEBANK_BASELINE_METRICS
+    if metrics.get("epochs") and metrics.get("epochs") != baseline.get("epochs"):
+        with st.expander("📈 Progress vs the 1-epoch baseline", expanded=False):
+            comparison = pd.DataFrame(
+                [
+                    {
+                        "run": "1-epoch baseline",
+                        "epochs": baseline.get("epochs"),
+                        "test macro-F1": baseline.get("test", {}).get("eval_f1"),
+                        "test accuracy": baseline.get("test", {}).get("eval_accuracy"),
+                        "val accuracy": baseline.get("validation", {}).get("eval_accuracy"),
+                    },
+                    {
+                        "run": f"current ({epochs}-epoch, best val-F1)",
+                        "epochs": epochs,
+                        "test macro-F1": test_f1,
+                        "test accuracy": test_acc,
+                        "val accuracy": val_acc,
+                    },
+                ]
+            )
+            st.dataframe(
+                comparison.style.format(
+                    {
+                        "test macro-F1": lambda v: f"{v:.1%}" if pd.notna(v) else "—",
+                        "test accuracy": lambda v: f"{v:.1%}" if pd.notna(v) else "—",
+                        "val accuracy": lambda v: f"{v:.1%}" if pd.notna(v) else "—",
+                    }
+                ),
+                hide_index=True,
+                use_container_width=True,
+            )
+            st.caption(
+                "The 1-epoch baseline predates macro-F1 logging (accuracy only); macro-F1 was "
+                "added in Iteration 2."
+            )
+
+    with st.expander("Raw training metrics (metrics.json)", expanded=False):
         st.json(metrics)
 
     st.divider()
@@ -3019,6 +4099,102 @@ def render_sentiment_lab_tab() -> None:
 
     st.divider()
 
+    # ── RavenPack browser (TRNA substitute) ───────────────────────────────────
+    st.markdown("### RavenPack articles — text + sentiment (TRNA substitute)")
+    st.caption(
+        "RavenPack is our TRNA substitute for **sentiment scores**. Text is usually a **headline**; "
+        "~22% of rows also have `event_text` — a **short AAPL-tagged snippet** (avg ~37 characters), "
+        "**not** a full news article. For the few headlines with a cached Refinitiv story, the full "
+        "wire text appears below the RavenPack snippet."
+    )
+
+    with st.form("sentiment_lab_ravenpack_news", clear_on_submit=False):
+        rp_cols = st.columns([1, 1, 1, 1])
+        rp_ticker = rp_cols[0].text_input(
+            "Ticker", value="AAPL", max_chars=16, key="sentiment_lab_rp_ticker"
+        ).strip().upper()
+        rp_start = rp_cols[1].date_input(
+            "Start date",
+            value=pd.Timestamp(DEFAULT_LOOKUP_START).date(),
+            min_value=pd.Timestamp("1990-01-01").date(),
+            max_value=default_live_api_end().date(),
+            key="sentiment_lab_rp_start",
+        )
+        rp_end = rp_cols[2].date_input(
+            "End date",
+            value=pd.Timestamp(DEFAULT_LOOKUP_END).date(),
+            min_value=pd.Timestamp("1990-01-01").date(),
+            max_value=default_live_api_end().date(),
+            key="sentiment_lab_rp_end",
+        )
+        rp_max = int(
+            rp_cols[3].number_input(
+                "Max articles",
+                min_value=5,
+                max_value=500,
+                value=50,
+                step=5,
+                key="sentiment_lab_rp_max",
+            )
+        )
+        rich_path = NEWS_RAVENPACK_DIR / f"{rp_ticker.lower()}_articles_2003_2014.parquet"
+        batch_info = _dashboard_cache_info(rp_ticker) if rp_ticker else None
+        if rich_path.exists():
+            st.success(f"Rich RavenPack cache found: `{rich_path.relative_to(PROJECT_ROOT)}` (headline + event text).")
+        elif batch_info:
+            st.info(
+                f"Batch cache exists for **{rp_ticker}** but without article text. "
+                "Use **Re-pull live** or run `notebooks/fetch_news_articles.ipynb` for full text."
+            )
+        elif rp_ticker:
+            st.info(f"No RavenPack cache for **{rp_ticker}** yet — use **Re-pull live** (WRDS).")
+
+        also_model = st.checkbox(
+            "Also score with PhraseBank model (optional)",
+            value=False,
+            disabled=not has_model,
+            key="sentiment_lab_rp_model",
+        )
+        rp_btn_cols = st.columns(2)
+        rp_cache_btn = rp_btn_cols[0].form_submit_button("Load cached", type="primary")
+        rp_live_btn = rp_btn_cols[1].form_submit_button("Re-pull live (WRDS)")
+
+    if rp_cache_btn or rp_live_btn:
+        if rp_start > rp_end:
+            st.error("Start date must be on or before end date.")
+        else:
+            with st.spinner(f"Loading RavenPack articles for {rp_ticker}…"):
+                rp_articles, rp_note = _load_ravenpack_articles_for_display(
+                    rp_ticker,
+                    to_query_date(rp_start),
+                    to_query_date(rp_end),
+                    live=rp_live_btn,
+                    max_rows=rp_max,
+                )
+            if rp_articles.empty:
+                st.warning(f"No RavenPack rows for **{rp_ticker}** ({rp_note}).")
+            else:
+                if also_model and has_model:
+                    with st.spinner("Scoring with PhraseBank model…"):
+                        rp_articles = _enrich_ravenpack_with_model(rp_articles, model_dir)
+                st.session_state.sentiment_lab_ravenpack_articles = rp_articles
+                st.session_state.sentiment_lab_ravenpack_meta = {
+                    "ticker": rp_ticker,
+                    "start": str(rp_start),
+                    "end": str(rp_end),
+                    "source": rp_note,
+                }
+
+    if st.session_state.get("sentiment_lab_ravenpack_articles") is not None:
+        rp_meta = st.session_state.get("sentiment_lab_ravenpack_meta", {})
+        st.caption(
+            f"**{rp_meta.get('ticker', '—')}** "
+            f"({rp_meta.get('start', '—')} → {rp_meta.get('end', '—')}) · {rp_meta.get('source', '')}"
+        )
+        _render_ravenpack_articles_browser(st.session_state.sentiment_lab_ravenpack_articles)
+
+    st.divider()
+
     # ── Inference demo ────────────────────────────────────────────────────────
     st.markdown("### Try it — score a headline")
     default_examples = (
@@ -3040,7 +4216,7 @@ def render_sentiment_lab_tab() -> None:
             st.warning("Enter at least one sentence.")
         else:
             try:
-                tokenizer, model, device = _cached_sentiment_classifier(str(DEFAULT_MODEL_DIR))
+                tokenizer, model, device = _cached_sentiment_classifier(str(model_dir))
                 preds = predict_sentences(sentences, tokenizer, model, device)
                 st.dataframe(preds, use_container_width=True, hide_index=True)
             except Exception as exc:
@@ -3048,20 +4224,134 @@ def render_sentiment_lab_tab() -> None:
 
     st.divider()
 
-    # ── Train / refresh ───────────────────────────────────────────────────────
-    with st.expander("Train / refresh model (~1 min on Apple Silicon)", expanded=not has_model):
-        st.caption(
-            "Runs the same 1-epoch DistilBERT baseline as the notebook and saves the "
-            f"checkpoint to `{DEFAULT_MODEL_DIR.relative_to(PROJECT_ROOT)}`."
+    # ── RavenPack fine-tune (TRNA substitute labels) ──────────────────────────
+    st.markdown("### Fine-tune on RavenPack headlines")
+    st.caption(
+        "Continue from the PhraseBank-trained DistilBERT checkpoint and adapt it to "
+        "RavenPack `event_sentiment_score` labels (negative / neutral / positive). "
+        "Uses cached rich exports (`data/raw/news/ravenpack/*_articles_*.parquet`) with "
+        "a **time-based split**: train ≤2011, validation 2012, test ≥2013."
+    )
+
+    rp_export_paths = discover_ravenpack_article_files()
+    rp_tickers_available = sorted({
+        p.name.split("_articles_")[0].upper() for p in rp_export_paths
+    })
+    has_ravenpack_model = ravenpack_model_is_saved()
+    rp_model_dir = resolve_ravenpack_model_dir()
+    rp_metrics = load_ravenpack_metrics(rp_model_dir)
+
+    if not rp_tickers_available:
+        st.warning(
+            "No RavenPack article exports found. Run `notebooks/fetch_news_articles.ipynb` "
+            "to build `{ticker}_articles_2003_2014.parquet` under "
+            f"`{NEWS_RAVENPACK_DIR.relative_to(PROJECT_ROOT)}/`."
         )
-        if st.button("Train baseline now", key="sentiment_lab_train"):
+    else:
+        rp_train_ticker = st.selectbox(
+            "Ticker to train on",
+            options=rp_tickers_available,
+            index=0,
+            key="sentiment_lab_rp_train_ticker",
+        )
+        init_from_phrasebank = st.checkbox(
+            "Start from PhraseBank checkpoint (recommended)",
+            value=has_model,
+            disabled=not has_model,
+            help=(
+                "Loads `phrasebank_distilbert_best/` weights before RavenPack fine-tuning. "
+                "If unchecked, trains from `distilbert-base-uncased`."
+            ),
+            key="sentiment_lab_rp_init_phrasebank",
+        )
+        if not has_model:
+            st.caption(
+                "PhraseBank checkpoint not found — RavenPack training will start from "
+                "`distilbert-base-uncased` unless you train PhraseBank first."
+            )
+
+        try:
+            rp_labeled = load_ravenpack_labeled_frame([rp_train_ticker])
+            rp_balance = ravenpack_class_balance(rp_labeled)
+            rp_splits = ravenpack_split_summary(rp_labeled)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Labeled headlines", f"{len(rp_labeled):,}")
+            c2.metric("Train rows", f"{int(rp_splits.loc[rp_splits['split'] == 'train', 'rows'].iloc[0]):,}")
+            c3.metric("Test rows", f"{int(rp_splits.loc[rp_splits['split'] == 'test', 'rows'].iloc[0]):,}")
+            st.dataframe(rp_splits, hide_index=True, use_container_width=True)
+            fig_rp = px.bar(
+                rp_balance.sort_values("count"),
+                x="count",
+                y="label",
+                orientation="h",
+                labels={"label": "Class", "count": "Rows"},
+                title=f"RavenPack label balance ({rp_train_ticker})",
+            )
+            fig_rp.update_traces(hovertemplate="Class: %{y}<br>Count: %{x}<extra></extra>")
+            fig_rp.update_layout(hovermode="closest", showlegend=False, height=220)
+            st.plotly_chart(fig_rp, use_container_width=True)
+        except Exception as exc:
+            st.error(f"Could not load RavenPack training data: {exc}")
+            rp_labeled = None
+
+        if has_ravenpack_model and rp_metrics:
+            rp_test_f1 = rp_metrics.get("test", {}).get("eval_f1")
+            rp_test_acc = rp_metrics.get("test", {}).get("eval_accuracy")
+            st.caption(
+                f"Saved RavenPack model: `{rp_model_dir.relative_to(PROJECT_ROOT)}` · "
+                f"test macro-F1 **{rp_test_f1:.1%}** · accuracy **{rp_test_acc:.1%}**"
+                if rp_test_f1 is not None and rp_test_acc is not None
+                else f"Saved RavenPack model: `{rp_model_dir.relative_to(PROJECT_ROOT)}`"
+            )
+
+        if st.button(
+            f"Fine-tune on RavenPack ({DEFAULT_RAVENPACK_TRAIN_EPOCHS_UI} epochs)",
+            key="sentiment_lab_train_ravenpack",
+            disabled=rp_labeled is None,
+        ):
+            with st.spinner(
+                f"Fine-tuning DistilBERT on RavenPack ({rp_train_ticker})… "
+                "this may take several minutes."
+            ):
+                try:
+                    new_rp_metrics = train_ravenpack(
+                        tickers=[rp_train_ticker],
+                        init_from_phrasebank=init_from_phrasebank and has_model,
+                        num_train_epochs=DEFAULT_RAVENPACK_TRAIN_EPOCHS_UI,
+                    )
+                    _cached_sentiment_classifier.clear()
+                    test_f1 = new_rp_metrics["test"].get("eval_f1")
+                    test_acc = new_rp_metrics["test"].get("eval_accuracy")
+                    st.success(
+                        f"Done — RavenPack test macro-F1 {test_f1:.1%}, accuracy {test_acc:.1%}. "
+                        f"Saved to `{DEFAULT_RAVENPACK_MODEL_DIR.relative_to(PROJECT_ROOT)}`."
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"RavenPack training failed: {exc}")
+
+    st.divider()
+
+    # ── Train / refresh (PhraseBank) ──────────────────────────────────────────
+    with st.expander(
+        f"Train / refresh PhraseBank model (~{DEFAULT_TRAIN_EPOCHS_UI} epochs on Apple Silicon)",
+        expanded=not has_model,
+    ):
+        st.caption(
+            f"Runs the Iteration-2 workflow from the notebook: {DEFAULT_TRAIN_EPOCHS_UI} epochs, "
+            "macro-F1 + accuracy, `load_best_model_at_end` on validation F1. Saves to "
+            f"`{DEFAULT_MODEL_DIR.relative_to(PROJECT_ROOT)}`."
+        )
+        if st.button("Train PhraseBank baseline now", key="sentiment_lab_train"):
             with st.spinner("Training DistilBERT on Financial PhraseBank…"):
                 try:
                     new_metrics = train_baseline()
                     _cached_sentiment_classifier.clear()
                     _cached_phrasebank_summary.clear()
+                    test_f1 = new_metrics["test"].get("eval_f1")
+                    test_acc = new_metrics["test"].get("eval_accuracy")
                     st.success(
-                        f"Done — test accuracy {new_metrics['test']['eval_accuracy']:.1%}. "
+                        f"Done — test macro-F1 {test_f1:.1%}, accuracy {test_acc:.1%}. "
                         "Scroll up to score headlines."
                     )
                     st.rerun()
@@ -3069,7 +4359,7 @@ def render_sentiment_lab_tab() -> None:
                     st.error(f"Training failed: {exc}")
 
 
-def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI function
+def render_batch_pipeline_tab() -> bool:  # noqa: C901 – intentionally long UI function
     # Force Refinitiv off by default so stale session state never auto-enables it
     if "batch_use_refinitiv" not in st.session_state:
         st.session_state["batch_use_refinitiv"] = True
@@ -3573,22 +4863,28 @@ def render_batch_pipeline_tab() -> None:  # noqa: C901 – intentionally long UI
                 st.info("No ticker parquets found yet.")
 
     # ── Auto-refresh trigger ──────────────────────────────────────────────────
-    if auto_refresh and is_running:
-        time.sleep(5)
-        st.rerun()
+    # IMPORTANT: do NOT call st.rerun() here. This function runs before the
+    # Sentiment Lab and Paper Validation tabs in Streamlit's single top-to-bottom
+    # script pass, so an early rerun would abort the run mid-way and leave those
+    # later tabs blank. Instead, signal the caller to schedule the refresh only
+    # after every tab has finished rendering.
+    return bool(auto_refresh and is_running)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 
 st.info(
     "The **Data Explorer** tab uses one ticker/date-range form for prices, Refinitiv news, and RavenPack sentiment. "
-    "The **Sentiment Lab** tab hosts the Financial PhraseBank fine-tuning demo from `notebooks/liquidAI_prep.ipynb`. "
+    "The **PhraseBank HF Baseline** tab documents the Hugging Face DistilBERT benchmark "
+    "(Financial PhraseBank training data, metrics, probability chart). "
+    "The **Sentiment Lab** tab hosts interactive fine-tuning and inference from `notebooks/liquidAI_prep.ipynb`. "
     "The **Paper Validation** tab uses bundled 2003-2014 CSVs from `app_data/`."
 )
 
-tab_dashboard, tab_batch, tab_sentiment, tab_validation = st.tabs([
+tab_dashboard, tab_batch, tab_phrasebank_baseline, tab_sentiment, tab_validation = st.tabs([
     "Data Explorer",
     "Batch Pipeline (Top-1K)",
+    "PhraseBank HF Baseline",
     "Sentiment Lab",
     "Paper Validation (2003-2014)",
 ])
@@ -3597,7 +4893,10 @@ with tab_dashboard:
     render_multi_api_dashboard_tab()
 
 with tab_batch:
-    render_batch_pipeline_tab()
+    _batch_auto_refresh = render_batch_pipeline_tab()
+
+with tab_phrasebank_baseline:
+    render_phrasebank_hf_baseline_tab()
 
 with tab_sentiment:
     render_sentiment_lab_tab()
@@ -3670,3 +4969,12 @@ with tab_validation:
                 )
             except ValueError as exc:
                 st.error(str(exc))
+
+
+# ── Deferred batch auto-refresh ───────────────────────────────────────────────
+# Run the 5-second auto-refresh ONLY after every tab above has rendered. If this
+# lived inside the Batch tab it would st.rerun() before the Sentiment Lab /
+# Paper Validation tabs got their turn, blanking them out while a batch runs.
+if globals().get("_batch_auto_refresh"):
+    time.sleep(5)
+    st.rerun()

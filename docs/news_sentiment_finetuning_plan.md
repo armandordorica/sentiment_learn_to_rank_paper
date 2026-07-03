@@ -35,10 +35,6 @@
 
 ### 📋 To Do
 - [ ] **0.2** Skim the HF docs you'll touch: `AutoTokenizer`, `AutoModelForSequenceClassification`, `Trainer`, `TrainingArguments`, `datasets.load_dataset`
-- [ ] **2.1** Confirm split seed/reproducibility (splits come from `atrost` mirror; document that choice)
-- [ ] **2.2** Add **macro-F1** to `compute_metrics` (accuracy is in the baseline; dataset is imbalanced)
-- [ ] **2.3** `TrainingArguments`: `load_best_model_at_end=True`, tune `epochs` (2–4), compare runs
-- [ ] **2.4** Swap in `ProsusAI/finbert`; compare metrics; read its model card for label order
 - [ ] **2.4** Swap in `ProsusAI/finbert`; compare metrics; read its model card for label order
 - [ ] **3.1** Plot class balance + confusion matrix; write down what each error type means
 - [ ] **3.2** Debug drill: list "what I'd check if val acc were stuck at chance" (label dtype, mapping, LR, logits shape, leakage)
@@ -58,6 +54,9 @@
 - [x] **1.1b** Load + inspect tokenizer & `distilbert-base-uncased` head (66.9M params, `768→3`), wire label maps into config, and run a one-batch untrained **forward-pass sanity check** — `notebooks/liquidAI_prep.ipynb`
 - [x] **1.2** Tokenize full train/val/test splits (`max_length=128`, fixed-length padding) — `notebooks/liquidAI_prep.ipynb`
 - [x] **1.3** First `Trainer` baseline — 1 epoch, `lr=2e-5`, `batch=16`, `eval_strategy=epoch` — **val acc 78.9%**, **test acc 80.6%**, train loss 0.67 (~41s on MPS) — `notebooks/liquidAI_prep.ipynb`
+- [x] **2.1** Document split choice — use `atrost/financial_phrasebank` pre-defined train/val/test (3100/776/970, `sentences_50agree`; no re-split) — `phrasebank_sentiment.py`, notebook §5, `docs/financial_phrasebank.md`
+- [x] **2.2** Add **macro-F1** to `compute_metrics` (accuracy + `eval_f1`) — `phrasebank_sentiment.build_compute_metrics()`, notebook, Sentiment Lab metrics
+- [x] **2.3** 3-epoch training with `load_best_model_at_end=True`, `metric_for_best_model=f1` — **val F1 83.5% / acc 85.2%**, **test F1 82.1% / acc 83.9%** (~125s on MPS); checkpoint `data/models/phrasebank_distilbert_best/`
 - [x] **Notebook executes end-to-end** with zero error outputs (verified via `nbconvert --execute`)
 - [x] **Reproducibility committed** — README "Optional extras" section + dataset-mirror caveat; pushed to GitHub (`e399e7e`)
 
@@ -170,9 +169,10 @@ The setup notebook runs end-to-end locally on Apple **MPS**; Colab GPU also work
 | 2026-06-28 | **Setup notebook built** (`notebooks/liquidAI_prep.ipynb`) — imports/device check, PhraseBank load+inspect (datasets-v5 Parquet mirror), tokenizer+model load+inspect, forward-pass sanity check. Runs end-to-end on MPS with zero errors. |
 | 2026-06-28 | **Committed & pushed** to GitHub (`e399e7e`). |
 | 2026-06-28 | **First training baseline (1.2 + 1.3)** — full-dataset tokenization + 1-epoch `Trainer` on DistilBERT; **val acc 78.9%**, **test acc 80.6%** (~41s on MPS). |
+| 2026-06-29 | **Iteration 2 complete (2.1–2.3)** — macro-F1 in `compute_metrics`, 3 epochs, `load_best_model_at_end` on val F1; **val F1 83.5% / acc 85.2%**, **test F1 82.1% / acc 83.9%** (~125s MPS); saved to `phrasebank_distilbert_best/`. |
 
-**Next up:** card **2.2** — add macro-F1 to `compute_metrics` and run 2–4 epochs with `load_best_model_at_end` (Iteration 2). Then **3.3** raw PyTorch loop for interview prep.
+**Next up:** card **2.4** — swap in `ProsusAI/finbert` and compare. Then **3.1** confusion matrix + **3.3** raw PyTorch loop for interview prep.
 
 ---
 
-_Last updated: 2026-06-28_
+_Last updated: 2026-06-29_
