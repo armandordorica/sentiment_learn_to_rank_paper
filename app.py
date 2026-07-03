@@ -84,6 +84,8 @@ from sentiment_ltr.models.ravenpack_sentiment import (
     ravenpack_model_is_saved,
     ravenpack_split_summary,
     resolve_ravenpack_model_dir,
+    ravenpack_finetune_config_recipe,
+    ravenpack_label_schema_table,
     train_ravenpack,
 )
 
@@ -4271,6 +4273,31 @@ def render_sentiment_lab_tab() -> None:
                 "PhraseBank checkpoint not found — RavenPack training will start from "
                 "`distilbert-base-uncased` unless you train PhraseBank first."
             )
+
+        with st.expander(
+            "Dataset config, inputs/outputs & code pointers",
+            expanded=False,
+        ):
+            st.caption(
+                "Parquet inputs, HF `DatasetDict` outputs, `id2label` alignment with PhraseBank, "
+                "and GitHub links to verify each step in code."
+            )
+            try:
+                st.markdown("#### Label schema (`id2label`)")
+                st.dataframe(
+                    ravenpack_label_schema_table(),
+                    hide_index=True,
+                    use_container_width=True,
+                )
+            except Exception as exc:
+                st.warning(f"Could not build label schema table: {exc}")
+            rp_config_metrics = rp_metrics if rp_metrics else {}
+            for section, rows in ravenpack_finetune_config_recipe(
+                ticker=rp_train_ticker,
+                metrics=rp_config_metrics,
+            ).items():
+                st.markdown(f"#### {section}")
+                st.markdown(_markdown_setting_table(rows))
 
         try:
             rp_labeled = load_ravenpack_labeled_frame([rp_train_ticker])

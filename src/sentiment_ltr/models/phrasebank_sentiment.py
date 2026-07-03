@@ -191,6 +191,21 @@ def model_is_saved(model_dir: Path | None = None) -> bool:
     )
 
 
+def phrasebank_checkpoint_label_maps() -> tuple[dict[int, str], dict[str, int]]:
+    """Load ``id2label`` / ``label2id`` from a saved PhraseBank checkpoint."""
+    from transformers import AutoConfig
+
+    directory = resolve_model_dir()
+    if not model_is_saved(directory):
+        raise FileNotFoundError(
+            f"No PhraseBank checkpoint at {directory}. Train PhraseBank first."
+        )
+    config = AutoConfig.from_pretrained(str(directory))
+    id2label = {int(k): str(v) for k, v in config.id2label.items()}
+    label2id = {str(k): int(v) for k, v in config.label2id.items()}
+    return id2label, label2id
+
+
 def build_compute_metrics():
     """Return a Trainer ``compute_metrics`` fn with accuracy + macro-F1."""
     import evaluate
