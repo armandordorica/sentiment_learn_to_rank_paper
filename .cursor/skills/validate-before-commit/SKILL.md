@@ -33,6 +33,7 @@ as the project's running log of decisions, not just a changelog.
   - **Decision** taken (the approach chosen, especially over alternatives).
   - **Why** — the rationale, constraint, or trade-off behind it, so the reasoning
     survives even if the code changes later.
+- Use full dates (`YYYY-MM-DD`) in the Date column, not month-only.
 - Also keep the surrounding README in sync when behavior changes (e.g. tab counts,
   feature lists, setup steps), so the docs never contradict the code.
 - Trivial, no-behavior changes (typos, formatting) don't need a Journal entry.
