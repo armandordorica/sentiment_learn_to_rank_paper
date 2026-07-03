@@ -47,9 +47,15 @@ from sentiment_ltr.data.cash_merger_exits import (
     load_cash_merger_cache,
     update_cash_merger_cache,
 )
+from sentiment_ltr.viz import (
+    horizontal_bar_figure,
+    split_series_distribution_figures,
+    vertical_bar_figure,
+)
 from sentiment_ltr.models.phrasebank_sentiment import (
     DEFAULT_MODEL_DIR,
     MODEL_NAME,
+    PHRASEBANK_SPLIT_ORDER,
     PRIMARY_DATASET,
     SPLIT_SOURCE,
     benchmark_matmul,
@@ -86,7 +92,6 @@ PHRASEBANK_BASELINE_METRICS: dict[str, object] = {
 }
 DEFAULT_TRAIN_EPOCHS_UI = 3
 DEFAULT_RAVENPACK_TRAIN_EPOCHS_UI = DEFAULT_RAVENPACK_TRAIN_EPOCHS
-PHRASEBANK_SPLIT_ORDER = ["train", "validation", "test"]
 
 REFINITIV_IMPORT_ERROR: str | None = None
 
@@ -3736,28 +3741,27 @@ def render_phrasebank_hf_baseline_tab() -> None:
         )
         c1, c2 = st.columns(2)
         with c1:
-            fig_bal = px.bar(
+            fig_bal = horizontal_bar_figure(
                 balance.sort_values("count"),
                 x="count",
                 y="label",
-                orientation="h",
-                labels={"label": "Class", "count": "Train rows"},
                 title="Gold label balance (train split)",
+                axis_labels={"label": "Class", "count": "Train rows"},
+                x_hover_label="Count",
+                y_hover_label="Class",
             )
-            fig_bal.update_traces(hovertemplate="Class: %{y}<br>Count: %{x}<extra></extra>")
-            fig_bal.update_layout(hovermode="closest", showlegend=False, height=240)
             st.plotly_chart(fig_bal, use_container_width=True)
         with c2:
-            fig_splits = px.bar(
+            fig_splits = vertical_bar_figure(
                 split_df,
                 x="split",
                 y="rows",
-                labels={"split": "Split", "rows": "Sentences"},
                 title="Dataset size by split",
                 color="split",
+                axis_labels={"split": "Split", "rows": "Sentences"},
+                x_hover_label="Split",
+                y_hover_label="Rows",
             )
-            fig_splits.update_traces(hovertemplate="Split: %{x}<br>Rows: %{y}<extra></extra>")
-            fig_splits.update_layout(hovermode="closest", showlegend=False, height=240)
             st.plotly_chart(fig_splits, use_container_width=True)
 
         st.dataframe(
@@ -3800,45 +3804,22 @@ def render_phrasebank_hf_baseline_tab() -> None:
                 "p50": "Median predicted probability",
                 "class": "Class",
             }
-
-            fig_box = px.box(
+            fig_box, fig_p50, p50 = split_series_distribution_figures(
                 long_probs,
                 x="split",
                 y="probability",
-                color="class",
+                series="class",
                 category_orders=chart_orders,
-                labels=chart_labels,
-                title="Class probabilities by split (box & whisker)",
-                points="outliers",
-            )
-            fig_box.update_layout(hovermode="closest", boxmode="group", yaxis_range=[0, 1])
-            fig_box.update_traces(
-                hovertemplate="Split: %{x}<br>Class: %{fullData.name}<br>Probability: %{y:.3f}<extra></extra>"
+                axis_labels=chart_labels,
+                box_title="Class probabilities by split (box & whisker)",
+                median_title="Median class probability by split (p50)",
+                median_col="p50",
+                x_hover_label="PhraseBank split",
+                series_hover_label="Class",
+                y_hover_label="Predicted probability",
+                median_y_hover_label="Median predicted probability",
             )
             st.plotly_chart(fig_box, use_container_width=True)
-
-            p50 = (
-                long_probs.groupby(["split", "class"], as_index=False, observed=True)["probability"]
-                .median()
-                .rename(columns={"probability": "p50"})
-            )
-            fig_p50 = px.bar(
-                p50,
-                x="split",
-                y="p50",
-                color="class",
-                barmode="group",
-                category_orders=chart_orders,
-                labels=chart_labels,
-                title="Median class probability by split (p50)",
-                text="p50",
-            )
-            fig_p50.update_traces(
-                texttemplate="%{y:.2f}",
-                textposition="outside",
-                hovertemplate="Split: %{x}<br>Class: %{fullData.name}<br>p50: %{y:.3f}<extra></extra>",
-            )
-            fig_p50.update_layout(hovermode="closest", yaxis_range=[0, 1])
             st.plotly_chart(fig_p50, use_container_width=True)
 
             st.dataframe(

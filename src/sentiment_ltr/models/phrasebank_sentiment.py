@@ -14,6 +14,13 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from sentiment_ltr.viz.plotly_charts import (
+    apply_category_order,
+    group_median,
+    melt_wide_metrics,
+    strip_parenthetical_prefix,
+)
+
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 METRICS_FILENAME = "metrics.json"
 
@@ -384,26 +391,23 @@ def phrasebank_probability_chart_frame(model_dir: Path | None = None) -> pd.Data
         frames.append(part)
 
     probs_all = pd.concat(frames, ignore_index=True)
-    long_probs = probs_all.melt(
+    long_probs = melt_wide_metrics(
+        probs_all,
         id_vars=["split"],
         value_vars=PHRASEBANK_PROB_COLS,
-        var_name="class",
-        value_name="probability",
+        series_var="class",
+        value_var="probability",
+        series_name_fn=strip_parenthetical_prefix,
     )
-    long_probs["class"] = long_probs["class"].str.replace(r"p\(|\)", "", regex=True)
-    long_probs["split"] = pd.Categorical(
-        long_probs["split"],
-        categories=PHRASEBANK_SPLIT_ORDER,
-        ordered=True,
-    )
-    return long_probs
+    return apply_category_order(long_probs, {"split": PHRASEBANK_SPLIT_ORDER})
 
 
 def phrasebank_probability_p50_frame(model_dir: Path | None = None) -> pd.DataFrame:
     """Median (p50) predicted class probability per PhraseBank split."""
     long_probs = phrasebank_probability_chart_frame(model_dir)
-    return (
-        long_probs.groupby(["split", "class"], as_index=False, observed=True)["probability"]
-        .median()
-        .rename(columns={"probability": "p50"})
+    return group_median(
+        long_probs,
+        group_cols=["split", "class"],
+        value_col="probability",
+        output_col="p50",
     )

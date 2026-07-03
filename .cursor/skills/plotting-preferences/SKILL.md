@@ -5,6 +5,8 @@ description: Apply project plotting preferences for charts and notebook visualiz
 
 # Plotting Preferences
 
+When extracting chart code into shared helpers, follow [refactoring](../refactoring/SKILL.md): keep viz functions domain-agnostic, follow PEP 8 and DRY, and leave dataset-specific framing to callers.
+
 ## Instructions
 
 - Prefer Plotly plots for notebook and exploratory data visualizations.
