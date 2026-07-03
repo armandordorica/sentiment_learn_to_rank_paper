@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import importlib
 import os
 import re
 import subprocess
@@ -52,25 +53,27 @@ from sentiment_ltr.viz import (
     split_series_distribution_figures,
     vertical_bar_figure,
 )
-from sentiment_ltr.models.phrasebank_sentiment import (
-    DEFAULT_MODEL_DIR,
-    MODEL_NAME,
-    PHRASEBANK_SPLIT_ORDER,
-    PRIMARY_DATASET,
-    SPLIT_SOURCE,
-    benchmark_matmul,
-    dataset_class_balance,
-    device_report,
-    finetuning_deps_available,
-    load_classifier,
-    load_metrics,
-    load_phrasebank,
-    model_is_saved,
-    phrasebank_probability_chart_frame,
-    predict_sentences,
-    resolve_model_dir,
-    train_baseline,
-)
+from sentiment_ltr.models import phrasebank_sentiment as _phrasebank_sentiment
+
+_phrasebank_sentiment = importlib.reload(_phrasebank_sentiment)
+DEFAULT_MODEL_DIR = _phrasebank_sentiment.DEFAULT_MODEL_DIR
+MODEL_NAME = _phrasebank_sentiment.MODEL_NAME
+PHRASEBANK_SPLIT_ORDER = _phrasebank_sentiment.PHRASEBANK_SPLIT_ORDER
+PRIMARY_DATASET = _phrasebank_sentiment.PRIMARY_DATASET
+SPLIT_SOURCE = _phrasebank_sentiment.SPLIT_SOURCE
+benchmark_matmul = _phrasebank_sentiment.benchmark_matmul
+dataset_class_balance = _phrasebank_sentiment.dataset_class_balance
+device_report = _phrasebank_sentiment.device_report
+finetuning_deps_available = _phrasebank_sentiment.finetuning_deps_available
+load_classifier = _phrasebank_sentiment.load_classifier
+load_metrics = _phrasebank_sentiment.load_metrics
+load_phrasebank = _phrasebank_sentiment.load_phrasebank
+model_is_saved = _phrasebank_sentiment.model_is_saved
+phrasebank_probability_chart_frame = _phrasebank_sentiment.phrasebank_probability_chart_frame
+phrasebank_baseline_recipe = _phrasebank_sentiment.phrasebank_baseline_recipe
+predict_sentences = _phrasebank_sentiment.predict_sentences
+resolve_model_dir = _phrasebank_sentiment.resolve_model_dir
+train_baseline = _phrasebank_sentiment.train_baseline
 from sentiment_ltr.models.ravenpack_sentiment import (
     DEFAULT_RAVENPACK_MODEL_DIR,
     DEFAULT_RAVENPACK_TRAIN_EPOCHS,
@@ -3626,6 +3629,13 @@ def _cached_phrasebank_probability_chart(cache_token: str) -> pd.DataFrame:
     return phrasebank_probability_chart_frame()
 
 
+def _markdown_setting_table(rows: list[tuple[str, str]]) -> str:
+    lines = ["| Setting | Value |", "| --- | --- |"]
+    for key, value in rows:
+        lines.append(f"| **{key}** | {value} |")
+    return "\n".join(lines)
+
+
 def render_phrasebank_hf_baseline_tab() -> None:
     """Standalone overview of the Hugging Face PhraseBank baseline model."""
     st.header("PhraseBank HF Baseline")
@@ -3669,6 +3679,17 @@ def render_phrasebank_hf_baseline_tab() -> None:
         f"| **Notebook** | `notebooks/liquidAI_prep.ipynb` |\n"
         f"| **RavenPack adapt** | `notebooks/finetune_on_ravenpack.ipynb` (next step) |"
     )
+
+    st.markdown("### Reproduction recipe")
+    st.caption(
+        "Settings and **code pointers** for `phrasebank_sentiment.train_baseline()` — "
+        "the canonical training implementation shared by this tab, Sentiment Lab, and "
+        "`notebooks/liquidAI_prep.ipynb`. Hyperparameters reflect saved `metrics.json` "
+        "when a checkpoint exists."
+    )
+    for section, rows in phrasebank_baseline_recipe(metrics).items():
+        st.markdown(f"#### {section}")
+        st.markdown(_markdown_setting_table(rows))
 
     # ── Performance metrics ─────────────────────────────────────────────────────
     st.markdown("### Performance metrics")

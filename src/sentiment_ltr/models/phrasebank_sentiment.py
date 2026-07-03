@@ -220,6 +220,69 @@ def load_metrics(model_dir: Path | None = None) -> dict[str, Any]:
     return FALLBACK_METRICS.copy()
 
 
+GITHUB_REPO = "https://github.com/armandordorica/sentiment_learn_to_rank_paper"
+GITHUB_BRANCH = "main"
+
+
+def _phrasebank_module_path() -> str:
+    return Path(__file__).relative_to(PROJECT_ROOT).as_posix()
+
+
+def github_blob_link(
+    rel_path: str,
+    start: int | None = None,
+    end: int | None = None,
+    *,
+    label: str | None = None,
+) -> str:
+    """Markdown link to a file (and optional line range) on GitHub."""
+    path = rel_path.lstrip("/")
+    url = f"{GITHUB_REPO}/blob/{GITHUB_BRANCH}/{path}"
+    if start is not None:
+        if end is not None and end != start:
+            url += f"#L{start}-L{end}"
+        else:
+            url += f"#L{start}"
+    display = label or path
+    if start is not None and label is None:
+        display = f"{path}:{start}" if end is None or end == start else f"{path}:{start}-{end}"
+    return f"[{display}]({url})"
+
+
+def _fn_github_link(func, label: str | None = None) -> str:
+    """Markdown link to the GitHub source of a function in this module."""
+    import inspect
+
+    lines, start = inspect.getsourcelines(func)
+    end = start + len(lines) - 1
+    name = label or f"{func.__name__}()"
+    return github_blob_link(_phrasebank_module_path(), start, end, label=f"`{name}`")
+
+
+def _snippet_github_link(
+    func,
+    needle: str,
+    *,
+    label: str,
+    span: int = 0,
+) -> str:
+    """Markdown link to a line range inside ``func`` that contains ``needle``."""
+    import inspect
+
+    source_lines, start = inspect.getsourcelines(func)
+    for i, line in enumerate(source_lines):
+        if needle in line:
+            line_start = start + i
+            line_end = line_start + span
+            return github_blob_link(
+                _phrasebank_module_path(),
+                line_start,
+                line_end,
+                label=f"`{label}`",
+            )
+    return _fn_github_link(func, label=label)
+
+
 def tokenize_dataset(raw, tokenizer):
     """Tokenize all splits for Trainer."""
 
@@ -411,3 +474,240 @@ def phrasebank_probability_p50_frame(model_dir: Path | None = None) -> pd.DataFr
         value_col="probability",
         output_col="p50",
     )
+
+
+def phrasebank_baseline_code_pointers() -> list[tuple[str, str]]:
+    """GitHub links for each step of the PhraseBank baseline training pipeline."""
+    src = _phrasebank_module_path()
+    train_link = _fn_github_link(train_baseline)
+    return [
+        ("Load Financial PhraseBank", _fn_github_link(load_phrasebank)),
+        ("Class label maps (id2label / label2id)", _fn_github_link(label_maps)),
+        (
+            "Constants (`MODEL_NAME`, `MAX_LENGTH`, splits)",
+            github_blob_link(src, 39, 43, label="`MODEL_NAME`, `MAX_LENGTH`, split constants`"),
+        ),
+        ("Tokenize all splits for Trainer", _fn_github_link(tokenize_dataset)),
+        ("Eval metrics (accuracy + macro-F1)", _fn_github_link(build_compute_metrics)),
+        (
+            "Full training pipeline",
+            f"{train_link} — `TrainingArguments`, `Trainer`, checkpoint + `metrics.json`",
+        ),
+        ("Load saved checkpoint", _fn_github_link(load_classifier)),
+        ("Inference on new sentences", _fn_github_link(predict_sentences)),
+        (
+            "Streamlit: train from UI",
+            f"{github_blob_link('app.py', 3855, label='`render_sentiment_lab_tab()`')} "
+            f"(calls {train_link})",
+        ),
+        (
+            "Streamlit: train button handler",
+            github_blob_link("app.py", 4350, label="`train_baseline()` call in Sentiment Lab"),
+        ),
+        (
+            "Streamlit: this baseline tab",
+            github_blob_link("app.py", 3639, label="`render_phrasebank_hf_baseline_tab()`"),
+        ),
+        (
+            "Reference notebook",
+            f"{github_blob_link('notebooks/liquidAI_prep.ipynb', label='`notebooks/liquidAI_prep.ipynb`')} "
+            f"(step-by-step origin; canonical module: "
+            f"{github_blob_link(src, label='`phrasebank_sentiment.py`')})",
+        ),
+    ]
+
+
+def phrasebank_tokenization_code_pointers() -> list[tuple[str, str]]:
+    """GitHub links for PhraseBank training and inference tokenization."""
+    return [
+        ("Training wrapper", _fn_github_link(tokenize_dataset)),
+        (
+            "Training `tokenizer(...)` (`padding='max_length'`)",
+            _snippet_github_link(
+                tokenize_dataset,
+                "return tokenizer(",
+                label="training tokenizer() call",
+                span=5,
+            ),
+        ),
+        (
+            "Training `Dataset.map`",
+            _snippet_github_link(
+                tokenize_dataset,
+                "return raw.map(",
+                label="Dataset.map(_batch, ...)",
+            ),
+        ),
+        (
+            "Init tokenizer from HF hub (train)",
+            _snippet_github_link(
+                train_baseline,
+                "tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)",
+                label="AutoTokenizer.from_pretrained (train)",
+            ),
+        ),
+        (
+            "Invoke tokenization in training pipeline",
+            _snippet_github_link(
+                train_baseline,
+                "tokenize_dataset(raw, tokenizer)",
+                label="tokenize_dataset(...) in train_baseline",
+            ),
+        ),
+        (
+            "Save tokenizer with checkpoint",
+            _snippet_github_link(
+                train_baseline,
+                "tokenizer.save_pretrained(str(output_dir))",
+                label="tokenizer.save_pretrained",
+            ),
+        ),
+        ("Inference API", _fn_github_link(predict_sentences)),
+        (
+            "Inference `tokenizer(...)` (`padding=True`)",
+            _snippet_github_link(
+                predict_sentences,
+                "enc = tokenizer(",
+                label="inference tokenizer() call",
+                span=6,
+            ),
+        ),
+        (
+            "Load tokenizer from saved checkpoint",
+            _snippet_github_link(
+                load_classifier,
+                "tokenizer = AutoTokenizer.from_pretrained(str(model_dir))",
+                label="AutoTokenizer.from_pretrained (load)",
+            ),
+        ),
+        (
+            "Notebook: inspect training-style encode",
+            github_blob_link(
+                "notebooks/finetune_on_ravenpack.ipynb",
+                label="`finetune_on_ravenpack.ipynb`",
+            ),
+        ),
+    ]
+
+
+def phrasebank_baseline_recipe(
+    metrics: dict[str, Any] | None = None,
+) -> dict[str, list[tuple[str, str]]]:
+    """Grouped training + tokenization settings to reproduce the PhraseBank baseline."""
+    m = metrics or {}
+    max_len = m.get("max_length", MAX_LENGTH)
+    epochs = m.get("epochs", DEFAULT_TRAIN_EPOCHS)
+    lr = m.get("learning_rate", 2e-5)
+    batch = m.get("per_device_train_batch_size", 16)
+    base_model = m.get("model_name", MODEL_NAME)
+    train_link = _fn_github_link(train_baseline)
+    tokenize_link = _fn_github_link(tokenize_dataset)
+    predict_link = _fn_github_link(predict_sentences)
+    metrics_link = _fn_github_link(build_compute_metrics)
+    train_tokenizer_call = _snippet_github_link(
+        tokenize_dataset,
+        "return tokenizer(",
+        label="training tokenizer() call",
+        span=5,
+    )
+    train_tokenize_invoke = _snippet_github_link(
+        train_baseline,
+        "tokenize_dataset(raw, tokenizer)",
+        label="tokenize_dataset(...) in train_baseline",
+    )
+    train_tokenizer_init = _snippet_github_link(
+        train_baseline,
+        "tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)",
+        label="AutoTokenizer.from_pretrained (train)",
+    )
+    infer_tokenizer_call = _snippet_github_link(
+        predict_sentences,
+        "enc = tokenizer(",
+        label="inference tokenizer() call",
+        span=6,
+    )
+    load_tokenizer_link = _snippet_github_link(
+        load_classifier,
+        "tokenizer = AutoTokenizer.from_pretrained(str(model_dir))",
+        label="AutoTokenizer.from_pretrained (load)",
+    )
+    notebook_link = github_blob_link(
+        "notebooks/liquidAI_prep.ipynb",
+        label="`notebooks/liquidAI_prep.ipynb`",
+    )
+
+    return {
+        "Code pointers (training pipeline)": phrasebank_baseline_code_pointers(),
+        "Code pointers (tokenization)": phrasebank_tokenization_code_pointers(),
+        "Dataset & model init": [
+            ("HF dataset", str(m.get("dataset", PRIMARY_DATASET))),
+            ("Splits", str(m.get("split_source", SPLIT_SOURCE))),
+            ("Base checkpoint", base_model),
+            (
+                "Classification head",
+                "AutoModelForSequenceClassification.from_pretrained(..., "
+                "num_labels=3, id2label / label2id from dataset)",
+            ),
+            ("Labels", "negative (0), neutral (1), positive (2)"),
+            ("Tokenizer", f"AutoTokenizer.from_pretrained('{base_model}')"),
+            ("Code: init tokenizer (train)", train_tokenizer_init),
+            (
+                "Checkpoint contents",
+                "model weights, tokenizer files, metrics.json (saved after training)",
+            ),
+            ("Code", f"{train_link} (model + tokenizer init)"),
+        ],
+        "Tokenization (training)": [
+            ("Input column", "sentence"),
+            ("truncation", "True"),
+            ("padding", "max_length"),
+            ("max_length", str(max_len)),
+            ("Application", "datasets.Dataset.map(batched=True)"),
+            ("columns removed after encode", "sentence"),
+            ("Code: `tokenize_dataset()`", tokenize_link),
+            ("Code: `tokenizer(...)` call", train_tokenizer_call),
+            ("Code: wired in `train_baseline()`", train_tokenize_invoke),
+        ],
+        "Tokenization (inference)": [
+            ("API", "phrasebank_sentiment.predict_sentences()"),
+            ("truncation", "True"),
+            ("padding", "True (pad to longest sequence in the batch)"),
+            ("max_length", str(max_len)),
+            (
+                "Note",
+                "Training uses fixed-length padding; batch inference pads dynamically "
+                "but still truncates at max_length.",
+            ),
+            ("Code: `predict_sentences()`", predict_link),
+            ("Code: `tokenizer(...)` call", infer_tokenizer_call),
+            ("Code: load saved tokenizer", load_tokenizer_link),
+        ],
+        "Hugging Face TrainingArguments": [
+            ("num_train_epochs", str(epochs)),
+            ("per_device_train_batch_size", str(batch)),
+            ("per_device_eval_batch_size", "32"),
+            ("learning_rate", str(lr)),
+            ("weight_decay", "0.01"),
+            ("eval_strategy", "epoch"),
+            ("save_strategy", "epoch"),
+            ("load_best_model_at_end", "True"),
+            ("metric_for_best_model", str(m.get("metric_for_best_model", "f1"))),
+            ("greater_is_better", "True"),
+            ("save_total_limit", "1"),
+            ("logging_steps", "50"),
+            ("report_to", "none"),
+            ("seed", "42"),
+            ("Code", f"{train_link} (`TrainingArguments` block)"),
+        ],
+        "Trainer & checkpoint selection": [
+            ("train_dataset", "tokenized['train']"),
+            ("eval_dataset", "tokenized['validation']"),
+            ("test split", "evaluated after training; not used to pick the checkpoint"),
+            ("compute_metrics", "accuracy + macro-F1 (Hugging Face evaluate)"),
+            ("Best checkpoint", "highest validation macro-F1"),
+            ("Python API", train_link),
+            ("Notebook", notebook_link),
+            ("Default output_dir", str(DEFAULT_MODEL_DIR.relative_to(PROJECT_ROOT))),
+            ("Code", f"{train_link} + {metrics_link}"),
+        ],
+    }
