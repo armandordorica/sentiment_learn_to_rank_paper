@@ -74,20 +74,23 @@ phrasebank_baseline_recipe = _phrasebank_sentiment.phrasebank_baseline_recipe
 predict_sentences = _phrasebank_sentiment.predict_sentences
 resolve_model_dir = _phrasebank_sentiment.resolve_model_dir
 train_baseline = _phrasebank_sentiment.train_baseline
-from sentiment_ltr.models.ravenpack_sentiment import (
-    DEFAULT_RAVENPACK_MODEL_DIR,
-    DEFAULT_RAVENPACK_TRAIN_EPOCHS,
-    discover_ravenpack_article_files,
-    load_ravenpack_labeled_frame,
-    load_ravenpack_metrics,
-    ravenpack_class_balance,
-    ravenpack_model_is_saved,
-    ravenpack_split_summary,
-    resolve_ravenpack_model_dir,
-    ravenpack_finetune_config_recipe,
-    ravenpack_label_schema_table,
-    train_ravenpack,
-)
+from sentiment_ltr.models import ravenpack_sentiment as _ravenpack_sentiment
+
+_ravenpack_sentiment = importlib.reload(_ravenpack_sentiment)
+DEFAULT_RAVENPACK_MODEL_DIR = _ravenpack_sentiment.DEFAULT_RAVENPACK_MODEL_DIR
+DEFAULT_RAVENPACK_TRAIN_EPOCHS = _ravenpack_sentiment.DEFAULT_RAVENPACK_TRAIN_EPOCHS
+discover_ravenpack_article_files = _ravenpack_sentiment.discover_ravenpack_article_files
+load_ravenpack_labeled_frame = _ravenpack_sentiment.load_ravenpack_labeled_frame
+load_ravenpack_metrics = _ravenpack_sentiment.load_ravenpack_metrics
+ravenpack_class_balance = _ravenpack_sentiment.ravenpack_class_balance
+ravenpack_model_is_saved = _ravenpack_sentiment.ravenpack_model_is_saved
+ravenpack_split_summary = _ravenpack_sentiment.ravenpack_split_summary
+resolve_ravenpack_model_dir = _ravenpack_sentiment.resolve_ravenpack_model_dir
+ravenpack_finetune_config_recipe = _ravenpack_sentiment.ravenpack_finetune_config_recipe
+ravenpack_label_schema_table = _ravenpack_sentiment.ravenpack_label_schema_table
+evaluate_phrasebank_baseline_on_ravenpack = _ravenpack_sentiment.evaluate_phrasebank_baseline_on_ravenpack
+ravenpack_confusion_matrix_stylers = _ravenpack_sentiment.ravenpack_confusion_matrix_stylers
+train_ravenpack = _ravenpack_sentiment.train_ravenpack
 
 # 1-epoch baseline numbers for the progress comparison table (Iteration 1).
 PHRASEBANK_BASELINE_METRICS: dict[str, object] = {
@@ -2898,6 +2901,47 @@ def _render_cash_merger_section(manifests_df: pd.DataFrame) -> None:
         )
 
 
+@st.cache_data(ttl=3600, show_spinner="Scoring RavenPack headlines with PhraseBank model…")
+def _cached_ravenpack_baseline_eval(
+    ticker: str,
+    eval_split: str,
+    max_rows: int | None,
+    cache_token: str,
+) -> dict[str, object]:
+    """Evaluate PhraseBank checkpoint on RavenPack headlines (cached)."""
+    del cache_token
+    return evaluate_phrasebank_baseline_on_ravenpack(
+        [ticker],
+        model_dir=resolve_model_dir(),
+        eval_split=eval_split if eval_split != "all" else None,
+        max_rows=max_rows,
+    )
+
+
+def _ravenpack_confusion_pct_heatmap(cm_pct: pd.DataFrame, *, title: str):
+    """Plotly heatmap for row-normalized confusion matrix (% of actual class)."""
+    labels = list(cm_pct.index)
+    fig = px.imshow(
+        cm_pct.values,
+        x=labels,
+        y=labels,
+        text_auto=".1f",
+        aspect="auto",
+        color_continuous_scale=[
+            [0.0, "#d65f5f"],
+            [0.5, "#ffffcc"],
+            [1.0, "#90ee90"],
+        ],
+        labels={"x": "Predicted", "y": "Actual", "color": "% of actual row"},
+    )
+    fig.update_yaxes(autorange="reversed")
+    fig.update_traces(
+        hovertemplate="Actual: %{y}<br>Predicted: %{x}<br>Row share: %{z:.1f}%<extra></extra>",
+    )
+    fig.update_layout(title=title, hovermode="closest", height=360)
+    return fig
+
+
 @st.cache_resource(show_spinner=False)
 def _cached_sentiment_classifier(model_dir: str):
     """Load the fine-tuned PhraseBank classifier once per Streamlit session."""
@@ -3854,6 +3898,218 @@ def render_phrasebank_hf_baseline_tab() -> None:
             st.error(f"Could not build probability charts: {exc}")
 
 
+def _render_ravenpack_baseline_eval_results(
+    *,
+    ticker: str,
+    eval_split: str,
+    max_rows: int,
+    metrics: dict[str, object],
+) -> None:
+    """Display metrics, confusion matrices, and mismatch samples for one eval run."""
+    ckpt_token = str((resolve_model_dir() / "config.json").stat().st_mtime)
+    max_rows_arg = max_rows or None
+    eval_result = _cached_ravenpack_baseline_eval(
+        ticker,
+        eval_split,
+        max_rows_arg,
+        ckpt_token,
+    )
+    cm = eval_result["confusion_counts"]
+    cm_pct = eval_result["confusion_pct"]
+    counts_styler, pct_styler = ravenpack_confusion_matrix_stylers(cm, cm_pct)
+
+    pb_test_f1 = metrics.get("test", {}).get("eval_f1")
+    pb_test_acc = metrics.get("test", {}).get("eval_accuracy")
+
+    e1, e2, e3, e4 = st.columns(4)
+    e1.metric("Rows scored", f"{eval_result['n_rows']:,}")
+    e2.metric("Accuracy", f"{eval_result['accuracy']:.1%}")
+    e3.metric("Macro-F1", f"{eval_result['macro_f1']:.1%}")
+    e4.metric(
+        "PhraseBank test (in-domain)",
+        f"{pb_test_f1:.1%} F1" if pb_test_f1 is not None else "—",
+    )
+    st.caption(
+        "In-domain PhraseBank test: "
+        + (
+            f"accuracy **{pb_test_acc:.1%}** · macro-F1 **{pb_test_f1:.1%}**"
+            if pb_test_acc is not None and pb_test_f1 is not None
+            else "see PhraseBank HF Baseline tab"
+        )
+        + f" · checkpoint `{resolve_model_dir().relative_to(PROJECT_ROOT)}`"
+    )
+
+    st.plotly_chart(
+        _ravenpack_confusion_pct_heatmap(
+            cm_pct,
+            title=f"Row-normalized confusion — PhraseBank on {ticker} RavenPack ({eval_split})",
+        ),
+        use_container_width=True,
+    )
+
+    c_left, c_right = st.columns(2)
+    with c_left:
+        st.markdown("**Confusion matrix — counts**")
+        st.dataframe(counts_styler, use_container_width=True)
+    with c_right:
+        st.markdown("**Confusion matrix — % of actual class**")
+        st.dataframe(pct_styler, use_container_width=True)
+
+    with st.expander("Classification report", expanded=False):
+        st.code(eval_result["classification_report"])
+
+    mismatch_df = eval_result["mismatches_sample"]
+    if not mismatch_df.empty:
+        with st.expander("Sample mismatches", expanded=False):
+            st.dataframe(
+                mismatch_df[
+                    [
+                        "article_date",
+                        "headline",
+                        "event_sentiment_score",
+                        "actual",
+                        "pred",
+                        "p(negative)",
+                        "p(neutral)",
+                        "p(positive)",
+                    ]
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+
+def render_ravenpack_baseline_eval_tab() -> None:
+    """Evaluate the PhraseBank checkpoint on RavenPack headline labels (zero-shot)."""
+    st.header("RavenPack Baseline Evaluation")
+    st.caption(
+        "Score cached RavenPack headlines with the **PhraseBank-trained DistilBERT checkpoint** "
+        "(no RavenPack fine-tuning). Actual labels come from RavenPack `event_sentiment_score` "
+        "(±0.05 → negative / neutral / positive). Mirrors "
+        "`notebooks/finetune_on_ravenpack.ipynb` — use this as the out-of-domain baseline "
+        "before adapting the model to news."
+    )
+
+    if not finetuning_deps_available():
+        st.warning(
+            "Fine-tuning dependencies are not installed. Run "
+            "`pip install -r requirements-finetuning.txt` to run evaluation."
+        )
+        return
+
+    metrics = load_metrics()
+    model_dir = resolve_model_dir()
+    has_model = model_is_saved(model_dir)
+
+    if not has_model:
+        st.info(
+            "No PhraseBank checkpoint found. Train one from the **Sentiment Lab** tab or "
+            f"`notebooks/liquidAI_prep.ipynb` (expected at "
+            f"`{DEFAULT_MODEL_DIR.relative_to(PROJECT_ROOT)}`)."
+        )
+        return
+
+    rp_export_paths = discover_ravenpack_article_files()
+    rp_tickers_available = sorted({
+        p.name.split("_articles_")[0].upper() for p in rp_export_paths
+    })
+
+    if not rp_tickers_available:
+        st.warning(
+            "No RavenPack article exports found. Run `notebooks/fetch_news_articles.ipynb` "
+            "to build `{ticker}_articles_2003_2014.parquet` under "
+            f"`{NEWS_RAVENPACK_DIR.relative_to(PROJECT_ROOT)}/`."
+        )
+        return
+
+    eval_ticker = st.selectbox(
+        "Ticker",
+        options=rp_tickers_available,
+        index=0,
+        key="rp_baseline_tab_ticker",
+    )
+
+    try:
+        rp_labeled = load_ravenpack_labeled_frame([eval_ticker])
+        rp_balance = ravenpack_class_balance(rp_labeled)
+        rp_splits = ravenpack_split_summary(rp_labeled)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Labeled headlines", f"{len(rp_labeled):,}")
+        c2.metric("Train rows", f"{int(rp_splits.loc[rp_splits['split'] == 'train', 'rows'].iloc[0]):,}")
+        c3.metric("Test rows", f"{int(rp_splits.loc[rp_splits['split'] == 'test', 'rows'].iloc[0]):,}")
+        with st.expander("Dataset splits & class balance", expanded=False):
+            st.dataframe(rp_splits, hide_index=True, use_container_width=True)
+            fig_rp = px.bar(
+                rp_balance.sort_values("count"),
+                x="count",
+                y="label",
+                orientation="h",
+                labels={"label": "Class", "count": "Rows"},
+                title=f"RavenPack label balance ({eval_ticker})",
+            )
+            fig_rp.update_traces(hovertemplate="Class: %{y}<br>Count: %{x}<extra></extra>")
+            fig_rp.update_layout(hovermode="closest", showlegend=False, height=220)
+            st.plotly_chart(fig_rp, use_container_width=True)
+    except Exception as exc:
+        st.error(f"Could not load RavenPack data for {eval_ticker}: {exc}")
+        return
+
+    st.divider()
+    st.markdown("### Run evaluation")
+
+    ev1, ev2, ev3 = st.columns([2, 2, 2])
+    with ev1:
+        rp_eval_split = st.selectbox(
+            "Evaluation split",
+            options=["test", "validation", "train", "all"],
+            index=0,
+            format_func=lambda s: {
+                "test": "test (≥2013)",
+                "validation": "validation (2012)",
+                "train": "train (≤2011)",
+                "all": "all labeled rows",
+            }[s],
+            key="rp_baseline_tab_eval_split",
+        )
+    with ev2:
+        rp_eval_max_rows = st.number_input(
+            "Max rows (0 = full split)",
+            min_value=0,
+            value=0,
+            step=500,
+            help="Cap rows for a faster smoke test. 0 scores the entire split.",
+            key="rp_baseline_tab_eval_max_rows",
+        )
+    with ev3:
+        st.write("")
+        st.write("")
+        run_rp_baseline_eval = st.button(
+            "Run baseline evaluation",
+            key="rp_baseline_tab_eval_run",
+            type="primary",
+        )
+
+    if run_rp_baseline_eval:
+        st.session_state["rp_baseline_tab_eval_key"] = (
+            eval_ticker,
+            rp_eval_split,
+            int(rp_eval_max_rows),
+        )
+
+    eval_key = (eval_ticker, rp_eval_split, int(rp_eval_max_rows))
+    if st.session_state.get("rp_baseline_tab_eval_key") == eval_key:
+        with st.spinner("Scoring headlines with PhraseBank model…"):
+            try:
+                _render_ravenpack_baseline_eval_results(
+                    ticker=eval_ticker,
+                    eval_split=rp_eval_split,
+                    max_rows=int(rp_eval_max_rows),
+                    metrics=metrics,
+                )
+            except Exception as exc:
+                st.error(f"Baseline evaluation failed: {exc}")
+
+
 def render_sentiment_lab_tab() -> None:
     """Interactive view of notebooks/liquidAI_prep.ipynb — dataset, metrics, inference."""
     st.header("News Sentiment Lab")
@@ -4322,6 +4578,11 @@ def render_sentiment_lab_tab() -> None:
         except Exception as exc:
             st.error(f"Could not load RavenPack training data: {exc}")
             rp_labeled = None
+
+        st.caption(
+            "Out-of-domain baseline evaluation (PhraseBank on RavenPack labels) lives in the "
+            "**RavenPack Baseline Eval** tab."
+        )
 
         if has_ravenpack_model and rp_metrics:
             rp_test_f1 = rp_metrics.get("test", {}).get("eval_f1")
@@ -4906,14 +5167,23 @@ st.info(
     "The **Data Explorer** tab uses one ticker/date-range form for prices, Refinitiv news, and RavenPack sentiment. "
     "The **PhraseBank HF Baseline** tab documents the Hugging Face DistilBERT benchmark "
     "(Financial PhraseBank training data, metrics, probability chart). "
+    "The **RavenPack Baseline Eval** tab scores the PhraseBank model on RavenPack headlines (out-of-domain). "
     "The **Sentiment Lab** tab hosts interactive fine-tuning and inference from `notebooks/liquidAI_prep.ipynb`. "
     "The **Paper Validation** tab uses bundled 2003-2014 CSVs from `app_data/`."
 )
 
-tab_dashboard, tab_batch, tab_phrasebank_baseline, tab_sentiment, tab_validation = st.tabs([
+(
+    tab_dashboard,
+    tab_batch,
+    tab_phrasebank_baseline,
+    tab_ravenpack_baseline,
+    tab_sentiment,
+    tab_validation,
+) = st.tabs([
     "Data Explorer",
     "Batch Pipeline (Top-1K)",
     "PhraseBank HF Baseline",
+    "RavenPack Baseline Eval",
     "Sentiment Lab",
     "Paper Validation (2003-2014)",
 ])
@@ -4926,6 +5196,9 @@ with tab_batch:
 
 with tab_phrasebank_baseline:
     render_phrasebank_hf_baseline_tab()
+
+with tab_ravenpack_baseline:
+    render_ravenpack_baseline_eval_tab()
 
 with tab_sentiment:
     render_sentiment_lab_tab()

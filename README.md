@@ -47,13 +47,14 @@ The project is past the "can we pull data?" stage and into "can we pull it relia
 
 ### What Works Today
 
-**Streamlit app (`app.py`)** — five tabs:
+**Streamlit app (`app.py`)** — six tabs:
 
 1. **Data Explorer** — single-ticker queries across Refinitiv, WRDS/CRSP, Yahoo, and RavenPack with combined price charts, news coverage, sentiment panes, and raw schema inspection.
 2. **Batch Pipeline (Top-1K)** — launch, monitor, and inspect bulk fetches for all 1,000 universe tickers; live status banner, cache snapshot, per-provider failure breakdown, and per-ticker manifest table.
 3. **PhraseBank HF Baseline** — Hugging Face DistilBERT benchmark on Financial PhraseBank: dataset dashboard (gold labels, box + p50 probability charts), training metrics, and checkpoint details.
-4. **Sentiment Lab** — fine-tuning workflow for the news-sentiment model (TRNA substitute): RavenPack article browser, PhraseBank/RavenPack training, headline scoring, and compute-device report.
-5. **Paper Validation (2003-2014)** — bundled universe CSV and validation charts without a live WRDS connection.
+4. **RavenPack Baseline Eval** — score the PhraseBank checkpoint on cached RavenPack headlines (out-of-domain): accuracy, macro-F1, confusion matrices, and mismatch samples.
+5. **Sentiment Lab** — fine-tuning workflow for the news-sentiment model (TRNA substitute): RavenPack article browser, PhraseBank/RavenPack training, headline scoring, and compute-device report.
+6. **Paper Validation (2003-2014)** — bundled universe CSV and validation charts without a live WRDS connection.
 
 **Batch caching** — `scripts/run_batch_pipeline.py` writes one directory per ticker under:
 
@@ -120,6 +121,7 @@ code does. Keep it updated as part of every commit (see
 | 2026-07-03 | **Reusable viz module + refactoring skill** — extracted domain-agnostic Plotly helpers to `src/sentiment_ltr/viz/` (`melt_wide_metrics`, `split_series_distribution_figures`, bar/box builders); PhraseBank HF Baseline tab and `finetune_on_ravenpack.ipynb` now call shared helpers; added `.cursor/skills/refactoring/SKILL.md` (DRY, PEP 8, domain-agnostic layering). *Decision:* generic chart mechanics in `viz/`, dataset framing in callers; notebook uses `%autoreload` and derives split order from chart data to avoid stale kernel imports. *Why:* one hover/layout implementation across app and notebooks; easier reuse for RavenPack probability charts later. |
 | 2026-07-03 | **PhraseBank baseline reproduction recipe** — PhraseBank HF Baseline tab now documents training/tokenization hyperparameters plus GitHub code pointers (including inner `tokenizer(...)` calls for train vs inference); `phrasebank_baseline_recipe()` / `phrasebank_tokenization_code_pointers()` in `phrasebank_sentiment.py`; `finetune_on_ravenpack.ipynb` cell documents tokenizer contract. *Decision:* `inspect`-based GitHub blob links stay accurate as code moves; reload `phrasebank_sentiment` on app startup to avoid stale Streamlit imports. *Why:* readers can recreate the baseline without hunting through notebooks. |
 | 2026-07-03 | **RavenPack config + label schema in Sentiment Lab** — `ravenpack_finetune_config_recipe()`, `ravenpack_label_schema_table()`, and GitHub code pointers in `ravenpack_sentiment.py`; Sentiment Lab expander documents parquet inputs/outputs, HF `DatasetDict` splits, and `id2label` alignment with PhraseBank; `phrasebank_checkpoint_label_maps()` for checkpoint verification; notebook cells for AAPL walkthrough and label-schema check. *Decision:* mirror the PhraseBank reproduction-recipe pattern so both fine-tune paths share the same verify-in-code UX. *Why:* RavenPack training reuses the PhraseBank head only if label ids match (0=negative, 1=neutral, 2=positive). |
+| 2026-07-03 | **RavenPack Baseline Eval tab** — standalone top tab scores the PhraseBank checkpoint on RavenPack headlines (accuracy, macro-F1, Plotly heatmap, pandas `.style.bar` confusion matrices); `evaluate_phrasebank_baseline_on_ravenpack()` in `ravenpack_sentiment.py`; `importlib.reload` for `ravenpack_sentiment` on app startup; notebook inference cell for AAPL pred vs actual. *Decision:* keep out-of-domain eval out of Sentiment Lab so fine-tuning and zero-shot baseline are separate workflows. *Why:* ~27% test accuracy on AAPL before RavenPack adapt is a key baseline readers need to find quickly. |
 
 ### Immediate Next Steps
 

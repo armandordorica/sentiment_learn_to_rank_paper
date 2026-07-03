@@ -686,3 +686,103 @@ def ravenpack_finetune_config_recipe(
             )),
         ],
     }
+
+
+def ravenpack_confusion_matrix_stylers(
+    cm: pd.DataFrame,
+    cm_pct: pd.DataFrame,
+) -> tuple[object, object]:
+    """Return pandas Styler objects for counts and row-normalized % confusion matrices."""
+    counts_styler = (
+        cm.style.format("{:,.0f}")
+        .bar(align="mid", color=["red", "lightgreen"])
+    )
+    pct_styler = (
+        cm_pct.round(1)
+        .style.format("{:.1f}%")
+        .bar(align="mid", color=["red", "lightgreen"], vmin=0, vmax=100)
+    )
+    return counts_styler, pct_styler
+
+
+def evaluate_phrasebank_baseline_on_ravenpack(
+    tickers: list[str] | None,
+    *,
+    model_dir: Path | None = None,
+    eval_split: str | None = "test",
+    batch_size: int = 64,
+    max_rows: int | None = None,
+    mismatch_sample: int = 10,
+) -> dict[str, Any]:
+    """Score RavenPack headlines with the PhraseBank checkpoint (no RavenPack fine-tune)."""
+    from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
+
+    from sentiment_ltr.models.phrasebank_sentiment import load_classifier, predict_sentences
+
+    model_dir = Path(model_dir or DEFAULT_MODEL_DIR)
+    labeled = load_ravenpack_labeled_frame(tickers)
+    labeled["split"] = assign_time_split(labeled["article_date"])
+    if eval_split:
+        eval_df = labeled[labeled["split"] == eval_split].reset_index(drop=True)
+    else:
+        eval_df = labeled.reset_index(drop=True)
+
+    if eval_df.empty:
+        split_hint = eval_split or "all"
+        raise ValueError(f"No RavenPack rows for split={split_hint!r}.")
+
+    if max_rows is not None and len(eval_df) > max_rows:
+        eval_df = eval_df.sample(max_rows, random_state=42).reset_index(drop=True)
+
+    tokenizer, model, device = load_classifier(model_dir)
+    headlines = eval_df["headline"].tolist()
+    pred_chunks: list[pd.DataFrame] = []
+    for start in range(0, len(headlines), batch_size):
+        batch = headlines[start : start + batch_size]
+        pred_chunks.append(predict_sentences(batch, tokenizer, model, device))
+    preds = pd.concat(pred_chunks, ignore_index=True)
+
+    results = eval_df[
+        ["split", "article_date", "headline", "event_sentiment_score", "label_name"]
+    ].join(preds.drop(columns=["sentence"]))
+    results = results.rename(columns={"label_name": "actual"})
+    results["match"] = results["actual"] == results["pred"]
+
+    label_order = [ID2LABEL[i] for i in sorted(ID2LABEL)]
+    y_true = results["actual"]
+    y_pred = results["pred"]
+
+    cm = pd.DataFrame(
+        confusion_matrix(y_true, y_pred, labels=label_order),
+        index=pd.Index(label_order, name="actual"),
+        columns=pd.Index(label_order, name="pred"),
+    )
+    cm_pct = cm.div(cm.sum(axis=1), axis=0).mul(100)
+
+    tickers_used = sorted(eval_df["ticker"].astype(str).str.upper().unique().tolist())
+    mismatches = results.loc[~results["match"]]
+    sample_n = min(mismatch_sample, len(mismatches))
+
+    return {
+        "model_dir": str(model_dir),
+        "tickers": tickers_used,
+        "eval_split": eval_split,
+        "n_rows": int(len(eval_df)),
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "macro_f1": float(
+            f1_score(y_true, y_pred, labels=label_order, average="macro", zero_division=0)
+        ),
+        "classification_report": classification_report(
+            y_true,
+            y_pred,
+            labels=label_order,
+            digits=3,
+            zero_division=0,
+        ),
+        "confusion_counts": cm,
+        "confusion_pct": cm_pct,
+        "label_order": label_order,
+        "mismatches_sample": mismatches.sample(sample_n, random_state=42).reset_index(drop=True)
+        if sample_n
+        else pd.DataFrame(),
+    }
