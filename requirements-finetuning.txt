@@ -15,6 +15,7 @@ datasets>=3.0,<6         # verified: 5.0.0  (NOTE: v4+ dropped dataset loading s
 evaluate>=0.4,<1         # verified: 0.4.6
 accelerate>=0.34,<2      # verified: 1.14.0
 ipywidgets>=8,<9         # silences the tqdm/IProgress warning in Jupyter
+wandb>=0.28,<1           # experiment tracking for Hugging Face Trainer runs
 
 # Heads-up: the canonical `financial_phrasebank` dataset is script-based and no
 # longer loads on datasets v4/v5. Use a Parquet mirror instead, e.g.

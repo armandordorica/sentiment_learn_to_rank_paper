@@ -100,6 +100,13 @@ PHRASEBANK_BASELINE_METRICS: dict[str, object] = {
 }
 DEFAULT_TRAIN_EPOCHS_UI = 3
 DEFAULT_RAVENPACK_TRAIN_EPOCHS_UI = DEFAULT_RAVENPACK_TRAIN_EPOCHS
+WANDB_ENTITY = os.getenv("WANDB_ENTITY", "armando-ordorica-university-of-toronto")
+WANDB_PROJECT = os.getenv("WANDB_PROJECT", "sentiment-ltr-transformers")
+WANDB_PROJECT_URL = f"https://wandb.ai/{WANDB_ENTITY}/{WANDB_PROJECT}"
+WANDB_IMPORTED_RUN_URLS = {
+    "phrasebank_distilbert_best": f"{WANDB_PROJECT_URL}/runs/ri5500fc",
+    "phrasebank_distilbert_1ep": f"{WANDB_PROJECT_URL}/runs/24rkyvrn",
+}
 
 REFINITIV_IMPORT_ERROR: str | None = None
 
@@ -2943,14 +2950,19 @@ def _ravenpack_confusion_pct_heatmap(cm_pct: pd.DataFrame, *, title: str):
 
 
 def _label_distribution_shift_charts(
-    eval_result: dict[str, object],
     rp_labeled: pd.DataFrame,
+    eval_result: dict[str, object] | None = None,
 ) -> None:
-    """Render the two label-distribution charts mirroring the notebook cell."""
+    """Render the two label-distribution charts mirroring the notebook cell.
+
+    `eval_result` is optional: the PhraseBank-vs-RavenPack-actual comparison only
+    needs the labeled frame, so it's shown even before an evaluation has been run.
+    The "predicted" trace (from the confusion matrix) is added only when a
+    matching evaluation result is already available.
+    """
     import plotly.graph_objects as go
 
     _CLASS_ORDER = _ravenpack_sentiment.LABEL_NAMES
-    eval_split = eval_result.get("eval_split") or "all"
 
     # ── PhraseBank per-split ──────────────────────────────────────────────────
     try:
@@ -2972,22 +2984,22 @@ def _label_distribution_shift_charts(
         "count": rp_actual_vc.values.tolist(),
     }).assign(pct=lambda d: d["count"] / d["count"].sum() * 100).set_index("label").reindex(_CLASS_ORDER)
 
-    # ── RavenPack predicted (eval split — from confusion matrix column sums) ──
-    cm: pd.DataFrame = eval_result["confusion_counts"]
-    pred_counts = cm.sum(axis=0).reindex(_CLASS_ORDER, fill_value=0)
-    pred_total = pred_counts.sum()
-    rp_pred = pd.DataFrame({
-        "label": _CLASS_ORDER,
-        "count": pred_counts.values.tolist(),
-    }).assign(pct=lambda d: d["count"] / pred_total * 100).set_index("label").reindex(_CLASS_ORDER)
-
-    # ── Chart 1: three-way comparison ─────────────────────────────────────────
+    # ── Chart 1: comparison (adds a "predicted" trace once an eval has run) ───
     fig1 = go.Figure()
     traces = [
         ("PhraseBank (all splits)", pb_total_idx),
         ("RavenPack actual (all splits)", rp_actual),
-        (f"RavenPack predicted ({eval_split})", rp_pred),
     ]
+    if eval_result is not None:
+        eval_split = eval_result.get("eval_split") or "all"
+        cm: pd.DataFrame = eval_result["confusion_counts"]
+        pred_counts = cm.sum(axis=0).reindex(_CLASS_ORDER, fill_value=0)
+        pred_total = pred_counts.sum()
+        rp_pred = pd.DataFrame({
+            "label": _CLASS_ORDER,
+            "count": pred_counts.values.tolist(),
+        }).assign(pct=lambda d: d["count"] / pred_total * 100).set_index("label").reindex(_CLASS_ORDER)
+        traces.append((f"RavenPack predicted ({eval_split})", rp_pred))
     for name, df in traces:
         fig1.add_trace(go.Bar(
             name=name,
@@ -3791,6 +3803,37 @@ def _markdown_setting_table(rows: list[tuple[str, str]]) -> str:
     return "\n".join(lines)
 
 
+def _render_wandb_tracking_links(*, context: str = "phrasebank") -> None:
+    """Link the Streamlit metrics view to the W&B experiment dashboard."""
+    st.markdown("### W&B experiment tracking")
+    st.caption(
+        f"Trainer runs and imported offline metrics sync to `{WANDB_PROJECT}`. "
+        "Use W&B for run comparisons, metric history, configs, and uploaded metrics artifacts."
+    )
+    c1, c2, c3 = st.columns(3)
+    c1.link_button("Open W&B project", WANDB_PROJECT_URL, use_container_width=True)
+    c2.link_button(
+        "3-epoch PhraseBank run",
+        WANDB_IMPORTED_RUN_URLS["phrasebank_distilbert_best"],
+        use_container_width=True,
+    )
+    c3.link_button(
+        "1-epoch baseline run",
+        WANDB_IMPORTED_RUN_URLS["phrasebank_distilbert_1ep"],
+        use_container_width=True,
+    )
+    if context == "ravenpack":
+        st.caption(
+            "New RavenPack fine-tunes will appear in this project with run names beginning "
+            "`ravenpack-distilbert-...`."
+        )
+    else:
+        st.caption(
+            "New PhraseBank fine-tunes will appear in this project with run names beginning "
+            "`phrasebank-distilbert-...`."
+        )
+
+
 def render_phrasebank_hf_baseline_tab() -> None:
     """Standalone overview of the Hugging Face PhraseBank baseline model."""
     st.header("PhraseBank HF Baseline")
@@ -3834,6 +3877,8 @@ def render_phrasebank_hf_baseline_tab() -> None:
         f"| **Notebook** | `notebooks/liquidAI_prep.ipynb` |\n"
         f"| **RavenPack adapt** | `notebooks/finetune_on_ravenpack.ipynb` (next step) |"
     )
+
+    _render_wandb_tracking_links(context="phrasebank")
 
     st.markdown("### Reproduction recipe")
     st.caption(
@@ -4015,7 +4060,7 @@ def _render_ravenpack_baseline_eval_results(
     metrics: dict[str, object],
     rp_labeled: pd.DataFrame,
 ) -> None:
-    """Display metrics, confusion matrices, mismatch samples, and distribution charts."""
+    """Display metrics, confusion matrices, and mismatch samples for a completed eval run."""
     ckpt_token = str((resolve_model_dir() / "config.json").stat().st_mtime)
     max_rows_arg = max_rows or None
     eval_result = _cached_ravenpack_baseline_eval(
@@ -4088,17 +4133,97 @@ def _render_ravenpack_baseline_eval_results(
                 hide_index=True,
             )
 
-    st.divider()
-    st.markdown("### Label distribution shift")
-    st.caption(
-        "How label prevalence differs between the **PhraseBank training domain** and "
-        "the **RavenPack out-of-domain** dataset. "
-        "A large shift here explains any drop in out-of-domain accuracy."
-    )
+
+def _load_provenance(model_dir: Path) -> dict | None:
+    """Load `provenance.json` written next to `metrics.json` in model_dir, if present."""
+    path = model_dir / "provenance.json"
+    if not path.exists():
+        return None
     try:
-        _label_distribution_shift_charts(eval_result, rp_labeled)
-    except Exception as exc:
-        st.warning(f"Could not render distribution charts: {exc}")
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _render_model_provenance_section(model_dir: Path) -> None:
+    """Show the reproducibility snapshot for the checkpoint just evaluated.
+
+    Mirrors the *Model provenance & reproducibility snapshot* section of
+    `notebooks/finetune_on_ravenpack.ipynb`: revision hash, weights checksum,
+    config info, tokenizer settings, and data provenance.
+    """
+    st.markdown("### Model provenance & reproducibility snapshot")
+    st.caption(
+        "Metadata captured at fine-tune time so this exact checkpoint can be reproduced "
+        "or audited later — git revision, weight checksums, model/tokenizer config, and "
+        "training data provenance. Mirrors `notebooks/finetune_on_ravenpack.ipynb`."
+    )
+
+    provenance = _load_provenance(model_dir)
+    if provenance is None:
+        st.info(
+            f"No `provenance.json` found in `{model_dir.relative_to(PROJECT_ROOT)}`. "
+            "Run the provenance cells at the end of `notebooks/finetune_on_ravenpack.ipynb` "
+            "to generate one for this checkpoint."
+        )
+        return
+
+    ckpt = provenance.get("checkpoint", {})
+    st.caption(
+        f"Generated **{provenance.get('generated_at', '—')}** for checkpoint "
+        f"**{ckpt.get('label', '—')}** (`{ckpt.get('path', '—')}`)."
+    )
+
+    st.markdown("**1. Revision hash**")
+    git = provenance.get("git", {})
+    g1, g2, g3 = st.columns(3)
+    g1.metric("Commit", git.get("commit_hash_short", "—"))
+    g2.metric("Branch", git.get("branch", "—"))
+    g3.metric("Dirty tree at run time", "Yes" if git.get("is_dirty") else "No")
+    if git.get("dirty_files"):
+        with st.expander("Uncommitted files at run time", expanded=False):
+            st.code("\n".join(git["dirty_files"]))
+
+    st.markdown("**2. Weights snapshot**")
+    weights = provenance.get("weights", [])
+    if weights:
+        st.dataframe(pd.DataFrame(weights), hide_index=True, use_container_width=True)
+    else:
+        st.caption("No weight files recorded.")
+
+    st.markdown("**3. Config info**")
+    cfg = provenance.get("model_config", {})
+    c1, c2, c3 = st.columns(3)
+    c1.metric("num_labels", cfg.get("num_labels", "—"))
+    c2.metric("Model type", cfg.get("model_type", "—"))
+    c3.metric("Architecture", ", ".join(cfg.get("architectures") or []) or "—")
+    st.caption(f"`id2label`: {cfg.get('id2label', {})}")
+
+    st.markdown("**4. Tokenizer settings**")
+    tok = provenance.get("tokenizer", {})
+    t1, t2, t3 = st.columns(3)
+    t1.metric("max_length (train time)", tok.get("max_length_used", "—"))
+    t2.metric("Padding strategy", tok.get("padding_strategy", "—"))
+    t3.metric("Truncation", "Yes" if tok.get("truncation") else "No")
+
+    st.markdown("**5. Data provenance**")
+    data = provenance.get("data", {})
+    st.caption(
+        f"Dataset: `{data.get('dataset_repo', '—')}` ({data.get('dataset_config', '—')}) — "
+        f"{data.get('split_type', '—')}. Training seed **{data.get('training_seed', '—')}**."
+    )
+    split_sizes = data.get("split_sizes", {})
+    split_hashes = data.get("split_content_sha256", {})
+    if split_sizes:
+        split_rows = [
+            {
+                "split": name,
+                "rows": rows,
+                "content_sha256": split_hashes.get(name, "—"),
+            }
+            for name, rows in split_sizes.items()
+        ]
+        st.dataframe(pd.DataFrame(split_rows), hide_index=True, use_container_width=True)
 
 
 def render_ravenpack_baseline_eval_tab() -> None:
@@ -4175,6 +4300,43 @@ def render_ravenpack_baseline_eval_tab() -> None:
     except Exception as exc:
         st.error(f"Could not load RavenPack data for {eval_ticker}: {exc}")
         return
+
+    # ── Always-visible sections (don't require running an evaluation) ─────────
+    _rp_split_state = st.session_state.get("rp_baseline_tab_eval_split", "test")
+    _rp_max_rows_state = int(st.session_state.get("rp_baseline_tab_eval_max_rows", 0))
+    _has_cached_eval = st.session_state.get("rp_baseline_tab_eval_key") == (
+        eval_ticker,
+        _rp_split_state,
+        _rp_max_rows_state,
+    )
+    _eval_result_for_chart = None
+    if _has_cached_eval:
+        try:
+            _ckpt_token = str((model_dir / "config.json").stat().st_mtime)
+            _eval_result_for_chart = _cached_ravenpack_baseline_eval(
+                eval_ticker,
+                _rp_split_state,
+                _rp_max_rows_state or None,
+                _ckpt_token,
+            )
+        except Exception:
+            _eval_result_for_chart = None
+
+    st.divider()
+    st.markdown("### Label distribution shift")
+    st.caption(
+        "How label prevalence differs between the **PhraseBank training domain** and "
+        "the **RavenPack out-of-domain** dataset. "
+        "A large shift here explains any drop in out-of-domain accuracy. "
+        "Run an evaluation below to also overlay the model's **predicted** distribution."
+    )
+    try:
+        _label_distribution_shift_charts(rp_labeled, _eval_result_for_chart)
+    except Exception as exc:
+        st.warning(f"Could not render distribution charts: {exc}")
+
+    st.divider()
+    _render_model_provenance_section(model_dir)
 
     st.divider()
     st.markdown("### Run evaluation")
@@ -4326,6 +4488,7 @@ def render_sentiment_lab_tab() -> None:
         "dominant *neutral* class can't hide weak *negative*/*positive* performance); "
         "accuracy is secondary."
     )
+    _render_wandb_tracking_links(context="phrasebank")
 
     if not has_model:
         st.info(
@@ -4706,6 +4869,7 @@ def render_sentiment_lab_tab() -> None:
             "Out-of-domain baseline evaluation (PhraseBank on RavenPack labels) lives in the "
             "**RavenPack Baseline Eval** tab."
         )
+        _render_wandb_tracking_links(context="ravenpack")
 
         if has_ravenpack_model and rp_metrics:
             rp_test_f1 = rp_metrics.get("test", {}).get("eval_f1")

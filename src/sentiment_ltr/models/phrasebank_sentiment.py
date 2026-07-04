@@ -359,7 +359,14 @@ def train_baseline(
         greater_is_better=True,
         save_total_limit=1,
         logging_steps=50,
-        report_to="none",
+        report_to="wandb",
+        run_name=(
+            "phrasebank-distilbert"
+            f"-epochs{num_train_epochs}"
+            f"-lr{learning_rate:g}"
+            f"-batch{per_device_train_batch_size}"
+            f"-seed{seed}"
+        ),
         seed=seed,
     )
 
