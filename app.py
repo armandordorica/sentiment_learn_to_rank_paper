@@ -2942,6 +2942,94 @@ def _ravenpack_confusion_pct_heatmap(cm_pct: pd.DataFrame, *, title: str):
     return fig
 
 
+def _label_distribution_shift_charts(
+    eval_result: dict[str, object],
+    rp_labeled: pd.DataFrame,
+) -> None:
+    """Render the two label-distribution charts mirroring the notebook cell."""
+    import plotly.graph_objects as go
+
+    _CLASS_ORDER = _ravenpack_sentiment.LABEL_NAMES
+    eval_split = eval_result.get("eval_split") or "all"
+
+    # ── PhraseBank per-split ──────────────────────────────────────────────────
+    try:
+        pb_dist = _cached_phrasebank_per_split_dist()
+    except Exception:
+        st.warning("Could not load PhraseBank split data for distribution comparison.")
+        return
+
+    pb_total = (
+        pb_dist.groupby("label", as_index=False)[["count"]].sum()
+        .assign(pct=lambda d: d["count"] / d["count"].sum() * 100)
+    )
+    pb_total_idx = pb_total.set_index("label").reindex(_CLASS_ORDER)
+
+    # ── RavenPack actual (full labeled frame) ─────────────────────────────────
+    rp_actual_vc = rp_labeled["label_name"].value_counts().reindex(_CLASS_ORDER, fill_value=0)
+    rp_actual = pd.DataFrame({
+        "label": _CLASS_ORDER,
+        "count": rp_actual_vc.values.tolist(),
+    }).assign(pct=lambda d: d["count"] / d["count"].sum() * 100).set_index("label").reindex(_CLASS_ORDER)
+
+    # ── RavenPack predicted (eval split — from confusion matrix column sums) ──
+    cm: pd.DataFrame = eval_result["confusion_counts"]
+    pred_counts = cm.sum(axis=0).reindex(_CLASS_ORDER, fill_value=0)
+    pred_total = pred_counts.sum()
+    rp_pred = pd.DataFrame({
+        "label": _CLASS_ORDER,
+        "count": pred_counts.values.tolist(),
+    }).assign(pct=lambda d: d["count"] / pred_total * 100).set_index("label").reindex(_CLASS_ORDER)
+
+    # ── Chart 1: three-way comparison ─────────────────────────────────────────
+    fig1 = go.Figure()
+    traces = [
+        ("PhraseBank (all splits)", pb_total_idx),
+        ("RavenPack actual (all splits)", rp_actual),
+        (f"RavenPack predicted ({eval_split})", rp_pred),
+    ]
+    for name, df in traces:
+        fig1.add_trace(go.Bar(
+            name=name,
+            x=_CLASS_ORDER,
+            y=df["pct"].tolist(),
+            text=[f"{p:.1f}%<br>n={n:,}" for p, n in zip(df["pct"], df["count"])],
+            textposition="outside",
+        ))
+    fig1.update_layout(
+        barmode="group",
+        title="Label distribution shift: PhraseBank (train) → RavenPack (out-of-domain)",
+        xaxis_title="Sentiment class",
+        yaxis=dict(title="% of dataset", range=[0, 105]),
+        legend=dict(orientation="v", yanchor="middle", y=0.5, xanchor="left", x=1.02),
+        height=500,
+        margin=dict(t=60, r=280),
+    )
+    st.plotly_chart(fig1, use_container_width=True)
+
+    # ── Chart 2: PhraseBank per-split breakdown ───────────────────────────────
+    fig2 = go.Figure()
+    for split_name in ["train", "validation", "test"]:
+        sdf = pb_dist[pb_dist["split"] == split_name].set_index("label").reindex(_CLASS_ORDER)
+        if sdf.empty:
+            continue
+        fig2.add_trace(go.Bar(
+            name=f"PhraseBank {split_name}",
+            x=_CLASS_ORDER,
+            y=sdf["pct"].tolist(),
+            text=[f"{p:.1f}%<br>n={n:,}" for p, n in zip(sdf["pct"], sdf["count"])],
+            textposition="outside",
+        ))
+    fig2.update_layout(
+        barmode="group",
+        title="PhraseBank label distribution by split",
+        xaxis_title="Sentiment class",
+        yaxis=dict(title="% of split", range=[0, 105]),
+        height=430,
+    )
+    st.plotly_chart(fig2, use_container_width=True)
+
+
 @st.cache_resource(show_spinner=False)
 def _cached_sentiment_classifier(model_dir: str):
     """Load the fine-tuned PhraseBank classifier once per Streamlit session."""
@@ -2956,6 +3044,27 @@ def _cached_phrasebank_summary():
     balance = dataset_class_balance(raw)
     splits = {name: int(raw[name].num_rows) for name in raw}
     return balance, splits
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_phrasebank_per_split_dist() -> pd.DataFrame:
+    """Per-split label distribution for PhraseBank (train / validation / test)."""
+    raw = load_phrasebank()
+    _CLASS_ORDER = _ravenpack_sentiment.LABEL_NAMES
+    # Derive id→label from the dataset's ClassLabel feature
+    label_feature = raw["train"].features["label"]
+    id2label = {i: label_feature.int2str(i) for i in range(label_feature.num_classes)}
+    rows = []
+    for split_name in ["train", "validation", "test"]:
+        if split_name not in raw:
+            continue
+        series = pd.Series(raw[split_name]["label"]).map(id2label)
+        total = len(series)
+        counts = series.value_counts()
+        for cls in _CLASS_ORDER:
+            n = int(counts.get(cls, 0))
+            rows.append({"split": split_name, "label": cls, "count": n, "pct": 100 * n / total})
+    return pd.DataFrame(rows)
 
 
 def _clean_news_text(value: object) -> str:
@@ -3904,8 +4013,9 @@ def _render_ravenpack_baseline_eval_results(
     eval_split: str,
     max_rows: int,
     metrics: dict[str, object],
+    rp_labeled: pd.DataFrame,
 ) -> None:
-    """Display metrics, confusion matrices, and mismatch samples for one eval run."""
+    """Display metrics, confusion matrices, mismatch samples, and distribution charts."""
     ckpt_token = str((resolve_model_dir() / "config.json").stat().st_mtime)
     max_rows_arg = max_rows or None
     eval_result = _cached_ravenpack_baseline_eval(
@@ -3977,6 +4087,18 @@ def _render_ravenpack_baseline_eval_results(
                 use_container_width=True,
                 hide_index=True,
             )
+
+    st.divider()
+    st.markdown("### Label distribution shift")
+    st.caption(
+        "How label prevalence differs between the **PhraseBank training domain** and "
+        "the **RavenPack out-of-domain** dataset. "
+        "A large shift here explains any drop in out-of-domain accuracy."
+    )
+    try:
+        _label_distribution_shift_charts(eval_result, rp_labeled)
+    except Exception as exc:
+        st.warning(f"Could not render distribution charts: {exc}")
 
 
 def render_ravenpack_baseline_eval_tab() -> None:
@@ -4105,6 +4227,7 @@ def render_ravenpack_baseline_eval_tab() -> None:
                     eval_split=rp_eval_split,
                     max_rows=int(rp_eval_max_rows),
                     metrics=metrics,
+                    rp_labeled=rp_labeled,
                 )
             except Exception as exc:
                 st.error(f"Baseline evaluation failed: {exc}")
