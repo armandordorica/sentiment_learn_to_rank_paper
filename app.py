@@ -79,6 +79,7 @@ from sentiment_ltr.models import ravenpack_sentiment as _ravenpack_sentiment
 _ravenpack_sentiment = importlib.reload(_ravenpack_sentiment)
 DEFAULT_RAVENPACK_MODEL_DIR = _ravenpack_sentiment.DEFAULT_RAVENPACK_MODEL_DIR
 DEFAULT_RAVENPACK_TRAIN_EPOCHS = _ravenpack_sentiment.DEFAULT_RAVENPACK_TRAIN_EPOCHS
+RAVENPACK_LABEL_NAMES = _ravenpack_sentiment.LABEL_NAMES
 discover_ravenpack_article_files = _ravenpack_sentiment.discover_ravenpack_article_files
 load_ravenpack_labeled_frame = _ravenpack_sentiment.load_ravenpack_labeled_frame
 load_ravenpack_metrics = _ravenpack_sentiment.load_ravenpack_metrics
@@ -2925,6 +2926,276 @@ def _cached_ravenpack_baseline_eval(
     )
 
 
+def _class_metrics_from_confusion(
+    cm: pd.DataFrame,
+    *,
+    dataset: str,
+    split: str,
+    domain: str,
+) -> list[dict[str, object]]:
+    """Per-class precision/recall/F1 derived from a confusion matrix."""
+    rows: list[dict[str, object]] = []
+    labels = [label for label in RAVENPACK_LABEL_NAMES if label in cm.index and label in cm.columns]
+    for label in labels:
+        tp = float(cm.loc[label, label])
+        pred_total = float(cm[label].sum())
+        actual_total = float(cm.loc[label].sum())
+        precision = tp / pred_total if pred_total else 0.0
+        recall = tp / actual_total if actual_total else 0.0
+        f1 = (
+            2 * precision * recall / (precision + recall)
+            if precision + recall
+            else 0.0
+        )
+        rows.append({
+            "dataset": dataset,
+            "split": split,
+            "domain": domain,
+            "evaluation": f"{dataset} {split}",
+            "label": label,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+            "support": int(actual_total),
+        })
+    return rows
+
+
+@st.cache_data(ttl=3600, show_spinner="Scoring PhraseBank splits for class metrics…")
+def _cached_phrasebank_class_metrics(cache_token: str) -> pd.DataFrame:
+    """Class-level metrics for the saved PhraseBank checkpoint on all PhraseBank splits."""
+    del cache_token
+    raw = load_phrasebank()
+    _, id2label, _ = _phrasebank_sentiment.label_maps(raw)
+    tokenizer, model, device = load_classifier(resolve_model_dir())
+
+    rows: list[dict[str, object]] = []
+    for split_name in PHRASEBANK_SPLIT_ORDER:
+        split_df = raw[split_name].to_pandas()
+        sentences = split_df["sentence"].tolist()
+        pred_chunks: list[pd.DataFrame] = []
+        for start in range(0, len(sentences), 64):
+            pred_chunks.append(
+                predict_sentences(sentences[start : start + 64], tokenizer, model, device)
+            )
+        preds = pd.concat(pred_chunks, ignore_index=True)
+        y_true = split_df["label"].map(id2label)
+        y_pred = preds["pred"]
+        cm = pd.crosstab(
+            pd.Categorical(y_true, categories=RAVENPACK_LABEL_NAMES),
+            pd.Categorical(y_pred, categories=RAVENPACK_LABEL_NAMES),
+            rownames=["actual"],
+            colnames=["pred"],
+            dropna=False,
+        )
+        rows.extend(
+            _class_metrics_from_confusion(
+                cm,
+                dataset="PhraseBank",
+                split=split_name,
+                domain="in-domain",
+            )
+        )
+    return pd.DataFrame(rows)
+
+
+def _summary_metrics_from_class_metrics(class_metrics: pd.DataFrame) -> pd.DataFrame:
+    """Macro-F1 rows from class-level metrics; supports the static comparison chart."""
+    return (
+        class_metrics.groupby(["dataset", "split", "domain", "evaluation"], as_index=False)
+        .agg(macro_f1=("f1", "mean"), n_rows=("support", "sum"))
+        .sort_values(["domain", "dataset", "split"])
+    )
+
+
+def _class_level_f1_chart(class_metrics: pd.DataFrame):
+    frame = class_metrics.copy()
+    frame["f1_label"] = frame["f1"].map(lambda x: f"{x:.1%}")
+    fig = px.bar(
+        frame,
+        x="label",
+        y="f1",
+        color="evaluation",
+        barmode="group",
+        text="f1_label",
+        facet_col="domain",
+        hover_data={
+            "support": ":,",
+            "precision": ":.3f",
+            "recall": ":.3f",
+            "f1": ":.3f",
+        },
+        title="Class-level F1 by domain and split",
+    )
+    fig.update_traces(textposition="outside", cliponaxis=False)
+    fig.update_yaxes(title="Class F1", tickformat=".0%", range=[0, 1.08])
+    fig.update_xaxes(title="Sentiment class")
+    fig.update_layout(
+        height=500,
+        legend_title_text="Evaluation",
+        margin=dict(t=80, r=30, b=60, l=60),
+    )
+    fig.for_each_annotation(lambda a: a.update(text=a.text.replace("domain=", "")))
+    return fig
+
+
+def _precision_recall_chart(class_metrics: pd.DataFrame):
+    frame = class_metrics.melt(
+        id_vars=["dataset", "split", "domain", "evaluation", "label", "support"],
+        value_vars=["precision", "recall"],
+        var_name="metric",
+        value_name="score",
+    )
+    frame["metric"] = frame["metric"].str.title()
+    frame["score_label"] = frame["score"].map(lambda x: f"{x:.1%}")
+    fig = px.bar(
+        frame,
+        x="label",
+        y="score",
+        color="metric",
+        barmode="group",
+        text="score_label",
+        facet_row="domain",
+        facet_col="evaluation",
+        hover_data={"support": ":,", "score": ":.3f"},
+        title="Precision vs recall by class, domain, and split",
+        color_discrete_map={"Precision": "#7c3aed", "Recall": "#ea580c"},
+    )
+    fig.update_traces(textposition="outside", cliponaxis=False)
+    fig.update_yaxes(title="Score", tickformat=".0%", range=[0, 1.08])
+    fig.update_xaxes(title="Sentiment class")
+    fig.update_layout(
+        height=720,
+        legend_title_text="Metric",
+        margin=dict(t=90, r=30, b=60, l=60),
+    )
+    fig.for_each_annotation(
+        lambda a: a.update(
+            text=a.text.replace("domain=", "").replace("evaluation=", "")
+        )
+    )
+    return fig
+
+
+def _label_prevalence_from_confusion(cm: pd.DataFrame) -> pd.DataFrame:
+    """Observed vs predicted label prevalence for the evaluated RavenPack rows."""
+    labels = [label for label in RAVENPACK_LABEL_NAMES if label in cm.index and label in cm.columns]
+    observed_counts = cm.loc[labels, labels].sum(axis=1)
+    predicted_counts = cm.loc[labels, labels].sum(axis=0)
+    total = float(observed_counts.sum())
+
+    observed = pd.DataFrame({
+        "label": labels,
+        "count": observed_counts.to_numpy(dtype=int),
+        "series": "Observed / actual",
+    })
+    predicted = pd.DataFrame({
+        "label": labels,
+        "count": predicted_counts.to_numpy(dtype=int),
+        "series": "Predicted by checkpoint",
+    })
+    prevalence = pd.concat([observed, predicted], ignore_index=True)
+    prevalence["pct"] = prevalence["count"] / total if total else 0.0
+    prevalence["pct_label"] = prevalence.apply(
+        lambda r: f"{r['pct']:.1%}<br>n={int(r['count']):,}",
+        axis=1,
+    )
+    prevalence["label"] = pd.Categorical(
+        prevalence["label"],
+        categories=RAVENPACK_LABEL_NAMES,
+        ordered=True,
+    )
+    return prevalence
+
+
+def _label_prevalence_chart(prevalence: pd.DataFrame, *, split: str, n_rows: int):
+    fig = px.bar(
+        prevalence,
+        x="label",
+        y="pct",
+        color="series",
+        barmode="group",
+        text="pct_label",
+        category_orders={
+            "label": RAVENPACK_LABEL_NAMES,
+            "series": ["Observed / actual", "Predicted by checkpoint"],
+        },
+        hover_data={"count": ":,", "pct": ":.2%", "label": False},
+        title=f"RavenPack label prevalence: observed vs predicted ({split}, n={n_rows:,})",
+        color_discrete_map={
+            "Observed / actual": "#0f766e",
+            "Predicted by checkpoint": "#dc2626",
+        },
+    )
+    ymax = max(0.05, float(prevalence["pct"].max()) * 1.18)
+    fig.update_traces(textposition="outside", cliponaxis=False)
+    fig.update_yaxes(title="Share of out-of-domain rows", tickformat=".0%", range=[0, ymax])
+    fig.update_xaxes(title="Sentiment label")
+    fig.update_layout(
+        height=420,
+        legend_title_text="Distribution",
+        margin=dict(t=80, r=30, b=60, l=60),
+    )
+    return fig
+
+
+def _label_prevalence_gap_table(prevalence: pd.DataFrame):
+    gap = prevalence.pivot(index="label", columns="series", values="pct").reindex(RAVENPACK_LABEL_NAMES)
+    gap["prediction_minus_actual_pp"] = (
+        gap["Predicted by checkpoint"] - gap["Observed / actual"]
+    ) * 100
+    return gap[["prediction_minus_actual_pp"]]
+
+
+def _render_static_ravenpack_metric_dashboard(eval_result: dict[str, object]) -> None:
+    """Always-visible class-level metric comparison around the distribution charts."""
+    phrasebank_metrics = _cached_phrasebank_class_metrics(_phrasebank_model_cache_token())
+    ravenpack_metrics = pd.DataFrame(
+        _class_metrics_from_confusion(
+            eval_result["confusion_counts"],
+            dataset="RavenPack",
+            split=eval_result.get("eval_split") or "all",
+            domain="out-of-domain",
+        )
+    )
+    class_metrics = pd.concat([phrasebank_metrics, ravenpack_metrics], ignore_index=True)
+    summary = _summary_metrics_from_class_metrics(class_metrics)
+
+    st.markdown("### Class-level baseline metrics")
+    st.caption(
+        "Same checkpoint, compared across PhraseBank train/validation/test and the "
+        "selected RavenPack split. Precision and recall are the two components that "
+        "drive each class F1; macro-F1 averages class F1 equally."
+    )
+    st.dataframe(
+        summary.style.format({"macro_f1": "{:.1%}", "n_rows": "{:,}"}),
+        hide_index=True,
+        use_container_width=True,
+    )
+
+    prevalence = _label_prevalence_from_confusion(eval_result["confusion_counts"])
+    st.plotly_chart(
+        _label_prevalence_chart(
+            prevalence,
+            split=eval_result.get("eval_split") or "all",
+            n_rows=int(eval_result.get("n_rows", prevalence["count"].sum() / 2)),
+        ),
+        use_container_width=True,
+    )
+    with st.expander("Prediction prevalence gap", expanded=False):
+        st.caption("Positive values mean the checkpoint predicts that label more often than it appears in RavenPack.")
+        st.dataframe(
+            _label_prevalence_gap_table(prevalence).style.format("{:+.1f} pp"),
+            use_container_width=True,
+        )
+
+    left, right = st.columns(2)
+    with left:
+        st.plotly_chart(_class_level_f1_chart(class_metrics), use_container_width=True)
+    with right:
+        st.plotly_chart(_precision_recall_chart(class_metrics), use_container_width=True)
+
+
 def _ravenpack_confusion_pct_heatmap(cm_pct: pd.DataFrame, *, title: str):
     """Plotly heatmap for row-normalized confusion matrix (% of actual class)."""
     labels = list(cm_pct.index)
@@ -4301,39 +4572,39 @@ def render_ravenpack_baseline_eval_tab() -> None:
         st.error(f"Could not load RavenPack data for {eval_ticker}: {exc}")
         return
 
-    # ── Always-visible sections (don't require running an evaluation) ─────────
+    # ── Always-visible sections (don't require clicking Run evaluation) ───────
     _rp_split_state = st.session_state.get("rp_baseline_tab_eval_split", "test")
     _rp_max_rows_state = int(st.session_state.get("rp_baseline_tab_eval_max_rows", 0))
-    _has_cached_eval = st.session_state.get("rp_baseline_tab_eval_key") == (
-        eval_ticker,
-        _rp_split_state,
-        _rp_max_rows_state,
-    )
-    _eval_result_for_chart = None
-    if _has_cached_eval:
-        try:
-            _ckpt_token = str((model_dir / "config.json").stat().st_mtime)
-            _eval_result_for_chart = _cached_ravenpack_baseline_eval(
-                eval_ticker,
-                _rp_split_state,
-                _rp_max_rows_state or None,
-                _ckpt_token,
-            )
-        except Exception:
-            _eval_result_for_chart = None
+    _static_eval_result = None
+    try:
+        _ckpt_token = str((model_dir / "config.json").stat().st_mtime)
+        _static_eval_result = _cached_ravenpack_baseline_eval(
+            eval_ticker,
+            _rp_split_state,
+            _rp_max_rows_state or None,
+            _ckpt_token,
+        )
+    except Exception as exc:
+        st.warning(f"Could not compute static RavenPack baseline metrics: {exc}")
 
     st.divider()
     st.markdown("### Label distribution shift")
     st.caption(
         "How label prevalence differs between the **PhraseBank training domain** and "
         "the **RavenPack out-of-domain** dataset. "
-        "A large shift here explains any drop in out-of-domain accuracy. "
-        "Run an evaluation below to also overlay the model's **predicted** distribution."
+        "A large shift here explains any drop in out-of-domain accuracy. The predicted "
+        "distribution uses the selected split and row cap from the evaluation controls."
     )
     try:
-        _label_distribution_shift_charts(rp_labeled, _eval_result_for_chart)
+        _label_distribution_shift_charts(rp_labeled, _static_eval_result)
     except Exception as exc:
         st.warning(f"Could not render distribution charts: {exc}")
+
+    if _static_eval_result is not None:
+        try:
+            _render_static_ravenpack_metric_dashboard(_static_eval_result)
+        except Exception as exc:
+            st.warning(f"Could not render class-level metric charts: {exc}")
 
     st.divider()
     _render_model_provenance_section(model_dir)
