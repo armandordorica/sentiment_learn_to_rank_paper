@@ -498,6 +498,151 @@ def phrasebank_probability_p50_frame(model_dir: Path | None = None) -> pd.DataFr
     )
 
 
+def phrasebank_data_provenance(raw, *, training_seed: int = 42) -> dict:
+    """Build a data-provenance record for the Financial PhraseBank checkpoint.
+
+    Intended to be passed to :func:`sentiment_ltr.provenance.build_checkpoint_provenance`
+    as the *data_info* argument.
+
+    Parameters
+    ----------
+    raw:
+        The ``DatasetDict`` returned by :func:`load_phrasebank`.
+    training_seed:
+        Seed passed to ``TrainingArguments`` during training (default 42).
+    """
+    from sentiment_ltr.provenance import build_data_provenance
+    from sentiment_ltr.utils import hash_text_label_pairs
+
+    return build_data_provenance(
+        dataset_repo=PRIMARY_DATASET,
+        dataset_config="sentences_50agree (via atrost/financial_phrasebank mirror)",
+        split_sizes={name: raw[name].num_rows for name in raw},
+        split_type="pre-defined splits shipped by source repo; no re-split seed",
+        training_seed=training_seed,
+        split_content_sha256={
+            name: hash_text_label_pairs(raw[name]["sentence"], raw[name]["label"])
+            for name in raw
+        },
+    )
+
+
+def phrasebank_tokenizer_settings_frame(
+    tokenizer,
+    model,
+    metrics: dict,
+) -> pd.DataFrame:
+    """Summary DataFrame of tokenizer and model settings for a loaded checkpoint.
+
+    Suitable for display in notebooks or a Streamlit table to document exactly
+    how the model was trained and how inference is run.
+    """
+    train_max_length = metrics.get("max_length", MAX_LENGTH)
+    base_model = metrics.get("model_name", MODEL_NAME)
+    return pd.DataFrame(
+        {
+            "setting": [
+                "base_model (HF hub id)",
+                "tokenizer_class",
+                "tokenizer_loaded_from",
+                "model_type",
+                "vocab_size",
+                "padding_side",
+                "tokenizer.model_max_length",
+                "train/infer max_length",
+                "training truncation",
+                "training padding",
+                "inference padding (predict_sentences)",
+            ],
+            "value": [
+                base_model,
+                type(tokenizer).__name__,
+                tokenizer.name_or_path,
+                model.config.model_type,
+                model.config.vocab_size,
+                tokenizer.padding_side,
+                tokenizer.model_max_length,
+                train_max_length,
+                True,
+                "max_length",
+                "longest in batch (padding=True)",
+            ],
+        }
+    )
+
+
+def phrasebank_sample_inference_frame(
+    tokenizer,
+    model,
+    device: str,
+    *,
+    n: int = 2,
+    seed: int = 42,
+) -> pd.DataFrame:
+    """Run inference on ``n`` random PhraseBank validation + test rows.
+
+    Returns a DataFrame with columns: split, sentence, label, pred, match, and
+    per-class probability columns. Useful for a quick sanity-check in notebooks
+    or a Streamlit diagnostic pane.
+    """
+    raw = load_phrasebank()
+    _, id2label, _ = label_maps(raw)
+
+    val = raw["validation"].shuffle(seed=seed).select(range(n))
+    test = raw["test"].shuffle(seed=seed).select(range(n))
+
+    samples = pd.concat(
+        [
+            pd.DataFrame(
+                {
+                    "split": "validation",
+                    "sentence": val["sentence"],
+                    "label": [id2label[int(i)] for i in val["label"]],
+                }
+            ),
+            pd.DataFrame(
+                {
+                    "split": "test",
+                    "sentence": test["sentence"],
+                    "label": [id2label[int(i)] for i in test["label"]],
+                }
+            ),
+        ],
+        ignore_index=True,
+    )
+
+    preds = predict_sentences(samples["sentence"].tolist(), tokenizer, model, device)
+    return (
+        samples.join(preds.drop(columns=["sentence"]))
+        .assign(match=lambda df: df["label"] == df["pred"])
+    )
+
+
+def phrasebank_tokenization_example_frame(
+    tokenizer,
+    sentence: str,
+    max_length: int = MAX_LENGTH,
+) -> pd.DataFrame:
+    """Token-level DataFrame for one sentence encoded with training-style settings.
+
+    Shows ``token``, ``input_id``, and ``attention_mask`` for every position —
+    handy for verifying that fixed-length padding / truncation is applied correctly.
+    """
+    enc = tokenizer(
+        sentence,
+        truncation=True,
+        padding="max_length",
+        max_length=max_length,
+    )
+    return pd.DataFrame(
+        {
+            "token": tokenizer.convert_ids_to_tokens(enc["input_ids"]),
+            "input_id": enc["input_ids"],
+            "attention_mask": enc["attention_mask"],
+        }
+    )
+
+
 def phrasebank_baseline_code_pointers() -> list[tuple[str, str]]:
     """GitHub links for each step of the PhraseBank baseline training pipeline."""
     src = _phrasebank_module_path()

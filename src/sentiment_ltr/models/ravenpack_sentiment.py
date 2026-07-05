@@ -230,6 +230,126 @@ def load_ravenpack_metrics(model_dir: Path | None = None) -> dict[str, Any] | No
         return None
 
 
+def validate_phrasebank_ravenpack_label_alignment(
+    *,
+    phrasebank_model_dir: Path | None = None,
+    verbose: bool = True,
+) -> dict[str, dict[int, str]]:
+    """Assert that PhraseBank checkpoint, dataset, and RavenPack labels all match.
+
+    Returns a dict with keys ``"checkpoint"``, ``"dataset"``, ``"ravenpack"`` each
+    mapping to an ``id2label`` dict.  Raises ``AssertionError`` on mismatch so
+    callers get a clear failure rather than silent mis-labelling.
+
+    Parameters
+    ----------
+    phrasebank_model_dir:
+        Path to the PhraseBank checkpoint directory. Defaults to the standard
+        ``phrasebank_distilbert_best`` location.
+    verbose:
+        When True, print all three label tables and confirm the assertion.
+    """
+    from transformers import AutoConfig
+
+    from sentiment_ltr.models.phrasebank_sentiment import (
+        label_maps,
+        load_phrasebank,
+        model_is_saved,
+    )
+
+    model_dir = Path(phrasebank_model_dir) if phrasebank_model_dir else DEFAULT_MODEL_DIR
+    if not model_is_saved(model_dir):
+        raise FileNotFoundError(
+            f"No PhraseBank checkpoint at {model_dir}. "
+            "Run notebooks/liquidAI_prep.ipynb first."
+        )
+
+    pb_config = AutoConfig.from_pretrained(str(model_dir))
+    checkpoint_id2label: dict[int, str] = {int(k): v for k, v in pb_config.id2label.items()}
+
+    raw = load_phrasebank()
+    _, dataset_id2label, _ = label_maps(raw)
+
+    if verbose:
+        import pandas as pd
+
+        print("PhraseBank checkpoint config (model.config)")
+        print(
+            pd.DataFrame(
+                {"id": list(checkpoint_id2label.keys()), "label": list(checkpoint_id2label.values())}
+            ).set_index("id").to_string()
+        )
+        print("\nPhraseBank HF dataset ClassLabel (should match checkpoint)")
+        print(
+            pd.DataFrame(
+                {"id": list(dataset_id2label.keys()), "label": list(dataset_id2label.values())}
+            ).set_index("id").to_string()
+        )
+        print("\nRavenPack fine-tune target labels (same 3-class schema)")
+        print(
+            pd.DataFrame(
+                {"id": list(ID2LABEL.keys()), "label": list(ID2LABEL.values())}
+            ).set_index("id").to_string()
+        )
+
+    assert checkpoint_id2label == dataset_id2label == ID2LABEL, (
+        "Label maps do not match!\n"
+        f"  checkpoint : {checkpoint_id2label}\n"
+        f"  dataset    : {dataset_id2label}\n"
+        f"  ravenpack  : {ID2LABEL}"
+    )
+
+    if verbose:
+        print("\n✓ All three id2label maps match — RavenPack labels align with PhraseBank head.")
+
+    return {
+        "checkpoint": checkpoint_id2label,
+        "dataset": dataset_id2label,
+        "ravenpack": ID2LABEL,
+    }
+
+
+def ravenpack_data_provenance(
+    labeled: pd.DataFrame,
+    ticker: str,
+    *,
+    training_seed: int = 42,
+) -> dict:
+    """Build a data-provenance record for the RavenPack fine-tuned checkpoint.
+
+    Intended to be passed to :func:`sentiment_ltr.provenance.build_checkpoint_provenance`
+    as the *data_info* argument.
+
+    Parameters
+    ----------
+    labeled:
+        The labeled DataFrame returned by :func:`load_ravenpack_labeled_frame`.
+        Must contain ``article_date``, ``headline``, and ``label_name`` columns.
+    ticker:
+        Ticker symbol(s) used to build *labeled* (used for the dataset_repo label).
+    training_seed:
+        Seed passed to ``TrainingArguments`` during training (default 42).
+    """
+    from sentiment_ltr.provenance import build_data_provenance
+    from sentiment_ltr.utils import hash_text_label_pairs
+
+    splits = labeled.copy()
+    splits["split"] = assign_time_split(splits["article_date"])
+    split_sizes = splits["split"].value_counts().to_dict()
+    split_hashes = {
+        split_name: hash_text_label_pairs(sub["headline"], sub["label_name"])
+        for split_name, sub in splits.groupby("split")
+    }
+    return build_data_provenance(
+        dataset_repo=f"RavenPack via WRDS ({ticker})",
+        dataset_config=SPLIT_SOURCE,
+        split_sizes=split_sizes,
+        split_type="time-based (train<=2011, validation=2012, test>=2013); no random seed",
+        training_seed=training_seed,
+        split_content_sha256=split_hashes,
+    )
+
+
 def resolve_init_checkpoint(*, from_phrasebank: bool = True) -> str:
     """Prefer the PhraseBank checkpoint as the starting weights."""
     if from_phrasebank and model_is_saved(DEFAULT_MODEL_DIR):
