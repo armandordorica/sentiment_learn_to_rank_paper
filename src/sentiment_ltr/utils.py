@@ -8,6 +8,7 @@ introducing import cycles.
 from __future__ import annotations
 
 import hashlib
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, Iterable
@@ -81,3 +82,20 @@ def hash_text_label_pairs(texts: Iterable, labels: Iterable) -> str:
         h.update(str(label).encode("utf-8"))
         h.update(b"\x01")
     return h.hexdigest()
+
+
+def slugify(text: str) -> str:
+    """Return a lower-case alphanumeric slug from *text*.
+
+    Non-alphanumeric characters (including spaces and punctuation) are collapsed
+    into a single hyphen.  Leading and trailing hyphens are stripped.
+
+    Suitable for W&B run names, artifact names, file prefixes, or any context
+    that requires a URL/filename-safe identifier.
+
+    Example::
+
+        >>> slugify("RavenPack (out-of-box on RavenPack)")
+        'ravenpack-out-of-box-on-ravenpack'
+    """
+    return re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-")
