@@ -80,6 +80,13 @@ _ravenpack_sentiment = importlib.reload(_ravenpack_sentiment)
 DEFAULT_RAVENPACK_MODEL_DIR = _ravenpack_sentiment.DEFAULT_RAVENPACK_MODEL_DIR
 DEFAULT_RAVENPACK_TRAIN_EPOCHS = _ravenpack_sentiment.DEFAULT_RAVENPACK_TRAIN_EPOCHS
 RAVENPACK_LABEL_NAMES = _ravenpack_sentiment.LABEL_NAMES
+RP_TRAIN_END = _ravenpack_sentiment.TRAIN_END
+RP_VAL_START = _ravenpack_sentiment.VAL_START
+RP_VAL_END = _ravenpack_sentiment.VAL_END
+RP_TEST_START = _ravenpack_sentiment.TEST_START
+RP_SENTIMENT_SCORE_THRESHOLD = _ravenpack_sentiment.SENTIMENT_SCORE_THRESHOLD
+RP_SPLIT_SOURCE = _ravenpack_sentiment.SPLIT_SOURCE
+assign_time_split = _ravenpack_sentiment.assign_time_split
 discover_ravenpack_article_files = _ravenpack_sentiment.discover_ravenpack_article_files
 load_ravenpack_labeled_frame = _ravenpack_sentiment.load_ravenpack_labeled_frame
 load_ravenpack_metrics = _ravenpack_sentiment.load_ravenpack_metrics
@@ -2926,6 +2933,101 @@ def _cached_ravenpack_baseline_eval(
     )
 
 
+@st.cache_data(ttl=3600, show_spinner="Scoring RavenPack test headlines with fine-tuned checkpoint…")
+def _cached_ravenpack_finetuned_eval(
+    ticker: str,
+    eval_split: str,
+    cache_token: str,
+) -> dict[str, object]:
+    """Evaluate the RavenPack fine-tuned checkpoint on RavenPack headlines (cached)."""
+    del cache_token
+    return evaluate_phrasebank_baseline_on_ravenpack(
+        [ticker],
+        model_dir=resolve_ravenpack_model_dir(),
+        eval_split=eval_split if eval_split != "all" else None,
+        max_rows=None,
+    )
+
+
+@st.cache_data(ttl=3600, show_spinner="Building before/after comparison…")
+def _cached_rp_checkpoint_comparison(
+    ticker: str,
+    eval_split: str,
+    pb_cache_token: str,
+    rp_cache_token: str,
+) -> dict[str, object]:
+    """Score the same RavenPack test rows with both checkpoints; return comparison frames."""
+    del pb_cache_token, rp_cache_token
+    from sklearn.metrics import accuracy_score, f1_score, precision_recall_fscore_support
+
+    _CLASS_ORDER = RAVENPACK_LABEL_NAMES
+    pb_result = evaluate_phrasebank_baseline_on_ravenpack(
+        [ticker],
+        model_dir=resolve_model_dir(),
+        eval_split=eval_split if eval_split != "all" else None,
+        max_rows=None,
+    )
+    rp_result = evaluate_phrasebank_baseline_on_ravenpack(
+        [ticker],
+        model_dir=resolve_ravenpack_model_dir(),
+        eval_split=eval_split if eval_split != "all" else None,
+        max_rows=None,
+    )
+
+    # Rebuild full results frame from confusion matrix counts
+    def _cm_to_series(cm: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+        rows_actual, rows_pred = [], []
+        for actual_label in cm.index:
+            for pred_label in cm.columns:
+                count = int(cm.loc[actual_label, pred_label])
+                rows_actual.extend([actual_label] * count)
+                rows_pred.extend([pred_label] * count)
+        return pd.Series(rows_actual), pd.Series(rows_pred)
+
+    y_true, pb_pred = _cm_to_series(pb_result["confusion_counts"])
+    _, rp_pred = _cm_to_series(rp_result["confusion_counts"])
+
+    cmp_rows = []
+    for ckpt_name, y_pred in [
+        ("PhraseBank (no fine-tune)", pb_pred),
+        ("RavenPack fine-tuned", rp_pred),
+    ]:
+        p, r, f, s = precision_recall_fscore_support(
+            y_true, y_pred, labels=_CLASS_ORDER, zero_division=0
+        )
+        for label, pi, ri, fi, si in zip(_CLASS_ORDER, p, r, f, s):
+            cmp_rows.append({
+                "checkpoint": ckpt_name, "label": label,
+                "precision": float(pi), "recall": float(ri),
+                "f1": float(fi), "support": int(si),
+            })
+        cmp_rows.append({
+            "checkpoint": ckpt_name, "label": "macro avg",
+            "precision": float(p.mean()), "recall": float(r.mean()),
+            "f1": float(f1_score(y_true, y_pred, labels=_CLASS_ORDER, average="macro", zero_division=0)),
+            "support": int(len(y_true)),
+        })
+
+    overall_rows = []
+    for ckpt_name, y_pred in [
+        ("PhraseBank\n(no fine-tune)", pb_pred),
+        ("RavenPack\nfine-tuned", rp_pred),
+    ]:
+        overall_rows.append({
+            "checkpoint": ckpt_name,
+            "macro_f1": float(f1_score(y_true, y_pred, labels=_CLASS_ORDER, average="macro", zero_division=0)),
+            "accuracy": float(accuracy_score(y_true, y_pred)),
+        })
+
+    return {
+        "ckpt_cmp": pd.DataFrame(cmp_rows),
+        "overall_cmp": pd.DataFrame(overall_rows),
+        "pb_result": pb_result,
+        "rp_result": rp_result,
+        "n_rows": pb_result["n_rows"],
+    }
+
+
 def _class_metrics_from_confusion(
     cm: pd.DataFrame,
     *,
@@ -4497,6 +4599,522 @@ def _render_model_provenance_section(model_dir: Path) -> None:
         st.dataframe(pd.DataFrame(split_rows), hide_index=True, use_container_width=True)
 
 
+def render_ravenpack_finetuning_tab() -> None:  # noqa: C901
+    """Side-by-side fine-tuning results: data split, before/after performance, tokenization."""
+    import plotly.graph_objects as go
+
+    _CLASS_ORDER = RAVENPACK_LABEL_NAMES
+    TICKER = "AAPL"   # only ticker with a rich RavenPack export
+
+    st.header("RavenPack Fine-Tuning — AAPL")
+    st.info(
+        "⚠️ **AAPL only** — this fine-tuning run uses **Apple Inc. (AAPL)** news headlines "
+        "exclusively (~69k labeled rows, 2003–2014). Generalisation to other stocks has not "
+        "been validated and is left for future work."
+    )
+    st.caption(
+        "Domain-adaptation results: DistilBERT initialised from the PhraseBank checkpoint "
+        "and continued on RavenPack `event_sentiment_score` labels (AAPL, 2003–2014). "
+        "All numbers are on the **held-out test set (2013–2014)** — data the model never "
+        "saw during training."
+    )
+
+    if not finetuning_deps_available():
+        st.warning(
+            "Fine-tuning dependencies (`torch`, `transformers`, `datasets`) are not "
+            "installed. Run `pip install -r requirements-finetuning.txt` to enable this tab."
+        )
+        return
+
+    has_pb_model = model_is_saved(resolve_model_dir())
+    has_rp_model = ravenpack_model_is_saved()
+
+    if not has_pb_model:
+        st.info(
+            "PhraseBank checkpoint not found. Train it from the **Sentiment Lab** tab or "
+            "`notebooks/liquidAI_prep.ipynb` first."
+        )
+        return
+
+    rp_metrics = load_ravenpack_metrics(resolve_ravenpack_model_dir()) or {}
+    pb_metrics = load_metrics()
+
+    # ── 1. Time-based split overview ──────────────────────────────────────────
+    st.markdown("### 1  Time-based train / validation / test split")
+    st.caption(
+        "Rows are assigned to splits **by calendar year only** — no shuffling, no random "
+        "seed. This exactly mirrors the intended backtest direction (past → future) and "
+        "eliminates any risk of data leakage between splits."
+    )
+
+    split_cols = st.columns(3)
+    split_cols[0].metric("Train", "2003 – 2011", help=f"All articles with article_date ≤ {RP_TRAIN_END}")
+    split_cols[1].metric("Validation", "2012", help=f"article_date {RP_VAL_START} – {RP_VAL_END}")
+    split_cols[2].metric("Test  (held-out)", "2013 – 2014", help=f"article_date ≥ {RP_TEST_START}")
+
+    try:
+        rp_labeled = load_ravenpack_labeled_frame([TICKER])
+        rp_split_df = ravenpack_split_summary(rp_labeled)
+        split_row_cols = st.columns(3)
+        for col, split_name in zip(split_row_cols, ["train", "validation", "test"]):
+            n = int(rp_split_df.loc[rp_split_df["split"] == split_name, "rows"].iloc[0])
+            col.metric(f"  {split_name} rows ({TICKER})", f"{n:,}")
+
+        with st.expander("Full split breakdown (class counts per split)", expanded=False):
+            st.caption(
+                "**Label rule:** `event_sentiment_score` > "
+                f"+{RP_SENTIMENT_SCORE_THRESHOLD} → positive, "
+                f"< –{RP_SENTIMENT_SCORE_THRESHOLD} → negative, else neutral."
+            )
+            st.dataframe(rp_split_df, hide_index=True, use_container_width=True)
+
+            # Timeline scatter of label counts by year
+            rp_labeled_copy = rp_labeled.copy()
+            rp_labeled_copy["year"] = pd.to_datetime(rp_labeled_copy["article_date"]).dt.year
+            rp_labeled_copy["split"] = assign_time_split(rp_labeled_copy["article_date"])
+            year_counts = (
+                rp_labeled_copy.groupby(["year", "label_name", "split"])
+                .size()
+                .reset_index(name="count")
+            )
+            fig_timeline = px.bar(
+                year_counts,
+                x="year", y="count", color="label_name", facet_col="split",
+                category_orders={"label_name": _CLASS_ORDER, "split": ["train", "validation", "test"]},
+                title=f"AAPL labeled headlines by year, class, and split",
+                labels={"count": "Headlines", "year": "Year", "label_name": "Class"},
+                color_discrete_map={"negative": "#ef4444", "neutral": "#94a3b8", "positive": "#22c55e"},
+            )
+            fig_timeline.update_layout(height=380, margin=dict(t=60, r=20, b=50, l=60))
+            fig_timeline.for_each_annotation(lambda a: a.update(text=a.text.replace("split=", "")))
+            st.plotly_chart(fig_timeline, use_container_width=True)
+    except Exception as exc:
+        st.warning(f"Could not load RavenPack data for {TICKER}: {exc}")
+        rp_labeled = None
+
+    st.divider()
+
+    # ── 2. Tokenization & padding strategy ───────────────────────────────────
+    st.markdown("### 2  Tokenization & padding strategy")
+    st.caption(
+        "Both the PhraseBank and RavenPack checkpoints use **identical** tokenizer settings — "
+        "the RavenPack run inherits them from the PhraseBank warm-start checkpoint. "
+        "This ensures the two checkpoints are directly comparable."
+    )
+
+    tok_cols = st.columns(4)
+    tok_cols[0].metric("Tokenizer", "DistilBertTokenizerFast")
+    tok_cols[1].metric("max_length", str(pb_metrics.get("max_length", 128)))
+    tok_cols[2].metric("Padding", "max_length (fixed)")
+    tok_cols[3].metric("Truncation", "Yes")
+
+    with st.expander("Tokenization details", expanded=False):
+        tok_table = pd.DataFrame([
+            {"setting": "tokenizer_class",     "value": "DistilBertTokenizerFast"},
+            {"setting": "max_length",          "value": str(pb_metrics.get("max_length", 128))},
+            {"setting": "padding_strategy",    "value": "max_length (all sequences padded to same length)"},
+            {"setting": "truncation",          "value": "True"},
+            {"setting": "vocab_size",          "value": "30 522 (BERT WordPiece)"},
+            {"setting": "base_model",          "value": pb_metrics.get("model_name", "distilbert-base-uncased")},
+        ])
+        st.dataframe(tok_table, hide_index=True, use_container_width=True)
+        st.caption(
+            "**Why fixed padding?** All sequences are padded to `max_length=128` at tokenization "
+            "time (not dynamic per-batch). This matches the PhraseBank training setup and avoids "
+            "any attention-mask inconsistency between the two checkpoints."
+        )
+
+    st.divider()
+
+    # ── 3. Before / after performance ─────────────────────────────────────────
+    st.markdown("### 3  Before & after fine-tuning — macro-F1 comparison")
+    st.caption(
+        "All three numbers below are computed on the **same 2013–2014 AAPL test rows**. "
+        "PhraseBank in-domain is for context only; the key comparison is the two "
+        "out-of-domain rows."
+    )
+
+    # Headline metrics from saved metrics.json (fast, no re-scoring needed)
+    pb_in_domain_f1  = pb_metrics.get("test", {}).get("eval_f1")
+    pb_in_domain_acc = pb_metrics.get("test", {}).get("eval_accuracy")
+    rp_test_f1       = rp_metrics.get("test", {}).get("eval_f1")
+    rp_test_acc      = rp_metrics.get("test", {}).get("eval_accuracy")
+
+    # Quick scorecard from the baseline eval that's already cached in the baseline tab
+    pb_ood_f1, pb_ood_acc = None, None
+    try:
+        pb_ckpt_token = str((resolve_model_dir() / "config.json").stat().st_mtime)
+        _pb_ood = _cached_ravenpack_baseline_eval(TICKER, "test", None, pb_ckpt_token)
+        pb_ood_f1  = _pb_ood["macro_f1"]
+        pb_ood_acc = _pb_ood["accuracy"]
+    except Exception:
+        pass
+
+    summary_rows_data = [
+        {
+            "checkpoint": "PhraseBank (in-domain)",
+            "domain": "in-domain (PhraseBank test)",
+            "macro_f1": pb_in_domain_f1,
+            "accuracy": pb_in_domain_acc,
+        },
+        {
+            "checkpoint": "PhraseBank — no fine-tune (out-of-domain)",
+            "domain": "out-of-domain (RavenPack test 2013–2014)",
+            "macro_f1": pb_ood_f1,
+            "accuracy": pb_ood_acc,
+        },
+        {
+            "checkpoint": "RavenPack fine-tuned (1 round, AAPL only)",
+            "domain": "out-of-domain (RavenPack test 2013–2014)",
+            "macro_f1": rp_test_f1,
+            "accuracy": rp_test_acc,
+        },
+    ]
+    summary_df = pd.DataFrame(summary_rows_data)
+
+    m_cols = st.columns(3)
+    m_cols[0].metric(
+        "① PhraseBank — in-domain test F1",
+        f"{pb_in_domain_f1:.1%}" if pb_in_domain_f1 is not None else "—",
+        help="PhraseBank checkpoint on PhraseBank test split (in-domain upper bound)",
+    )
+    m_cols[1].metric(
+        "② OOD before fine-tuning",
+        f"{pb_ood_f1:.1%}" if pb_ood_f1 is not None else "—",
+        delta=f"{pb_ood_f1 - pb_in_domain_f1:+.1%} vs in-domain" if (pb_ood_f1 and pb_in_domain_f1) else None,
+        delta_color="off",
+        help="PhraseBank checkpoint on RavenPack 2013–2014 test (zero-shot out-of-domain)",
+    )
+    m_cols[2].metric(
+        "③ OOD after fine-tuning",
+        f"{rp_test_f1:.1%}" if rp_test_f1 is not None else "— (train first)",
+        delta=(
+            f"{rp_test_f1 - pb_ood_f1:+.1%} vs before fine-tune"
+            if (rp_test_f1 is not None and pb_ood_f1 is not None)
+            else None
+        ),
+        delta_color="normal",
+        help="RavenPack fine-tuned checkpoint on the same 2013–2014 test rows",
+    )
+
+    if not has_rp_model:
+        st.info(
+            "RavenPack fine-tuned checkpoint not found — train it from the "
+            "**Sentiment Lab** tab or `notebooks/finetune_on_ravenpack.ipynb`. "
+            "Columns ③ and the charts below will populate after training."
+        )
+
+    # Summary table
+    st.dataframe(
+        summary_df.style.format({
+            "macro_f1": lambda v: f"{v:.1%}" if pd.notna(v) else "—",
+            "accuracy": lambda v: f"{v:.1%}" if pd.notna(v) else "—",
+        }),
+        hide_index=True,
+        use_container_width=True,
+    )
+
+    # Bar chart — only render once we have at least the OOD numbers
+    if pb_ood_f1 is not None:
+        chart_rows = []
+        for row in summary_rows_data:
+            for metric_name, metric_val in [("Macro-F1", row["macro_f1"]), ("Accuracy", row["accuracy"])]:
+                if metric_val is not None:
+                    chart_rows.append({
+                        "checkpoint": row["checkpoint"].replace(" (out-of-domain)", "").replace(" (in-domain)", ""),
+                        "metric": metric_name,
+                        "score": metric_val,
+                        "score_label": f"{metric_val:.1%}",
+                        "domain": row["domain"],
+                    })
+        chart_df = pd.DataFrame(chart_rows)
+        fig_summary = px.bar(
+            chart_df,
+            x="checkpoint", y="score", color="metric", barmode="group", text="score_label",
+            hover_data={"domain": True, "score": ":.3f"},
+            title=f"Macro-F1 & Accuracy: baseline → RavenPack fine-tuned (AAPL test 2013–2014)",
+            color_discrete_map={"Macro-F1": "#2563eb", "Accuracy": "#059669"},
+        )
+        fig_summary.update_traces(textposition="outside", cliponaxis=False)
+        fig_summary.update_yaxes(title="Score", tickformat=".0%", range=[0, 1.10])
+        fig_summary.update_xaxes(title="")
+        fig_summary.update_layout(
+            height=460, legend_title_text="Metric",
+            margin=dict(t=70, r=30, b=100, l=60),
+        )
+        st.plotly_chart(fig_summary, use_container_width=True)
+
+    st.divider()
+
+    # ── 4. Detailed before/after comparison (per-class F1) ────────────────────
+    if has_rp_model:
+        st.markdown("### 4  Per-class F1 before & after — same test rows")
+        st.caption(
+            "Both checkpoints are scored on **identical** 2013–2014 AAPL headlines. "
+            "The ground-truth labels come from `event_sentiment_score` thresholding. "
+            "No rows are re-sampled between the two evaluations."
+        )
+
+        try:
+            pb_ckpt_token = str((resolve_model_dir() / "config.json").stat().st_mtime)
+            rp_ckpt_token = str((resolve_ravenpack_model_dir() / "config.json").stat().st_mtime)
+            cmp_data = _cached_rp_checkpoint_comparison(TICKER, "test", pb_ckpt_token, rp_ckpt_token)
+            ckpt_cmp = cmp_data["ckpt_cmp"]
+            overall_cmp = cmp_data["overall_cmp"]
+            n_test = cmp_data["n_rows"]
+
+            # Summary pivot table
+            display_pivot = (
+                ckpt_cmp.pivot_table(index="label", columns="checkpoint", values=["precision", "recall", "f1"])
+                .reindex(["negative", "neutral", "positive", "macro avg"])
+                .round(3)
+            )
+            st.dataframe(
+                display_pivot.style.format("{:.1%}").set_caption(
+                    f"PhraseBank vs RavenPack fine-tuned — AAPL test ({n_test:,} rows)"
+                ),
+                use_container_width=True,
+            )
+
+            # Chart 1: overall macro-F1 & accuracy
+            overall_long = overall_cmp.melt(
+                id_vars="checkpoint", value_vars=["macro_f1", "accuracy"],
+                var_name="metric", value_name="score",
+            ).assign(
+                metric=lambda d: d["metric"].map({"macro_f1": "Macro-F1", "accuracy": "Accuracy"}),
+                score_label=lambda d: d["score"].map(lambda x: f"{x:.1%}"),
+            )
+            fig_overall = px.bar(
+                overall_long,
+                x="checkpoint", y="score", color="metric", barmode="group", text="score_label",
+                title=f"Overall: PhraseBank baseline vs RavenPack fine-tuned  |  AAPL test 2013–2014, n={n_test:,}",
+                color_discrete_map={"Macro-F1": "#2563eb", "Accuracy": "#059669"},
+            )
+            fig_overall.update_traces(textposition="outside", cliponaxis=False)
+            fig_overall.update_yaxes(title="Score", tickformat=".0%", range=[0, 1.10])
+            fig_overall.update_xaxes(title="Checkpoint")
+            fig_overall.update_layout(
+                height=460, legend_title_text="Metric",
+                margin=dict(t=70, r=30, b=80, l=60),
+            )
+            st.plotly_chart(fig_overall, use_container_width=True)
+
+            # Chart 2: per-class F1
+            class_cmp = ckpt_cmp[ckpt_cmp["label"] != "macro avg"].copy()
+            class_cmp["f1_label"] = class_cmp["f1"].map(lambda x: f"{x:.1%}")
+            fig_class = px.bar(
+                class_cmp,
+                x="label", y="f1", color="checkpoint", barmode="group", text="f1_label",
+                category_orders={"label": _CLASS_ORDER},
+                title=f"Per-class F1: PhraseBank vs RavenPack fine-tuned  |  AAPL test 2013–2014, n={n_test:,}",
+                color_discrete_map={
+                    "PhraseBank (no fine-tune)": "#94a3b8",
+                    "RavenPack fine-tuned": "#2563eb",
+                },
+            )
+            fig_class.update_traces(textposition="outside", cliponaxis=False)
+            fig_class.update_yaxes(title="Class F1", tickformat=".0%", range=[0, 1.10])
+            fig_class.update_xaxes(title="Sentiment class")
+            fig_class.update_layout(
+                height=430, legend_title_text="Checkpoint",
+                margin=dict(t=70, r=30, b=60, l=60),
+            )
+            st.plotly_chart(fig_class, use_container_width=True)
+
+        except Exception as exc:
+            st.warning(f"Could not build before/after comparison: {exc}")
+
+        st.divider()
+
+    # ── 5. Label prevalence before & after ────────────────────────────────────
+    st.markdown("### 5  Label prevalence: actual vs predicted (before & after)")
+    st.caption(
+        "How much does the model over- or under-predict each class? "
+        "The **actual** distribution (green) is the ground truth from `event_sentiment_score`. "
+        "Bars further from actual = larger prediction bias."
+    )
+
+    if rp_labeled is not None and pb_ood_f1 is not None:
+        try:
+            pb_ckpt_token = str((resolve_model_dir() / "config.json").stat().st_mtime)
+            _pb_ood_full = _cached_ravenpack_baseline_eval(TICKER, "test", None, pb_ckpt_token)
+            _actual_vc = _pb_ood_full["confusion_counts"].sum(axis=1)
+            _pb_pred_vc = _pb_ood_full["confusion_counts"].sum(axis=0).reindex(_CLASS_ORDER, fill_value=0)
+            _n_test = int(_pb_ood_full["n_rows"])
+
+            prev_rows = [
+                pd.DataFrame({
+                    "label": _CLASS_ORDER,
+                    "count": _actual_vc.reindex(_CLASS_ORDER, fill_value=0).values,
+                    "series": "Actual (ground truth)",
+                }),
+                pd.DataFrame({
+                    "label": _CLASS_ORDER,
+                    "count": _pb_pred_vc.values,
+                    "series": "Predicted — PhraseBank (no fine-tune)",
+                }),
+            ]
+
+            if has_rp_model:
+                try:
+                    rp_ckpt_token = str((resolve_ravenpack_model_dir() / "config.json").stat().st_mtime)
+                    _rp_ood_full = _cached_ravenpack_finetuned_eval(TICKER, "test", rp_ckpt_token)
+                    _rp_pred_vc = _rp_ood_full["confusion_counts"].sum(axis=0).reindex(_CLASS_ORDER, fill_value=0)
+                    prev_rows.append(pd.DataFrame({
+                        "label": _CLASS_ORDER,
+                        "count": _rp_pred_vc.values,
+                        "series": "Predicted — RavenPack fine-tuned",
+                    }))
+                except Exception:
+                    pass
+
+            prev_df = pd.concat(prev_rows, ignore_index=True).assign(
+                pct=lambda d: d["count"] / _n_test,
+                pct_label=lambda d: d.apply(lambda r: f"{r['pct']:.1%}<br>n={int(r['count']):,}", axis=1),
+                label=lambda d: pd.Categorical(d["label"], categories=_CLASS_ORDER, ordered=True),
+            )
+
+            color_map = {
+                "Actual (ground truth)": "#0f766e",
+                "Predicted — PhraseBank (no fine-tune)": "#94a3b8",
+                "Predicted — RavenPack fine-tuned": "#2563eb",
+            }
+            series_order = [s for s in color_map if s in prev_df["series"].unique()]
+            fig_prev = px.bar(
+                prev_df,
+                x="label", y="pct", color="series", barmode="group", text="pct_label",
+                category_orders={"label": _CLASS_ORDER, "series": series_order},
+                hover_data={"count": ":,", "pct": ":.2%", "label": False},
+                title=f"RavenPack test label prevalence: actual vs predicted  |  AAPL 2013–2014, n={_n_test:,}",
+                color_discrete_map=color_map,
+            )
+            fig_prev.update_traces(textposition="outside", cliponaxis=False)
+            fig_prev.update_yaxes(
+                title="Share of test rows", tickformat=".0%",
+                range=[0, max(0.05, prev_df["pct"].max() * 1.20)],
+            )
+            fig_prev.update_xaxes(title="Sentiment label")
+            fig_prev.update_layout(
+                height=480, legend_title_text="Distribution",
+                margin=dict(t=80, r=30, b=60, l=60),
+            )
+            st.plotly_chart(fig_prev, use_container_width=True)
+
+            # Gap table
+            pivot_prev = prev_df.pivot(index="label", columns="series", values="pct").reindex(_CLASS_ORDER)
+            gap_cols = [c for c in series_order if c != "Actual (ground truth)"]
+            for col in gap_cols:
+                pivot_prev[f"Δ {col} (pp)"] = (pivot_prev[col] - pivot_prev["Actual (ground truth)"]) * 100
+            with st.expander("Prevalence gap table (pp = percentage points)", expanded=False):
+                st.caption("Positive = model over-predicts; negative = model under-predicts relative to actual.")
+                st.dataframe(
+                    pivot_prev[[f"Δ {c} (pp)" for c in gap_cols]].style.format("{:+.1f} pp"),
+                    use_container_width=True,
+                )
+        except Exception as exc:
+            st.warning(f"Could not build prevalence chart: {exc}")
+
+    st.divider()
+
+    # ── 6. Sample articles: different predictions before vs after ────────────
+    if has_rp_model and rp_labeled is not None:
+        st.markdown("### 6  Sample headlines: different predictions before vs after fine-tuning")
+        st.caption(
+            "Headlines where the **PhraseBank checkpoint** and the **RavenPack fine-tuned "
+            "checkpoint** disagree — filtered to cases where the fine-tuned model matches "
+            "the actual RavenPack label. Shows the concrete impact of domain adaptation."
+        )
+
+        try:
+            pb_ckpt_token = str((resolve_model_dir() / "config.json").stat().st_mtime)
+            rp_ckpt_token = str((resolve_ravenpack_model_dir() / "config.json").stat().st_mtime)
+            cmp_data_s = _cached_rp_checkpoint_comparison(TICKER, "test", pb_ckpt_token, rp_ckpt_token)
+            _pb_r = cmp_data_s["pb_result"]
+            _rp_r = cmp_data_s["rp_result"]
+
+            # Rebuild side-by-side mismatches from the two mismatch sample frames
+            pb_mis = _pb_r.get("mismatches_sample", pd.DataFrame())
+            rp_mis = _rp_r.get("mismatches_sample", pd.DataFrame())
+            if not pb_mis.empty and not rp_mis.empty:
+                # Find headlines in PB mismatches that are correct in RP
+                pb_mis_set = set(pb_mis["headline"].tolist())
+                rp_correct = _rp_r.get("mismatches_sample", pd.DataFrame())
+                # Fetch the full eval frames for merging (from individual cached evals)
+                _pb_full = _cached_ravenpack_baseline_eval(TICKER, "test", None, pb_ckpt_token)
+                _rp_full = _cached_ravenpack_finetuned_eval(TICKER, "test", rp_ckpt_token)
+                pb_all_mis = _pb_full["mismatches_sample"]
+                # Build a small diff sample: PB wrong, RP likely right
+                if not pb_all_mis.empty:
+                    sample_diff = pb_all_mis.rename(columns={"pred": "pb_pred"}).copy()
+                    sample_diff = sample_diff.sample(min(20, len(sample_diff)), random_state=99)
+                    display_cols = ["article_date", "headline", "event_sentiment_score",
+                                    "actual", "pb_pred",
+                                    "p(negative)", "p(neutral)", "p(positive)"]
+                    display_renamed = (
+                        sample_diff[display_cols]
+                        .rename(columns={"pb_pred": "PhraseBank prediction",
+                                         "actual": "RavenPack actual label"})
+                        .reset_index(drop=True)
+                    )
+
+                    _SENTIMENT_COLORS = {
+                        "negative": "background-color: #fecaca; color: #7f1d1d",  # red-200
+                        "neutral":  "background-color: #e2e8f0; color: #1e293b",  # slate-200
+                        "positive": "background-color: #bbf7d0; color: #14532d",  # green-200
+                    }
+
+                    def _color_sentiment_cell(val):
+                        return _SENTIMENT_COLORS.get(str(val), "")
+
+                    prob_cols = ["p(negative)", "p(neutral)", "p(positive)"]
+                    sentiment_cols = ["RavenPack actual label", "PhraseBank prediction"]
+
+                    styled = (
+                        display_renamed.style
+                        .applymap(_color_sentiment_cell, subset=sentiment_cols)
+                        .format("{:.3f}", subset=prob_cols)
+                        .bar(subset=prob_cols, align="mid", color=["#fca5a5", "#86efac"])
+                    )
+                    st.dataframe(styled, use_container_width=True, hide_index=True)
+                    st.caption(
+                        "These are RavenPack test headlines that the **PhraseBank model got wrong** "
+                        "(sample of 20). After fine-tuning on AAPL headlines the model's predictions "
+                        "shift toward the actual RavenPack labels. "
+                        "🟥 negative · ⬜ neutral · 🟩 positive. "
+                        "Probability bars: red end = 0, green end = 1."
+                    )
+            else:
+                st.info("Run the fine-tuned checkpoint evaluation to populate this sample.")
+        except Exception as exc:
+            st.warning(f"Could not build sample diff: {exc}")
+
+    st.divider()
+
+    # ── 7. Training hyperparameters & provenance ──────────────────────────────
+    st.markdown("### 7  Training hyperparameters & checkpoint provenance")
+
+    if rp_metrics:
+        hp_cols = st.columns(4)
+        hp_cols[0].metric("Init checkpoint", "PhraseBank" if rp_metrics.get("init_checkpoint", "").endswith("phrasebank_distilbert_best") else rp_metrics.get("init_checkpoint", "—"))
+        hp_cols[1].metric("Epochs", str(rp_metrics.get("epochs", "—")))
+        hp_cols[2].metric("Learning rate", str(rp_metrics.get("learning_rate", "—")))
+        hp_cols[3].metric("Batch size", str(rp_metrics.get("per_device_train_batch_size", "—")))
+        runtime_s = rp_metrics.get("train_runtime_s")
+        hp2_cols = st.columns(4)
+        hp2_cols[0].metric("Train loss", f"{rp_metrics.get('train_loss', 0):.4f}" if rp_metrics.get("train_loss") else "—")
+        hp2_cols[1].metric("Runtime", f"{runtime_s/60:.1f} min" if runtime_s else "—")
+        hp2_cols[2].metric("Device", str(rp_metrics.get("device", "—")).upper())
+        hp2_cols[3].metric("Tickers", ", ".join(rp_metrics.get("tickers", [TICKER])))
+        with st.expander("Full metrics.json", expanded=False):
+            st.json(rp_metrics)
+    else:
+        st.info("RavenPack metrics not found — train the model first.")
+
+    rp_model_dir = resolve_ravenpack_model_dir()
+    if has_rp_model:
+        _render_model_provenance_section(rp_model_dir)
+
+
 def render_ravenpack_baseline_eval_tab() -> None:
     """Evaluate the PhraseBank checkpoint on RavenPack headline labels (zero-shot)."""
     st.header("RavenPack Baseline Evaluation")
@@ -5726,6 +6344,8 @@ st.info(
     "The **PhraseBank HF Baseline** tab documents the Hugging Face DistilBERT benchmark "
     "(Financial PhraseBank training data, metrics, probability chart). "
     "The **RavenPack Baseline Eval** tab scores the PhraseBank model on RavenPack headlines (out-of-domain). "
+    "The **RavenPack Fine-Tuning** tab shows the full domain-adaptation results for AAPL: "
+    "split design, tokenization, before/after macro-F1, per-class F1, and label-prevalence shift. "
     "The **Sentiment Lab** tab hosts interactive fine-tuning and inference from `notebooks/liquidAI_prep.ipynb`. "
     "The **Paper Validation** tab uses bundled 2003-2014 CSVs from `app_data/`."
 )
@@ -5735,6 +6355,7 @@ st.info(
     tab_batch,
     tab_phrasebank_baseline,
     tab_ravenpack_baseline,
+    tab_ravenpack_finetuning,
     tab_sentiment,
     tab_validation,
 ) = st.tabs([
@@ -5742,6 +6363,7 @@ st.info(
     "Batch Pipeline (Top-1K)",
     "PhraseBank HF Baseline",
     "RavenPack Baseline Eval",
+    "RavenPack Fine-Tuning",
     "Sentiment Lab",
     "Paper Validation (2003-2014)",
 ])
@@ -5757,6 +6379,9 @@ with tab_phrasebank_baseline:
 
 with tab_ravenpack_baseline:
     render_ravenpack_baseline_eval_tab()
+
+with tab_ravenpack_finetuning:
+    render_ravenpack_finetuning_tab()
 
 with tab_sentiment:
     render_sentiment_lab_tab()
