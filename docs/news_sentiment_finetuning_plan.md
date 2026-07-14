@@ -118,6 +118,60 @@
 before scaling to all ~500 universe tickers. The AAPL-only run is a proof-of-concept;
 a robust TRNA substitute needs to score *any* stock, not just Apple.
 
+---
+
+#### Training strategy: sequential (continual) vs. joint (pooled)
+
+> **Recommendation: use joint/pooled training — pass all tickers to a single
+> `train_ravenpack()` call.** Do not fine-tune stock-by-stock sequentially.
+
+This is the **continual learning vs. joint training** tradeoff and it is worth
+understanding explicitly before writing any code.
+
+**Option A — Sequential fine-tuning (stock by stock)**
+
+Fine-tune on AAPL → save → load → fine-tune on MSFT → save → load → fine-tune on JPM…
+
+Problems:
+- **Catastrophic forgetting** — each new fine-tune overwrites the weight updates from
+  the previous stock. By the time you reach JPM, the model has largely forgotten AAPL.
+  This is the defining failure mode of sequential fine-tuning and is well-documented in
+  the NLP continual-learning literature.
+- **Order dependence** — the last stock in the sequence dominates; performance on earlier
+  stocks collapses. Results are not reproducible if you change the order.
+- **No principled "state awareness"** — the only state that survives is whatever wasn't
+  overwritten, which varies unpredictably by learning rate and number of steps.
+- Mitigations (EWC, replay buffers, LoRA adapters per task) exist but add significant
+  complexity for no benefit here since all stocks share the same label space and task.
+
+**Option B — Joint / pooled training (all tickers at once) ✅ recommended**
+
+Pool all ticker data into one `DatasetDict`, shuffle across tickers within each split,
+train once.
+
+Why this is correct for this use case:
+- **Same task, same label space** — negative / neutral / positive means exactly the same
+  thing for AAPL as for JPM. There is no task conflict to manage.
+- **Shuffling acts as a natural regulariser** — the model sees a diverse mix of Apple
+  earnings headlines, JPMorgan credit headlines, and ExxonMobil oil-price headlines in
+  every batch. It cannot overfit to any single stock's vocabulary.
+- **The "prior knowledge" problem is already solved** — the warm start from PhraseBank is
+  the stable prior. Pooled multi-ticker data enriches the fine-tune distribution; it does
+  not replace the prior. You do not need to "remember" AAPL during MSFT training because
+  both are in the same training set.
+- **Simpler, reproducible, and already supported** — `train_ravenpack(tickers=[...])` 
+  pools and shuffles across all supplied tickers internally. No extra code needed.
+- **Scales cleanly** — adding more tickers just adds more rows to the pool. A 500-ticker
+  run is architecturally identical to a 5-ticker run.
+
+**When sequential / continual learning would be justified:**
+- Different *tasks* per stock (e.g., sentiment for AAPL vs. volatility for JPM)
+- Strict online/streaming constraint (new stock arrives daily, full re-train is too slow)
+- Dataset too large to fit in memory at once (not the case here: even 500 tickers ×
+  ~69k rows = ~35M rows is manageable with streaming)
+
+---
+
 #### Why this step matters
 - A model trained only on AAPL headlines may learn Apple-specific vocabulary (product
   launches, Tim Cook quotes, iPhone cycle language) that doesn't transfer.
@@ -158,32 +212,43 @@ for t in PILOT_TICKERS:
         print(t, "— no export found")
 ```
 
-**Step 2 — Train on pilot set (including AAPL)**
+**Step 2 — Joint training on pooled pilot set (including AAPL)**
+
+Pass all tickers at once. `train_ravenpack()` pools and time-splits each ticker
+independently before concatenating into one shuffled `DatasetDict`.
+
 ```python
 from sentiment_ltr.models.ravenpack_sentiment import train_ravenpack
+
 metrics = train_ravenpack(
-    tickers=["AAPL", "MSFT", "JPM", "XOM", "JNJ", "WMT"],
-    init_from_phrasebank=True,   # warm start
+    tickers=["AAPL", "MSFT", "JPM", "XOM", "JNJ", "WMT"],  # pooled — not sequential
+    init_from_phrasebank=True,   # PhraseBank warm start = the stable prior
     num_train_epochs=2,
     learning_rate=2e-5,
     per_device_train_batch_size=16,
     seed=42,
 )
 ```
-Checkpoint saved to `data/models/ravenpack_distilbert_best/` (same path — overwrites AAPL-only run).
+Checkpoint saved to `data/models/ravenpack_distilbert_best/` (overwrites AAPL-only run).
 
-**Step 3 — Per-ticker evaluation**
-After training, re-evaluate on each ticker's test split individually to confirm the
-checkpoint doesn't sacrifice single-ticker performance for average performance:
+**Step 3 — Per-ticker breakdown to check for negative transfer**
+
+After training, re-evaluate on each ticker's test split *individually* to confirm the
+pooled checkpoint doesn't sacrifice single-ticker performance:
+
 ```python
-from sentiment_ltr.models.ravenpack_sentiment import evaluate_phrasebank_baseline_on_ravenpack
-from sentiment_ltr.models.phrasebank_sentiment import resolve_model_dir
+from sentiment_ltr.models.ravenpack_sentiment import (
+    evaluate_phrasebank_baseline_on_ravenpack, DEFAULT_RAVENPACK_MODEL_DIR
+)
 for t in ["AAPL", "MSFT", "JPM", "XOM", "JNJ", "WMT"]:
     result = evaluate_phrasebank_baseline_on_ravenpack(
         [t], model_dir=DEFAULT_RAVENPACK_MODEL_DIR, eval_split="test"
     )
     print(f"{t:6s}  macro-F1={result['macro_f1']:.1%}  acc={result['accuracy']:.1%}")
 ```
+
+Red flag: any single ticker drops below 50% macro-F1 → investigate class imbalance or
+data quality for that ticker before proceeding to the full universe.
 
 **Step 4 — Full universe (gate on coverage)**
 Once the 5-ticker pilot validates:
@@ -195,6 +260,7 @@ Once the 5-ticker pilot validates:
 #### Success criteria
 - [ ] All 5 pilot tickers have test macro-F1 ≥ 60% (well above the 27.5% zero-shot baseline)
 - [ ] No single ticker's F1 collapses below 50% (would indicate negative transfer)
+- [ ] Pooled macro-F1 ≥ AAPL-only macro-F1 (more data should not hurt)
 - [ ] Checkpoint loads and scores an unseen ticker's headlines without error
 
 #### Data leakage check
