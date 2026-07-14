@@ -172,6 +172,38 @@ Why this is correct for this use case:
 
 ---
 
+> ⚠️ **Memory reality check (2026-07-14):** The `~35M rows` figure above assumed every
+> stock has AAPL-level coverage, which is almost certainly wrong — AAPL is the
+> highest-volume news ticker in the universe. We currently only have **1 parquet file
+> cached (AAPL, 311k raw / 69k labeled rows, 24.6 MB on disk)**.
+>
+> **Tokenized memory at AAPL density** (3 × int32[128] + int64 label = ~1.5 KB/row):
+>
+> | Tickers | Rows (AAPL density) | Tokenized RAM |
+> |---|---|---|
+> | 1 (AAPL alone) | 69k | ~106 MB ✅ |
+> | 5 pilot | ~344k | ~530 MB ✅ |
+> | 10 | ~687k | ~1.0 GB ✅ |
+> | 50 | ~3.4M | ~5.2 GB ⚠️ tight on 8 GB |
+> | 100 | ~6.9M | ~10.4 GB ❌ OOM on 8 GB MPS |
+> | 500 | ~34M | ~52 GB ❌ definitely OOM |
+>
+> **In practice** most stocks have far less coverage than AAPL (fewer analyst-followed,
+> less media attention), so real numbers are likely 5–20× lower. But we cannot assume
+> everything fits in memory past ~50 tickers on a MacBook with 8–16 GB unified memory.
+>
+> **Mitigation strategy for large-scale runs:**
+> - For the **5-ticker pilot**: load all into memory — safe (~530 MB tokenized)
+> - For **50+ tickers**: use HuggingFace `datasets` memory-mapped Arrow format
+>   (`Dataset.from_pandas(...).save_to_disk()` / `load_from_disk()`) — data lives on
+>   disk, batches are paged in during training; no OOM risk
+> - For **500 tickers**: streaming mode (`IterableDataset`) or batch the parquet
+>   loading per-ticker, write to a single Arrow dataset on disk, then train from disk
+> - `train_ravenpack()` currently loads everything into RAM — this needs a
+>   `use_disk_cache=True` code path before scaling beyond ~20 tickers on a laptop
+
+---
+
 #### Why this step matters
 - A model trained only on AAPL headlines may learn Apple-specific vocabulary (product
   launches, Tim Cook quotes, iPhone cycle language) that doesn't transfer.
