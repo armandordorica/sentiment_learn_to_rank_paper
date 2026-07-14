@@ -1,0 +1,41 @@
+{% if coverage is none %}
+  <p class="muted">Select at least one ticker to see dataset coverage.</p>
+{% elif coverage.error %}
+  <div class="alert alert-error">{{ coverage.error }}</div>
+{% else %}
+  <div class="metric-row">
+    <div class="metric"><span class="metric-label">Total labeled</span><span class="metric-value">{{ "{:,}".format(coverage.total_labeled) }}</span></div>
+    <div class="metric"><span class="metric-label">Train rows</span><span class="metric-value">{{ "{:,}".format(coverage.train_rows) }}</span></div>
+    <div class="metric"><span class="metric-label">Test rows</span><span class="metric-value">{{ "{:,}".format(coverage.test_rows) }}</span></div>
+  </div>
+
+  {% if coverage.per_ticker %}
+    <table class="data-table">
+      <thead>
+        <tr><th>Ticker</th><th>Labeled</th><th>Train</th><th>Val</th><th>Test</th></tr>
+      </thead>
+      <tbody>
+        {% for row in coverage.per_ticker %}
+          <tr>
+            <td>{{ row.ticker }}</td>
+            <td>{{ "{:,}".format(row.labeled) }}</td>
+            <td>{{ "{:,}".format(row.train) }}</td>
+            <td>{{ "{:,}".format(row.val) }}</td>
+            <td>{{ "{:,}".format(row.test) }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <table class="data-table">
+      <thead>
+        <tr><th>Split</th><th>Rows</th></tr>
+      </thead>
+      <tbody>
+        {% for row in coverage.splits_table %}
+          <tr><td>{{ row.split }}</td><td>{{ "{:,}".format(row.rows) }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+{% endif %}

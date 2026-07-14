@@ -15,6 +15,7 @@ from pathlib import Path
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 
 try:
@@ -88,6 +89,7 @@ RP_SENTIMENT_SCORE_THRESHOLD = _ravenpack_sentiment.SENTIMENT_SCORE_THRESHOLD
 RP_SPLIT_SOURCE = _ravenpack_sentiment.SPLIT_SOURCE
 assign_time_split = _ravenpack_sentiment.assign_time_split
 discover_ravenpack_article_files = _ravenpack_sentiment.discover_ravenpack_article_files
+_ticker_from_article_path = _ravenpack_sentiment._ticker_from_article_path
 load_ravenpack_labeled_frame = _ravenpack_sentiment.load_ravenpack_labeled_frame
 load_ravenpack_metrics = _ravenpack_sentiment.load_ravenpack_metrics
 ravenpack_class_balance = _ravenpack_sentiment.ravenpack_class_balance
@@ -1995,12 +1997,21 @@ def load_cached_dashboard_result(
 def render_multi_api_dashboard_tab() -> None:
     """Render a ticker/date dashboard that combines all available APIs into panes."""
     st.subheader("Unified Ticker Data Explorer")
+    _tab_toc([
+        ("de-1a", "1A  API status & ticker form"),
+        ("de-1b", "1B  Overview pane"),
+        ("de-1c", "1C  Prices pane"),
+        ("de-1d", "1D  News pane"),
+        ("de-1e", "1E  Sentiment pane"),
+        ("de-1f", "1F  Raw data pane"),
+    ])
     st.caption(
         "Enter one ticker and date range, then retrieve prices, Refinitiv news, and RavenPack sentiment "
         "from the configured sources. This replaces the separate Live API Test and RavenPack Sentiment "
         "workflows with one shared input form."
     )
 
+    _anchor("de-1a")
     status_cols = st.columns(4)
     status_cols[0].metric("Refinitiv", refinitiv_status_label(PROJECT_ROOT))
     status_cols[1].metric("WRDS/CRSP", "Ready" if wrds_credentials_available() else "Not configured")
@@ -2189,6 +2200,7 @@ def render_multi_api_dashboard_tab() -> None:
     ])
 
     with pane_overview:
+        _anchor("de-1b")
         # Debug: show provider row counts so we can diagnose empty charts.
         with st.expander("🔍 Provider debug", expanded=not bool(live_result["price_frames"])):
             for pname, pres in live_result["providers"].items():
@@ -2213,15 +2225,19 @@ def render_multi_api_dashboard_tab() -> None:
             )
 
     with pane_prices:
+        _anchor("de-1c")
         render_dashboard_price_pane(live_result, key_prefix="dashboard_prices")
 
     with pane_news:
+        _anchor("de-1d")
         render_dashboard_news_pane(live_result)
 
     with pane_sentiment:
+        _anchor("de-1e")
         render_dashboard_sentiment_pane(ravenpack_articles, ticker, str(ravenpack_error) if ravenpack_error else None)
 
     with pane_raw:
+        _anchor("de-1f")
         render_dashboard_raw_data_pane(live_result, ravenpack_articles)
 
 
@@ -2231,6 +2247,52 @@ st.set_page_config(
     page_title="Sentiment LTR Paper: Data Explorer",
     layout="wide",
 )
+
+# Streamlit's `st.markdown(..., unsafe_allow_html=True)` sanitizes out inline
+# event-handler attributes like `onclick` and strips <script> tags, so neither
+# plain `href="#id"` links nor inline onclick JS work reliably to scroll within
+# the app. `st.components.v1.html` renders in a real iframe where <script> tags
+# actually execute, so we inject ONE tiny global script (via an invisible 0-height
+# component) that listens for clicks on any `a[href^="#"]` in the parent document
+# and scrollIntoView()s the matching target. We inject it unconditionally on
+# every rerun (no session_state gating) so it's always present regardless of
+# which tab is active or how Streamlit re-renders the DOM.
+_SCROLL_DELEGATION_SCRIPT = """
+<script>
+(function() {
+  try {
+    var doc = window.parent.document;
+    if (!doc.__anchorScrollDelegationInstalled) {
+      doc.__anchorScrollDelegationInstalled = true;
+      doc.addEventListener("click", function(ev) {
+        var a = ev.target.closest ? ev.target.closest('a[href^="#"]') : null;
+        if (!a) { return; }
+        var id = a.getAttribute("href").slice(1);
+        if (!id) { return; }
+        var target = doc.getElementById(id);
+        if (target) {
+          ev.preventDefault();
+          target.scrollIntoView({behavior: "smooth", block: "start"});
+        }
+      }, true);
+    }
+  } catch (e) { /* no-op if sandboxed */ }
+})();
+</script>
+"""
+
+
+def _install_scroll_link_delegation() -> None:
+    """Inject the global click-delegation script.
+
+    Called unconditionally on every rerun (not gated by session_state) to
+    guarantee the listener is always attached to the current DOM, regardless
+    of which tab is active or how Streamlit re-renders components.
+    """
+    components.html(_SCROLL_DELEGATION_SCRIPT, height=0, width=0)
+
+
+_install_scroll_link_delegation()
 
 st.title("Sentiment LTR Data Explorer")
 st.caption(
@@ -2536,7 +2598,8 @@ def _exit_cell(permno: object, lookup: dict[int, dict]) -> str:
 
 def _render_cache_snapshot(manifests_df: pd.DataFrame, universe_size: int = 1_000) -> None:
     """At-a-glance view of everything cached on disk across the 1k universe."""
-    st.markdown("### 📦 Cached data snapshot")
+    st.markdown("### 2B  📦 Cached data snapshot")
+    _anchor("bp-2b")
 
     if manifests_df.empty:
         st.info(f"No tickers cached yet — 0 / {universe_size:,} in the universe.")
@@ -2630,7 +2693,8 @@ def _fail_reason_counts_for_provider(manifests_df: pd.DataFrame, pname: str) -> 
 
 def _render_fail_reasons_by_provider(manifests_df: pd.DataFrame) -> None:
     """Per-API tables and charts of failure reason counts across cached tickers."""
-    st.markdown("### Failure reasons by provider")
+    st.markdown("### 2C  Failure reasons by provider")
+    _anchor("bp-2c")
     st.caption(
         "Counts of non-ok tickers among cached manifests, grouped by machine-readable "
         "`fail_reason` code. Hover a bar for the human-readable label."
@@ -2681,7 +2745,8 @@ def _render_fail_reasons_by_provider(manifests_df: pd.DataFrame) -> None:
 
 def _render_delisting_section(manifests_df: pd.DataFrame) -> None:
     """CRSP delisting reasons for the full top-1k universe, with on-disk caching."""
-    st.markdown("### Delisting reasons (CRSP)")
+    st.markdown("### 2D  Delisting reasons (CRSP)")
+    _anchor("bp-2d")
     st.caption(
         "CRSP `crsp.msedelist` records *why* a stock left the market (`dlstcd`) and the "
         "return on exit (`dlret`). Cached for all **1,000** universe PERMNOs — only missing "
@@ -2802,6 +2867,7 @@ def _render_delisting_section(manifests_df: pd.DataFrame) -> None:
 
 def _render_cash_merger_section(manifests_df: pd.DataFrame) -> None:
     """Cash-merger exit returns (CRSP dlstcd 232/233) for the top-1k universe."""
+    _anchor("bp-2e")
     with st.expander("💵 Cash Merger Exits", expanded=False):
         st.caption(
             "For stocks that left the market via a **cash merger** (CRSP `dlstcd` 232/233), "
@@ -3263,7 +3329,8 @@ def _render_static_ravenpack_metric_dashboard(eval_result: dict[str, object]) ->
     class_metrics = pd.concat([phrasebank_metrics, ravenpack_metrics], ignore_index=True)
     summary = _summary_metrics_from_class_metrics(class_metrics)
 
-    st.markdown("### Class-level baseline metrics")
+    st.markdown("### 4C  Class-level baseline metrics")
+    _anchor("rp-be-4c")
     st.caption(
         "Same checkpoint, compared across PhraseBank train/validation/test and the "
         "selected RavenPack split. Precision and recall are the two components that "
@@ -4019,7 +4086,8 @@ def _fmt_count(value: object) -> str:
 
 def render_news_data_coverage_section() -> None:
     """Summarize which news/sentiment datasets are cached locally and what they contain."""
-    st.markdown("### Local news & sentiment data — coverage")
+    _anchor("sl-6a")
+    st.markdown("### 6A  Local news & sentiment data — coverage")
     st.caption(
         "Snapshot of datasets on **this machine** under `data/raw/`. "
         f"Paper replication window: **{DEFAULT_LOOKUP_START}** → **{DEFAULT_LOOKUP_END}** "
@@ -4178,7 +4246,8 @@ def _markdown_setting_table(rows: list[tuple[str, str]]) -> str:
 
 def _render_wandb_tracking_links(*, context: str = "phrasebank") -> None:
     """Link the Streamlit metrics view to the W&B experiment dashboard."""
-    st.markdown("### W&B experiment tracking")
+    _anchor("pb-3f")
+    st.markdown("### 3F  W&B experiment tracking")
     st.caption(
         f"Trainer runs and imported offline metrics sync to `{WANDB_PROJECT}`. "
         "Use W&B for run comparisons, metric history, configs, and uploaded metrics artifacts."
@@ -4210,6 +4279,13 @@ def _render_wandb_tracking_links(*, context: str = "phrasebank") -> None:
 def render_phrasebank_hf_baseline_tab() -> None:
     """Standalone overview of the Hugging Face PhraseBank baseline model."""
     st.header("PhraseBank HF Baseline")
+    _tab_toc([
+        ("pb-3a", "3A  Model & training"),
+        ("pb-3b", "3B  Reproduction recipe"),
+        ("pb-3c", "3C  Performance metrics"),
+        ("pb-3d", "3D  Dataset dashboard"),
+        ("pb-3f", "3F  W&B experiment tracking"),
+    ])
     st.caption(
         "Benchmark classifier: **`distilbert-base-uncased`** fine-tuned on Financial PhraseBank "
         "(Hugging Face). Documents the training dataset, evaluation metrics, and predicted class "
@@ -4229,7 +4305,8 @@ def render_phrasebank_hf_baseline_tab() -> None:
     has_model = model_is_saved(model_dir)
 
     # ── Training summary ────────────────────────────────────────────────────────
-    st.markdown("### Model & training")
+    _anchor("pb-3a")
+    st.markdown("### 3A  Model & training")
     epochs = metrics.get("epochs")
     t1, t2, t3, t4 = st.columns(4)
     t1.metric("Backbone", str(metrics.get("model_name", MODEL_NAME)).split("/")[-1])
@@ -4253,7 +4330,8 @@ def render_phrasebank_hf_baseline_tab() -> None:
 
     _render_wandb_tracking_links(context="phrasebank")
 
-    st.markdown("### Reproduction recipe")
+    _anchor("pb-3b")
+    st.markdown("### 3B  Reproduction recipe")
     st.caption(
         "Settings and **code pointers** for `phrasebank_sentiment.train_baseline()` — "
         "the canonical training implementation shared by this tab, Sentiment Lab, and "
@@ -4265,7 +4343,8 @@ def render_phrasebank_hf_baseline_tab() -> None:
         st.markdown(_markdown_setting_table(rows))
 
     # ── Performance metrics ─────────────────────────────────────────────────────
-    st.markdown("### Performance metrics")
+    _anchor("pb-3c")
+    st.markdown("### 3C  Performance metrics")
     val_f1 = metrics.get("validation", {}).get("eval_f1")
     test_f1 = metrics.get("test", {}).get("eval_f1")
     val_acc = metrics.get("validation", {}).get("eval_accuracy")
@@ -4295,7 +4374,8 @@ def render_phrasebank_hf_baseline_tab() -> None:
     st.divider()
 
     # ── Dataset dashboard ───────────────────────────────────────────────────────
-    st.markdown("### Dataset dashboard")
+    _anchor("pb-3d")
+    st.markdown("### 3D  Dataset dashboard")
     st.caption(
         f"Financial PhraseBank (`{PRIMARY_DATASET}`): gold-label composition, split sizes, "
         "and how the saved checkpoint scores every sentence in each split."
@@ -4599,6 +4679,57 @@ def _render_model_provenance_section(model_dir: Path) -> None:
         st.dataframe(pd.DataFrame(split_rows), hide_index=True, use_container_width=True)
 
 
+# ── Navigation helpers ────────────────────────────────────────────────────────
+
+def _anchor(anchor_id: str) -> None:
+    """Inject an invisible HTML anchor <div id="..."> so in-tab section links work.
+
+    `scroll-margin-top` keeps the heading from being hidden under any sticky
+    Streamlit header when scrollIntoView() lands on it.
+    """
+    st.markdown(
+        f'<div id="{anchor_id}" style="scroll-margin-top:4rem;"></div>',
+        unsafe_allow_html=True,
+    )
+
+
+# NOTE: the global anchor-scroll click-delegation script (`_SCROLL_DELEGATION_SCRIPT`
+# / `_install_scroll_link_delegation`) is defined near the top of this file, right
+# after `st.set_page_config`, and is invoked unconditionally on every rerun so it
+# is always present in the DOM regardless of which tab is active.
+
+
+def _scroll_link(anchor_id: str, label: str) -> str:
+    """Build a plain `<a href="#anchor_id">` link.
+
+    Actual smooth-scroll behaviour is handled by the single delegated click
+    listener installed by `_install_scroll_link_delegation()` (see top of file) —
+    inline `onclick` attributes don't survive Streamlit's HTML sanitizer, so
+    we can't attach behaviour directly to each link.
+    """
+    return (
+        f'<a href="#{anchor_id}" '
+        f'style="color:#e05252;text-decoration:none;">{label}</a>'
+    )
+
+
+def _tab_toc(sections: list[tuple[str, str]]) -> None:
+    """Render a collapsible mini-ToC at the top of a tab.
+
+    sections: list of (anchor_id, display_label) pairs.
+    Each entry renders as a clickable link that scrolls to the matching
+    <div id="anchor_id"> anchor injected by _anchor() before each section heading.
+    """
+    links = "".join(
+        f'<li>{_scroll_link(aid, label)}</li>' for aid, label in sections
+    )
+    html = (
+        f'<ul style="margin:0;padding-left:1.2em;line-height:1.8;">{links}</ul>'
+    )
+    with st.expander("📋 Jump to section", expanded=False):
+        st.markdown(html, unsafe_allow_html=True)
+
+
 def render_ravenpack_finetuning_tab() -> None:  # noqa: C901
     """Side-by-side fine-tuning results: data split, before/after performance, tokenization."""
     import plotly.graph_objects as go
@@ -4607,6 +4738,16 @@ def render_ravenpack_finetuning_tab() -> None:  # noqa: C901
     TICKER = "AAPL"   # only ticker with a rich RavenPack export
 
     st.header("RavenPack Fine-Tuning — AAPL")
+    _tab_toc([
+        ("rp-ft-51", "5·1  Train / val / test split"),
+        ("rp-ft-52", "5·2  Tokenization & padding"),
+        ("rp-ft-53", "5·3  Before & after — macro-F1"),
+        ("rp-ft-54", "5·4  Per-class F1 before & after"),
+        ("rp-ft-55", "5·5  Label prevalence"),
+        ("rp-ft-56", "5·6  Sample headlines"),
+        ("rp-ft-57", "5·7  Hyperparameters & provenance"),
+        ("rp-ft-58", "5·8  Train / re-train (1 / 5 / N tickers)"),
+    ])
     st.info(
         "⚠️ **AAPL only** — this fine-tuning run uses **Apple Inc. (AAPL)** news headlines "
         "exclusively (~69k labeled rows, 2003–2014). Generalisation to other stocks has not "
@@ -4640,7 +4781,8 @@ def render_ravenpack_finetuning_tab() -> None:  # noqa: C901
     pb_metrics = load_metrics()
 
     # ── 1. Time-based split overview ──────────────────────────────────────────
-    st.markdown("### 1  Time-based train / validation / test split")
+    _anchor("rp-ft-51")
+    st.markdown("### 5·1  Time-based train / validation / test split")
     st.caption(
         "Rows are assigned to splits **by calendar year only** — no shuffling, no random "
         "seed. This exactly mirrors the intended backtest direction (past → future) and "
@@ -4695,7 +4837,8 @@ def render_ravenpack_finetuning_tab() -> None:  # noqa: C901
     st.divider()
 
     # ── 2. Tokenization & padding strategy ───────────────────────────────────
-    st.markdown("### 2  Tokenization & padding strategy")
+    _anchor("rp-ft-52")
+    st.markdown("### 5·2  Tokenization & padding strategy")
     st.caption(
         "Both the PhraseBank and RavenPack checkpoints use **identical** tokenizer settings — "
         "the RavenPack run inherits them from the PhraseBank warm-start checkpoint. "
@@ -4727,7 +4870,8 @@ def render_ravenpack_finetuning_tab() -> None:  # noqa: C901
     st.divider()
 
     # ── 3. Before / after performance ─────────────────────────────────────────
-    st.markdown("### 3  Before & after fine-tuning — macro-F1 comparison")
+    _anchor("rp-ft-53")
+    st.markdown("### 5·3  Before & after fine-tuning — macro-F1 comparison")
     st.caption(
         "All three numbers below are computed on the **same 2013–2014 AAPL test rows**. "
         "PhraseBank in-domain is for context only; the key comparison is the two "
@@ -4848,7 +4992,8 @@ def render_ravenpack_finetuning_tab() -> None:  # noqa: C901
 
     # ── 4. Detailed before/after comparison (per-class F1) ────────────────────
     if has_rp_model:
-        st.markdown("### 4  Per-class F1 before & after — same test rows")
+        _anchor("rp-ft-54")
+        st.markdown("### 5·4  Per-class F1 before & after — same test rows")
         st.caption(
             "Both checkpoints are scored on **identical** 2013–2014 AAPL headlines. "
             "The ground-truth labels come from `event_sentiment_score` thresholding. "
@@ -4927,7 +5072,8 @@ def render_ravenpack_finetuning_tab() -> None:  # noqa: C901
         st.divider()
 
     # ── 5. Label prevalence before & after ────────────────────────────────────
-    st.markdown("### 5  Label prevalence: actual vs predicted (before & after)")
+    _anchor("rp-ft-55")
+    st.markdown("### 5·5  Label prevalence: actual vs predicted (before & after)")
     st.caption(
         "How much does the model over- or under-predict each class? "
         "The **actual** distribution (green) is the ground truth from `event_sentiment_score`. "
@@ -5018,7 +5164,8 @@ def render_ravenpack_finetuning_tab() -> None:  # noqa: C901
 
     # ── 6. Sample articles: different predictions before vs after ────────────
     if has_rp_model and rp_labeled is not None:
-        st.markdown("### 6  Sample headlines: different predictions before vs after fine-tuning")
+        _anchor("rp-ft-56")
+        st.markdown("### 5·6  Sample headlines: different predictions before vs after fine-tuning")
         st.caption(
             "Headlines where the **PhraseBank checkpoint** and the **RavenPack fine-tuned "
             "checkpoint** disagree — filtered to cases where the fine-tuned model matches "
@@ -5091,7 +5238,8 @@ def render_ravenpack_finetuning_tab() -> None:  # noqa: C901
     st.divider()
 
     # ── 7. Training hyperparameters & provenance ──────────────────────────────
-    st.markdown("### 7  Training hyperparameters & checkpoint provenance")
+    _anchor("rp-ft-57")
+    st.markdown("### 5·7  Training hyperparameters & checkpoint provenance")
 
     if rp_metrics:
         hp_cols = st.columns(4)
@@ -5114,10 +5262,133 @@ def render_ravenpack_finetuning_tab() -> None:  # noqa: C901
     if has_rp_model:
         _render_model_provenance_section(rp_model_dir)
 
+    # ── 5·8. Multi-ticker training ───────────────────────────────────────────────
+    st.divider()
+    _anchor("rp-ft-58")
+    st.markdown("### 5·8  Train / re-train the checkpoint")
+    st.caption(
+        "Select one ticker for a **5·8A single-stock baseline**, five tickers for a "
+        "**5·8B multi-stock pilot run**, or all available tickers for a **5·8C full pooled run** "
+        "(Iteration 4.1.5). All selected tickers are concatenated into one "
+        "shuffled dataset — **not** trained sequentially. More tickers = better generalisation, "
+        "same code path."
+    )
+
+    ft_export_paths = discover_ravenpack_article_files()
+    ft_tickers_available = sorted({_ticker_from_article_path(p) for p in ft_export_paths})
+
+    if not ft_tickers_available:
+        st.warning("No RavenPack exports found under `data/raw/news/ravenpack/` or `data/raw/data_explorer_top1k/by_ticker/`.")
+    else:
+        PILOT_DEFAULT = [t for t in ["AAPL", "MSFT", "JPM", "XOM", "JNJ", "WMT"] if t in ft_tickers_available]
+
+        ft_col_select, ft_col_count = st.columns([3, 1])
+        with ft_col_select:
+            ft_train_tickers = st.multiselect(
+                "Tickers to train on",
+                options=ft_tickers_available,
+                default=PILOT_DEFAULT,
+                key="rp_finetune_tab_tickers",
+                help=(
+                    "Single ticker → single-stock baseline. "
+                    "Multiple tickers → pooled joint training in one pass. "
+                    "578 tickers available from `data_explorer_top1k`."
+                ),
+            )
+        with ft_col_count:
+            if ft_train_tickers:
+                st.metric("Selected", len(ft_train_tickers))
+
+        if not ft_train_tickers:
+            st.warning("Select at least one ticker.")
+            ft_labeled = None
+        else:
+            ft_init_from_phrasebank = st.checkbox(
+                "Start from PhraseBank checkpoint (recommended)",
+                value=has_pb_model,
+                disabled=not has_pb_model,
+                key="rp_finetune_tab_init_phrasebank",
+                help="Warm-start from `phrasebank_distilbert_best/`. Unchecked = train from `distilbert-base-uncased`.",
+            )
+
+            # Coverage table
+            try:
+                ft_labeled = load_ravenpack_labeled_frame(ft_train_tickers)
+                ft_splits = ravenpack_split_summary(ft_labeled)
+                ft_c1, ft_c2, ft_c3 = st.columns(3)
+                ft_c1.metric("Total labeled", f"{len(ft_labeled):,}")
+                ft_c2.metric("Train rows", f"{int(ft_splits.loc[ft_splits['split'] == 'train', 'rows'].iloc[0]):,}")
+                ft_c3.metric("Test rows", f"{int(ft_splits.loc[ft_splits['split'] == 'test', 'rows'].iloc[0]):,}")
+
+                if len(ft_train_tickers) > 1:
+                    ticker_coverage = []
+                    for t in ft_train_tickers:
+                        t_frame = ft_labeled[ft_labeled["ticker"].str.upper() == t]
+                        t_split = assign_time_split(t_frame["article_date"])
+                        ticker_coverage.append({
+                            "ticker": t,
+                            "labeled": len(t_frame),
+                            "train": int((t_split == "train").sum()),
+                            "val": int((t_split == "validation").sum()),
+                            "test": int((t_split == "test").sum()),
+                        })
+                    st.dataframe(
+                        ticker_coverage,
+                        hide_index=True,
+                        use_container_width=True,
+                        column_config={
+                            "ticker": "Ticker",
+                            "labeled": st.column_config.NumberColumn("Labeled", format="%d"),
+                            "train": st.column_config.NumberColumn("Train", format="%d"),
+                            "val": st.column_config.NumberColumn("Val", format="%d"),
+                            "test": st.column_config.NumberColumn("Test", format="%d"),
+                        },
+                    )
+                else:
+                    st.dataframe(ft_splits, hide_index=True, use_container_width=True)
+            except Exception as exc:
+                st.error(f"Could not load training data: {exc}")
+                ft_labeled = None
+
+            _render_wandb_tracking_links(context="ravenpack")
+
+            ft_ticker_label = (
+                ft_train_tickers[0] if len(ft_train_tickers) == 1
+                else f"{len(ft_train_tickers)} tickers (pooled)"
+            )
+            if st.button(
+                f"▶ Fine-tune — {ft_ticker_label} ({DEFAULT_RAVENPACK_TRAIN_EPOCHS_UI} epochs)",
+                key="rp_finetune_tab_train_btn",
+                disabled=ft_labeled is None,
+                type="primary",
+            ):
+                with st.spinner(f"Fine-tuning on {ft_ticker_label}… this may take several minutes."):
+                    try:
+                        ft_new_metrics = train_ravenpack(
+                            tickers=ft_train_tickers,
+                            init_from_phrasebank=ft_init_from_phrasebank and has_pb_model,
+                            num_train_epochs=DEFAULT_RAVENPACK_TRAIN_EPOCHS_UI,
+                        )
+                        _cached_sentiment_classifier.clear()
+                        ft_f1 = ft_new_metrics["test"].get("eval_f1")
+                        ft_acc = ft_new_metrics["test"].get("eval_accuracy")
+                        st.success(
+                            f"Done — test macro-F1 **{ft_f1:.1%}**, accuracy **{ft_acc:.1%}**. "
+                            f"Checkpoint saved to `{DEFAULT_RAVENPACK_MODEL_DIR.relative_to(PROJECT_ROOT)}`."
+                        )
+                        st.rerun()
+                    except Exception as exc:
+                        st.error(f"Training failed: {exc}")
+
 
 def render_ravenpack_baseline_eval_tab() -> None:
     """Evaluate the PhraseBank checkpoint on RavenPack headline labels (zero-shot)."""
     st.header("RavenPack Baseline Evaluation")
+    _tab_toc([
+        ("rp-be-4c", "4C  Class-level metrics"),
+        ("rp-be-4d", "4D  Label distribution shift"),
+        ("rp-be-4e", "4E  Run evaluation"),
+    ])
     st.caption(
         "Score cached RavenPack headlines with the **PhraseBank-trained DistilBERT checkpoint** "
         "(no RavenPack fine-tuning). Actual labels come from RavenPack `event_sentiment_score` "
@@ -5147,14 +5418,13 @@ def render_ravenpack_baseline_eval_tab() -> None:
 
     rp_export_paths = discover_ravenpack_article_files()
     rp_tickers_available = sorted({
-        p.name.split("_articles_")[0].upper() for p in rp_export_paths
+        _ticker_from_article_path(p) for p in rp_export_paths
     })
 
     if not rp_tickers_available:
         st.warning(
-            "No RavenPack article exports found. Run `notebooks/fetch_news_articles.ipynb` "
-            "to build `{ticker}_articles_2003_2014.parquet` under "
-            f"`{NEWS_RAVENPACK_DIR.relative_to(PROJECT_ROOT)}/`."
+            "No RavenPack article exports found under `data/raw/news/ravenpack/` "
+            "or `data/raw/data_explorer_top1k/by_ticker/`."
         )
         return
 
@@ -5206,7 +5476,8 @@ def render_ravenpack_baseline_eval_tab() -> None:
         st.warning(f"Could not compute static RavenPack baseline metrics: {exc}")
 
     st.divider()
-    st.markdown("### Label distribution shift")
+    _anchor("rp-be-4d")
+    st.markdown("### 4D  Label distribution shift")
     st.caption(
         "How label prevalence differs between the **PhraseBank training domain** and "
         "the **RavenPack out-of-domain** dataset. "
@@ -5228,7 +5499,8 @@ def render_ravenpack_baseline_eval_tab() -> None:
     _render_model_provenance_section(model_dir)
 
     st.divider()
-    st.markdown("### Run evaluation")
+    _anchor("rp-be-4e")
+    st.markdown("### 4E  Run evaluation")
 
     ev1, ev2, ev3 = st.columns([2, 2, 2])
     with ev1:
@@ -5287,6 +5559,13 @@ def render_ravenpack_baseline_eval_tab() -> None:
 def render_sentiment_lab_tab() -> None:
     """Interactive view of notebooks/liquidAI_prep.ipynb — dataset, metrics, inference."""
     st.header("News Sentiment Lab")
+    _tab_toc([
+        ("sl-6a", "6A  News data coverage"),
+        ("sl-6b", "6B  Compute device"),
+        ("sl-6c", "6C  Dataset — Financial PhraseBank"),
+        ("sl-6d", "6D  RavenPack articles browser"),
+        ("sl-6e", "6E  Live inference — score a headline"),
+    ])
     st.caption(
         "Web version of `notebooks/liquidAI_prep.ipynb`: Financial PhraseBank + "
         "DistilBERT fine-tuning for 3-way finance sentiment (negative / neutral / positive). "
@@ -5307,7 +5586,8 @@ def render_sentiment_lab_tab() -> None:
         return
 
     # ── Compute device ────────────────────────────────────────────────────────
-    st.markdown("### Compute device")
+    _anchor("sl-6b")
+    st.markdown("### 6B  Compute device")
     try:
         dev = device_report()
         d1, d2, d3 = st.columns(3)
@@ -5469,7 +5749,8 @@ def render_sentiment_lab_tab() -> None:
     st.divider()
 
     # ── Dataset snapshot ──────────────────────────────────────────────────────
-    st.markdown("### Dataset — Financial PhraseBank")
+    _anchor("sl-6c")
+    st.markdown("### 6C  Dataset — Financial PhraseBank")
     st.caption(
         "Loaded from the script-free Parquet mirror `atrost/financial_phrasebank` "
         "(datasets v5 compatible). Train / validation / test splits are pre-defined."
@@ -5535,7 +5816,8 @@ def render_sentiment_lab_tab() -> None:
     st.divider()
 
     # ── RavenPack browser (TRNA substitute) ───────────────────────────────────
-    st.markdown("### RavenPack articles — text + sentiment (TRNA substitute)")
+    _anchor("sl-6d")
+    st.markdown("### 6D  RavenPack articles — text + sentiment (TRNA substitute)")
     st.caption(
         "RavenPack is our TRNA substitute for **sentiment scores**. Text is usually a **headline**; "
         "~22% of rows also have `event_text` — a **short AAPL-tagged snippet** (avg ~37 characters), "
@@ -5631,7 +5913,8 @@ def render_sentiment_lab_tab() -> None:
     st.divider()
 
     # ── Inference demo ────────────────────────────────────────────────────────
-    st.markdown("### Try it — score a headline")
+    _anchor("sl-6e")
+    st.markdown("### 6E  Try it — score a headline")
     default_examples = (
         "The company reported record quarterly profit and raised its dividend.\n"
         "Shares plunged after the firm warned of widening losses and layoffs.\n"
@@ -5656,145 +5939,6 @@ def render_sentiment_lab_tab() -> None:
                 st.dataframe(preds, use_container_width=True, hide_index=True)
             except Exception as exc:
                 st.error(f"Inference failed: {exc}")
-
-    st.divider()
-
-    # ── RavenPack fine-tune (TRNA substitute labels) ──────────────────────────
-    st.markdown("### Fine-tune on RavenPack headlines")
-    st.caption(
-        "Continue from the PhraseBank-trained DistilBERT checkpoint and adapt it to "
-        "RavenPack `event_sentiment_score` labels (negative / neutral / positive). "
-        "Uses cached rich exports (`data/raw/news/ravenpack/*_articles_*.parquet`) with "
-        "a **time-based split**: train ≤2011, validation 2012, test ≥2013."
-    )
-
-    rp_export_paths = discover_ravenpack_article_files()
-    rp_tickers_available = sorted({
-        p.name.split("_articles_")[0].upper() for p in rp_export_paths
-    })
-    has_ravenpack_model = ravenpack_model_is_saved()
-    rp_model_dir = resolve_ravenpack_model_dir()
-    rp_metrics = load_ravenpack_metrics(rp_model_dir)
-
-    if not rp_tickers_available:
-        st.warning(
-            "No RavenPack article exports found. Run `notebooks/fetch_news_articles.ipynb` "
-            "to build `{ticker}_articles_2003_2014.parquet` under "
-            f"`{NEWS_RAVENPACK_DIR.relative_to(PROJECT_ROOT)}/`."
-        )
-    else:
-        rp_train_ticker = st.selectbox(
-            "Ticker to train on",
-            options=rp_tickers_available,
-            index=0,
-            key="sentiment_lab_rp_train_ticker",
-        )
-        init_from_phrasebank = st.checkbox(
-            "Start from PhraseBank checkpoint (recommended)",
-            value=has_model,
-            disabled=not has_model,
-            help=(
-                "Loads `phrasebank_distilbert_best/` weights before RavenPack fine-tuning. "
-                "If unchecked, trains from `distilbert-base-uncased`."
-            ),
-            key="sentiment_lab_rp_init_phrasebank",
-        )
-        if not has_model:
-            st.caption(
-                "PhraseBank checkpoint not found — RavenPack training will start from "
-                "`distilbert-base-uncased` unless you train PhraseBank first."
-            )
-
-        with st.expander(
-            "Dataset config, inputs/outputs & code pointers",
-            expanded=False,
-        ):
-            st.caption(
-                "Parquet inputs, HF `DatasetDict` outputs, `id2label` alignment with PhraseBank, "
-                "and GitHub links to verify each step in code."
-            )
-            try:
-                st.markdown("#### Label schema (`id2label`)")
-                st.dataframe(
-                    ravenpack_label_schema_table(),
-                    hide_index=True,
-                    use_container_width=True,
-                )
-            except Exception as exc:
-                st.warning(f"Could not build label schema table: {exc}")
-            rp_config_metrics = rp_metrics if rp_metrics else {}
-            for section, rows in ravenpack_finetune_config_recipe(
-                ticker=rp_train_ticker,
-                metrics=rp_config_metrics,
-            ).items():
-                st.markdown(f"#### {section}")
-                st.markdown(_markdown_setting_table(rows))
-
-        try:
-            rp_labeled = load_ravenpack_labeled_frame([rp_train_ticker])
-            rp_balance = ravenpack_class_balance(rp_labeled)
-            rp_splits = ravenpack_split_summary(rp_labeled)
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Labeled headlines", f"{len(rp_labeled):,}")
-            c2.metric("Train rows", f"{int(rp_splits.loc[rp_splits['split'] == 'train', 'rows'].iloc[0]):,}")
-            c3.metric("Test rows", f"{int(rp_splits.loc[rp_splits['split'] == 'test', 'rows'].iloc[0]):,}")
-            st.dataframe(rp_splits, hide_index=True, use_container_width=True)
-            fig_rp = px.bar(
-                rp_balance.sort_values("count"),
-                x="count",
-                y="label",
-                orientation="h",
-                labels={"label": "Class", "count": "Rows"},
-                title=f"RavenPack label balance ({rp_train_ticker})",
-            )
-            fig_rp.update_traces(hovertemplate="Class: %{y}<br>Count: %{x}<extra></extra>")
-            fig_rp.update_layout(hovermode="closest", showlegend=False, height=220)
-            st.plotly_chart(fig_rp, use_container_width=True)
-        except Exception as exc:
-            st.error(f"Could not load RavenPack training data: {exc}")
-            rp_labeled = None
-
-        st.caption(
-            "Out-of-domain baseline evaluation (PhraseBank on RavenPack labels) lives in the "
-            "**RavenPack Baseline Eval** tab."
-        )
-        _render_wandb_tracking_links(context="ravenpack")
-
-        if has_ravenpack_model and rp_metrics:
-            rp_test_f1 = rp_metrics.get("test", {}).get("eval_f1")
-            rp_test_acc = rp_metrics.get("test", {}).get("eval_accuracy")
-            st.caption(
-                f"Saved RavenPack model: `{rp_model_dir.relative_to(PROJECT_ROOT)}` · "
-                f"test macro-F1 **{rp_test_f1:.1%}** · accuracy **{rp_test_acc:.1%}**"
-                if rp_test_f1 is not None and rp_test_acc is not None
-                else f"Saved RavenPack model: `{rp_model_dir.relative_to(PROJECT_ROOT)}`"
-            )
-
-        if st.button(
-            f"Fine-tune on RavenPack ({DEFAULT_RAVENPACK_TRAIN_EPOCHS_UI} epochs)",
-            key="sentiment_lab_train_ravenpack",
-            disabled=rp_labeled is None,
-        ):
-            with st.spinner(
-                f"Fine-tuning DistilBERT on RavenPack ({rp_train_ticker})… "
-                "this may take several minutes."
-            ):
-                try:
-                    new_rp_metrics = train_ravenpack(
-                        tickers=[rp_train_ticker],
-                        init_from_phrasebank=init_from_phrasebank and has_model,
-                        num_train_epochs=DEFAULT_RAVENPACK_TRAIN_EPOCHS_UI,
-                    )
-                    _cached_sentiment_classifier.clear()
-                    test_f1 = new_rp_metrics["test"].get("eval_f1")
-                    test_acc = new_rp_metrics["test"].get("eval_accuracy")
-                    st.success(
-                        f"Done — RavenPack test macro-F1 {test_f1:.1%}, accuracy {test_acc:.1%}. "
-                        f"Saved to `{DEFAULT_RAVENPACK_MODEL_DIR.relative_to(PROJECT_ROOT)}`."
-                    )
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"RavenPack training failed: {exc}")
 
     st.divider()
 
@@ -5831,6 +5975,13 @@ def render_batch_pipeline_tab() -> bool:  # noqa: C901 – intentionally long UI
         st.session_state["batch_use_refinitiv"] = True
 
     st.header("Top-1,000 Batch Pipeline")
+    _tab_toc([
+        ("bp-2a", "2A  Runner controls & live progress"),
+        ("bp-2b", "2B  Cached data snapshot"),
+        ("bp-2c", "2C  Failure reasons by provider"),
+        ("bp-2d", "2D  Delisting reasons (CRSP)"),
+        ("bp-2e", "2E  Cash-merger exits"),
+    ])
     st.caption(
         "Pull and cache WRDS/CRSP, Yahoo, and RavenPack data for every ticker in the "
         "CRSP top-volume universe. Each ticker is cached immediately; reruns skip "
@@ -5841,6 +5992,7 @@ def render_batch_pipeline_tab() -> bool:  # noqa: C901 – intentionally long UI
     manifests_df = _get_manifests_df()
 
     # ── Live status banner ────────────────────────────────────────────────────
+    _anchor("bp-2a")
     pid = _batch_pid_running()
     batch_status = _read_batch_status()
     is_running = pid is not None
@@ -6339,18 +6491,8 @@ def render_batch_pipeline_tab() -> bool:  # noqa: C901 – intentionally long UI
 
 # ─────────────────────────────────────────────────────────────────────────────
 
-st.info(
-    "The **Data Explorer** tab uses one ticker/date-range form for prices, Refinitiv news, and RavenPack sentiment. "
-    "The **PhraseBank HF Baseline** tab documents the Hugging Face DistilBERT benchmark "
-    "(Financial PhraseBank training data, metrics, probability chart). "
-    "The **RavenPack Baseline Eval** tab scores the PhraseBank model on RavenPack headlines (out-of-domain). "
-    "The **RavenPack Fine-Tuning** tab shows the full domain-adaptation results for AAPL: "
-    "split design, tokenization, before/after macro-F1, per-class F1, and label-prevalence shift. "
-    "The **Sentiment Lab** tab hosts interactive fine-tuning and inference from `notebooks/liquidAI_prep.ipynb`. "
-    "The **Paper Validation** tab uses bundled 2003-2014 CSVs from `app_data/`."
-)
-
 (
+    tab_overview,
     tab_dashboard,
     tab_batch,
     tab_phrasebank_baseline,
@@ -6359,14 +6501,178 @@ st.info(
     tab_sentiment,
     tab_validation,
 ) = st.tabs([
-    "Data Explorer",
-    "Batch Pipeline (Top-1K)",
-    "PhraseBank HF Baseline",
-    "RavenPack Baseline Eval",
-    "RavenPack Fine-Tuning",
-    "Sentiment Lab",
-    "Paper Validation (2003-2014)",
+    "🏠 Overview",
+    "1 · Data Explorer",
+    "2 · Batch Pipeline (Top-1K)",
+    "3 · PhraseBank HF Baseline",
+    "4 · RavenPack Baseline Eval",
+    "5 · RavenPack Fine-Tuning",
+    "6 · Sentiment Lab",
+    "7 · Paper Validation (2003-2014)",
 ])
+
+with tab_overview:
+    st.header("📖 App Overview")
+    st.caption(
+        "This app supports the **Sentiment Learn-to-Rank** PhD research project. "
+        "Use the numbered tabs above to navigate. "
+        "Each tab has a **📋 Jump to section** expander at the top with working in-tab anchor links."
+    )
+    st.info(
+        "💡 **How the links work:**  "
+        "Click a tab number above to go there first. "
+        "Then click any section link in the cards below — the page will scroll to that section. "
+        "Links only work *within* the tab you're already on (Streamlit cross-tab anchors aren't supported by browsers).",
+        icon=None,
+    )
+
+    st.markdown("---")
+
+    # ── Tab cards with real href links ────────────────────────────────────────
+    # Each section entry is (anchor_id, display_label).
+    # anchor_id must match the _anchor() call injected before that heading.
+    _TAB_CARDS = [
+        {
+            "num": "1", "label": "Data Explorer",
+            "desc": "Unified ticker/date form — prices (WRDS, Yahoo, Refinitiv), Refinitiv news with drill-down, and RavenPack sentiment charts. Works from local cache (instant) or live API pull.",
+            "sections": [
+                ("de-1a", "1A  API status & ticker form"),
+                ("de-1b", "1B  Overview pane"),
+                ("de-1c", "1C  Prices pane"),
+                ("de-1d", "1D  News pane"),
+                ("de-1e", "1E  Sentiment pane"),
+                ("de-1f", "1F  Raw data pane"),
+            ],
+        },
+        {
+            "num": "2", "label": "Batch Pipeline (Top-1K)",
+            "desc": "Run & monitor the background batch job that pulls all 1,000 CRSP universe tickers. Shows live progress, cached-data snapshot, provider failure breakdowns, CRSP delisting, and cash-merger exits.",
+            "sections": [
+                ("bp-2a", "2A  Runner controls & progress"),
+                ("bp-2b", "2B  Cached snapshot"),
+                ("bp-2c", "2C  Failure reasons"),
+                ("bp-2d", "2D  Delisting (CRSP)"),
+                ("bp-2e", "2E  Cash-merger exits"),
+            ],
+        },
+        {
+            "num": "3", "label": "PhraseBank HF Baseline",
+            "desc": "Documents the DistilBERT checkpoint trained on Financial PhraseBank — the starting point before RavenPack domain adaptation. Shows training config, val/test F1, class balance, and probability charts.",
+            "sections": [
+                ("pb-3a", "3A  Model & training"),
+                ("pb-3b", "3B  Reproduction recipe"),
+                ("pb-3c", "3C  Performance metrics"),
+                ("pb-3d", "3D  Dataset dashboard"),
+                ("pb-3f", "3F  W&B tracking"),
+            ],
+        },
+        {
+            "num": "4", "label": "RavenPack Baseline Eval",
+            "desc": "Zero-shot evaluation of the PhraseBank checkpoint on RavenPack headlines (out-of-domain). Reveals the distribution shift that motivates fine-tuning.",
+            "sections": [
+                ("rp-be-4d", "4D  Label distribution shift"),
+                ("rp-be-4c", "4C  Class-level metrics"),
+                ("rp-be-4e", "4E  Run evaluation"),
+            ],
+        },
+        {
+            "num": "5", "label": "RavenPack Fine-Tuning ⭐",
+            "desc": "Main experiment tab. Time-based split → tokenization → before/after macro-F1 → per-class F1 → label prevalence → sample headlines → hyperparameters → train on 1 / 5 / N stocks.",
+            "sections": [
+                ("rp-ft-51", "5·1  Train / val / test split"),
+                ("rp-ft-52", "5·2  Tokenization & padding"),
+                ("rp-ft-53", "5·3  Macro-F1 before vs after"),
+                ("rp-ft-54", "5·4  Per-class F1"),
+                ("rp-ft-55", "5·5  Label prevalence"),
+                ("rp-ft-56", "5·6  Sample headlines"),
+                ("rp-ft-57", "5·7  Hyperparameters & provenance"),
+                ("rp-ft-58", "5·8  Train (1 / 5 / N tickers)"),
+            ],
+        },
+        {
+            "num": "6", "label": "Sentiment Lab",
+            "desc": "Interactive version of liquidAI_prep.ipynb. Train the PhraseBank baseline, browse RavenPack articles, and score custom headlines live.",
+            "sections": [
+                ("sl-6a", "6A  News data coverage"),
+                ("sl-6b", "6B  Compute device"),
+                ("sl-6c", "6C  Financial PhraseBank"),
+                ("sl-6d", "6D  RavenPack browser"),
+                ("sl-6e", "6E  Live inference"),
+            ],
+        },
+        {
+            "num": "7", "label": "Paper Validation (2003-2014)",
+            "desc": "Sanity-checks the CRSP candidate universe: 1,000-row count, unique PERMNOs, volume ranks, share/exchange codes, top-20 volume bar chart, monthly volume & price time-series.",
+            "sections": [
+                ("pv-7a", "7A  Universe summary"),
+                ("pv-7b", "7B  Top 20 by volume"),
+                ("pv-7c", "7C  Monthly volume over time"),
+                ("pv-7d", "7D  Monthly prices"),
+            ],
+        },
+    ]
+
+    for card in _TAB_CARDS:
+        with st.container(border=True):
+            c_num, c_body = st.columns([0.06, 0.94])
+            c_num.markdown(
+                f"<div style='font-size:2rem;font-weight:700;color:#e05252;line-height:1.1'>"
+                f"{card['num']}</div>",
+                unsafe_allow_html=True,
+            )
+            with c_body:
+                st.markdown(f"**{card['label']}**")
+                st.caption(card["desc"])
+                if card["sections"]:
+                    links_html = "".join(
+                        f'<li style="margin:0.1em 0;">{_scroll_link(aid, label)}</li>'
+                        for aid, label in card["sections"]
+                    )
+                    st.markdown(
+                        f'<ul style="margin:0.3em 0 0 0;padding-left:1.2em;line-height:1.7;">'
+                        f'{links_html}</ul>',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.caption("_(navigate directly to the tab — no deep anchors wired yet)_")
+
+    st.markdown("---")
+    st.markdown("### Quick Status")
+
+    has_pb = model_is_saved(resolve_model_dir()) if finetuning_deps_available() else False
+    has_rp = ravenpack_model_is_saved() if finetuning_deps_available() else False
+    pb_icon = "✅" if has_pb else "⬜"
+    rp_icon = "✅" if has_rp else "⬜"
+
+    status_c1, status_c2 = st.columns(2)
+    with status_c1:
+        st.markdown(f"""
+| Component | Status |
+|---|---|
+| PhraseBank checkpoint | {pb_icon} {"saved" if has_pb else "not trained yet"} |
+| RavenPack fine-tuned checkpoint | {rp_icon} {"saved" if has_rp else "not trained yet"} |
+| WRDS credentials | {"✅ ready" if wrds_credentials_available() else "⬜ not configured"} |
+| Refinitiv | {"✅ " + refinitiv_status_label(PROJECT_ROOT) if refinitiv_configured(PROJECT_ROOT) else "⬜ not configured"} |
+| RavenPack exports | ✅ 578 tickers discoverable |
+| Batch cache | {"✅ manifests present" if TOP1K_BY_TICKER_DIR.exists() and any(TOP1K_BY_TICKER_DIR.glob("rank_*/manifest.json")) else "⬜ not yet populated"} |
+""")
+    with status_c2:
+        st.markdown("**Research workflow**")
+        st.markdown("""
+```
+Tab 3  Train PhraseBank baseline
+   ↓
+Tab 4  Evaluate baseline OOD on RavenPack
+   ↓
+Tab 5  Fine-tune on 1 / 5 / N stocks
+   ↓
+Tab 5  Compare before vs after
+   ↓
+Tab 2  Batch-cache market data for all 1k stocks
+   ↓
+Tab 7  Validate universe selection
+```
+""")
 
 with tab_dashboard:
     render_multi_api_dashboard_tab()
@@ -6398,6 +6704,14 @@ with tab_validation:
         top20 = universe.head(20).copy()
 
         st.subheader("Candidate Universe Checks")
+        _tab_toc([
+            ("pv-7a", "7A  Universe summary"),
+            ("pv-7b", "7B  Top 20 by volume"),
+            ("pv-7c", "7C  Monthly volume over time"),
+            ("pv-7d", "7D  Monthly prices"),
+        ])
+
+        _anchor("pv-7a")
         metrics = st.columns(4)
         metrics[0].metric("Rows", f"{len(universe):,}")
         metrics[1].metric("Unique PERMNOs", f"{universe['permno'].nunique():,}")
@@ -6406,6 +6720,7 @@ with tab_validation:
 
         st.dataframe(validation_summary(universe), use_container_width=True)
 
+        _anchor("pv-7b")
         st.subheader("Top 20 By Average Daily Share Volume")
         st.plotly_chart(make_top20_bar_chart(top20), use_container_width=True)
 
@@ -6422,6 +6737,7 @@ with tab_validation:
         ]
         st.dataframe(top20[display_cols], use_container_width=True)
 
+        _anchor("pv-7c")
         st.subheader("Top 20 Trading Volume Over Time")
         monthly_volume = load_bundled_csv(DEFAULT_MONTHLY_VOLUME_PATHS)
         if monthly_volume is None:
@@ -6436,6 +6752,7 @@ with tab_validation:
             except ValueError as exc:
                 st.error(str(exc))
 
+        _anchor("pv-7d")
         st.subheader("Top 20 Monthly Open, Close, And Average Price")
         monthly_prices = load_bundled_csv(DEFAULT_MONTHLY_PRICE_PATHS)
         if monthly_prices is None:

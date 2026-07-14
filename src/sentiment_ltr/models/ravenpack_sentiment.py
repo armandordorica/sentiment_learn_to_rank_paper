@@ -34,6 +34,9 @@ from sentiment_ltr.models.phrasebank_sentiment import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 RAVENPACK_NEWS_DIR = PROJECT_ROOT / "data" / "raw" / "news" / "ravenpack"
+# data_explorer_top1k stores per-ticker parquet files under
+# data/raw/data_explorer_top1k/by_ticker/rank_NNNN_TICKER/ravenpack_articles.parquet
+DATA_EXPLORER_DIR = PROJECT_ROOT / "data" / "raw" / "data_explorer_top1k" / "by_ticker"
 DEFAULT_RAVENPACK_MODEL_DIR = PROJECT_ROOT / "data" / "models" / "ravenpack_distilbert_best"
 
 LABEL_NAMES = ["negative", "neutral", "positive"]
@@ -72,27 +75,66 @@ def score_to_label(score: object) -> str | None:
     return "neutral"
 
 
+def _ticker_from_article_path(path: Path) -> str:
+    """Extract ticker symbol from either naming convention.
+
+    Handles two layouts:
+    - ``data/raw/news/ravenpack/aapl_articles_2003_2014.parquet``
+      → split on ``_articles_``, take prefix
+    - ``data/raw/data_explorer_top1k/by_ticker/rank_0003_MSFT/ravenpack_articles.parquet``
+      → parent directory name is ``rank_NNNN_TICKER``, take last ``_``-separated part
+    """
+    if path.name == "ravenpack_articles.parquet":
+        # data_explorer layout: parent dir is rank_NNNN_TICKER
+        return path.parent.name.split("_")[-1].upper()
+    return path.name.split("_articles_")[0].upper()
+
+
 def discover_ravenpack_article_files(
     tickers: list[str] | None = None,
     *,
     news_dir: Path = RAVENPACK_NEWS_DIR,
+    data_explorer_dir: Path = DATA_EXPLORER_DIR,
 ) -> list[Path]:
-    """Return rich RavenPack article parquet paths (``*_articles_*.parquet``)."""
-    if not news_dir.exists():
-        return []
+    """Return RavenPack article parquet paths from both known layouts.
 
-    paths = sorted(news_dir.glob("*_articles_*.parquet"))
-    if tickers:
-        wanted = {t.strip().upper() for t in tickers if t.strip()}
-        paths = [
-            p for p in paths
-            if p.name.split("_articles_")[0].upper() in wanted
-        ]
-    return paths
+    Searches two locations:
+    1. ``news_dir`` — ``*_articles_*.parquet`` files (AAPL-style rich exports)
+    2. ``data_explorer_dir`` — ``rank_NNNN_TICKER/ravenpack_articles.parquet``
+       files from the data_explorer_top1k batch pipeline
 
+    Both layouts contain ``event_sentiment_score`` and headline columns and are
+    compatible with ``load_ravenpack_labeled_frame``.
+    """
+    wanted = {t.strip().upper() for t in tickers if t.strip()} if tickers else None
 
-def _ticker_from_article_path(path: Path) -> str:
-    return path.name.split("_articles_")[0].upper()
+    paths: list[Path] = []
+
+    # Layout 1: data/raw/news/ravenpack/*_articles_*.parquet
+    if news_dir.exists():
+        for p in sorted(news_dir.glob("*_articles_*.parquet")):
+            ticker = p.name.split("_articles_")[0].upper()
+            if wanted is None or ticker in wanted:
+                paths.append(p)
+
+    # Layout 2: data/raw/data_explorer_top1k/by_ticker/rank_NNNN_TICKER/ravenpack_articles.parquet
+    if data_explorer_dir.exists():
+        for ticker_dir in sorted(data_explorer_dir.iterdir()):
+            p = ticker_dir / "ravenpack_articles.parquet"
+            if not p.exists():
+                continue
+            ticker = ticker_dir.name.split("_")[-1].upper()
+            if wanted is None or ticker in wanted:
+                paths.append(p)
+
+    # De-duplicate: if a ticker exists in both locations, prefer news_dir (richer export)
+    seen: dict[str, Path] = {}
+    for p in paths:
+        ticker = _ticker_from_article_path(p)
+        if ticker not in seen:
+            seen[ticker] = p  # first wins — news_dir paths come first
+
+    return sorted(seen.values())
 
 
 def load_ravenpack_labeled_frame(

@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}5·8 — RavenPack Fine-Tuning{% endblock %}
+{% block content %}
+  <div class="card">
+    <h1>5 · RavenPack Fine-Tuning</h1>
+    <p class="muted">
+      Ported from Streamlit <code>app.py</code> → <code>render_ravenpack_finetuning_tab()</code>,
+      section 5·8 "Train / re-train the checkpoint". Select one ticker for a single-stock
+      baseline, five for a multi-stock pilot, or more for a pooled run — all selected tickers
+      are concatenated into one shuffled dataset, not trained sequentially.
+    </p>
+
+    {% if not deps.finetuning_deps_available %}
+      <div class="alert alert-error">
+        Fine-tuning dependencies (<code>torch</code>, <code>transformers</code>, <code>datasets</code>)
+        are not installed. Run <code>pip install -r requirements-finetuning.txt</code>.
+      </div>
+    {% elif not deps.has_phrasebank_checkpoint %}
+      <div class="alert alert-info">
+        PhraseBank checkpoint not found — train it first (Sentiment Lab tab / notebook)
+        before fine-tuning on RavenPack.
+      </div>
+    {% elif not tickers %}
+      <div class="alert alert-error">
+        No RavenPack exports found under <code>data/raw/news/ravenpack/</code> or
+        <code>data/raw/data_explorer_top1k/by_ticker/</code>.
+      </div>
+    {% else %}
+      <form id="finetune-form"
+            hx-post="/finetune/train"
+            hx-target="#train-status"
+            hx-swap="innerHTML">
+
+        <label for="tickers"><strong>Tickers to train on</strong></label>
+        <select id="tickers" name="tickers" multiple size="10"
+                hx-post="/finetune/coverage"
+                hx-trigger="change"
+                hx-target="#coverage-table"
+                hx-swap="innerHTML"
+                hx-include="[name='tickers']">
+          {% for t in tickers %}
+            <option value="{{ t }}" {% if t in default_tickers %}selected{% endif %}>{{ t }}</option>
+          {% endfor %}
+        </select>
+        <p class="muted">
+          Single ticker → single-stock baseline. Multiple tickers → pooled joint training
+          in one pass. {{ tickers|length }} tickers available.
+        </p>
+
+        <div class="field-row">
+          <label>
+            <input type="checkbox" name="init_from_phrasebank" value="true"
+                   {% if deps.has_phrasebank_checkpoint %}checked{% endif %}
+                   {% if not deps.has_phrasebank_checkpoint %}disabled{% endif %}>
+            Start from PhraseBank checkpoint (recommended)
+          </label>
+        </div>
+
+        <div class="field-row">
+          <label for="num_train_epochs">Epochs</label>
+          <input type="number" id="num_train_epochs" name="num_train_epochs"
+                 min="1" max="20" value="{{ default_epochs }}" style="width:5rem">
+        </div>
+
+        <h3>Dataset coverage</h3>
+        <div id="coverage-table">
+          {% include "partials/coverage_table.html" %}
+        </div>
+
+        <button type="submit" class="btn btn-primary">▶ Fine-tune selected tickers</button>
+      </form>
+
+      <h3>Training status</h3>
+      <div id="train-status">
+        {% include "partials/train_status.html" with context %}
+      </div>
+    {% endif %}
+  </div>
+{% endblock %}

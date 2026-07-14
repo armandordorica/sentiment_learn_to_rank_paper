@@ -1,0 +1,24 @@
+{% if error %}
+  <div class="alert alert-error">{{ error }}</div>
+{% elif job is none %}
+  <p class="muted">No training job started yet.</p>
+{% elif job.status in ["pending", "running"] %}
+  <div class="alert alert-info"
+       hx-get="/finetune/train/{{ job.id }}/status"
+       hx-trigger="load delay:2s"
+       hx-swap="outerHTML">
+    ⏳ Training job <code>{{ job.id }}</code> — status: <strong>{{ job.status }}</strong>.
+    This may take several minutes… (auto-refreshing)
+  </div>
+{% elif job.status == "done" %}
+  <div class="alert alert-success">
+    ✅ Done — test macro-F1 <strong>{{ "%.1f%%"|format(job.result.test_f1 * 100) if job.result.test_f1 is not none else "—" }}</strong>,
+    accuracy <strong>{{ "%.1f%%"|format(job.result.test_acc * 100) if job.result.test_acc is not none else "—" }}</strong>.
+    Checkpoint saved to <code>{{ job.result.checkpoint_dir }}</code>.
+  </div>
+{% elif job.status == "error" %}
+  <div class="alert alert-error">
+    ❌ Training failed.
+    <pre>{{ job.error }}</pre>
+  </div>
+{% endif %}

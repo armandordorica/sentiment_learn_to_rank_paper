@@ -1,0 +1,11 @@
+# FastAPI proof-of-concept web app (see docs/fastapi_migration_plan.md).
+# This is the strangler-fig replacement for the Streamlit app (app.py),
+# built incrementally side by side. Install alongside requirements.txt:
+#     pip install -r requirements.txt -r requirements-webapp.txt
+# (requirements-finetuning.txt is also required for the RavenPack fine-tuning
+# tab, since webapp/api/ravenpack_finetune.py reuses the same training code.)
+
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+jinja2>=3.1,<4
+python-multipart>=0.0.9,<1

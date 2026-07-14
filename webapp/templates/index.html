@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Sentiment LTR — FastAPI POC{% endblock %}
+{% block content %}
+  <div class="card">
+    <h1>Sentiment LTR — FastAPI migration proof-of-concept</h1>
+    <p>
+      This app is being incrementally ported from the Streamlit app (<code>app.py</code>)
+      to FastAPI + Jinja2 + HTMX. See
+      <code>docs/fastapi_migration_plan.md</code> for the full migration checklist.
+    </p>
+    <p><strong>Currently migrated:</strong></p>
+    <ul>
+      <li><a href="/finetune">Tab 5 — RavenPack Fine-Tuning (section 5·8: train on 1 / 5 / N tickers)</a></li>
+    </ul>
+    <p class="muted">
+      The original Streamlit app keeps running unchanged (<code>streamlit run app.py</code>)
+      side by side with this one until every tab above is ported and verified.
+    </p>
+  </div>
+{% endblock %}

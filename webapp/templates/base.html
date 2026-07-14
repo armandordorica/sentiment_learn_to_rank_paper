@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{% block title %}Sentiment LTR{% endblock %}</title>
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <span class="brand">Sentiment LTR <span class="brand-sub">FastAPI (migration POC)</span></span>
+      <nav class="tabnav">
+        {% for item in nav_items %}
+          {% if item.enabled %}
+            <a class="tab {% if item.href == active_href %}active{% endif %}" href="{{ item.href }}">
+              <span class="tab-num">{{ item.num }}</span>{{ item.label }}
+            </a>
+          {% else %}
+            <span class="tab tab-disabled" title="Not yet migrated — see docs/fastapi_migration_plan.md">
+              <span class="tab-num">{{ item.num }}</span>{{ item.label }}
+            </span>
+          {% endif %}
+        {% endfor %}
+      </nav>
+    </div>
+  </header>
+
+  <main class="content">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

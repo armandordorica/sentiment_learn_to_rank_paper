@@ -34,6 +34,8 @@
 - [ ] Package the inference path into `src/sentiment_ltr/` with tests
 
 ### 📋 To Do
+- [x] **4.1.5-pre-a** Extended `discover_ravenpack_article_files()` to scan both `data/raw/news/ravenpack/` (AAPL-style) **and** `data/raw/data_explorer_top1k/by_ticker/rank_NNNN_TICKER/ravenpack_articles.parquet` — **578 tickers now discoverable**. Pilot coverage confirmed: JPM 63k, MSFT 60k, WMT 33k, XOM 25k, JNJ 21k labeled rows ✅. AAPL prefers the richer `news_dir` export when both exist.
+- [ ] **4.1.5-pre-b** Update webapp RavenPack Fine-Tuning section — swap `st.selectbox` → `st.multiselect` in `app.py` so multiple tickers can be selected and passed as a list to `train_ravenpack()`
 - [ ] **4.1.5a** Pick 5 pilot tickers with rich RavenPack exports (e.g. MSFT, GOOG, AMZN, JPM, XOM) — confirm ≥20k labeled headlines each via `discover_ravenpack_article_files` + `ravenpack_split_summary`
 - [ ] **4.1.5b** Run `train_ravenpack(tickers=[...5 tickers...])` — single multi-ticker training call; verify test macro-F1 ≥ AAPL-only baseline
 - [ ] **4.1.5c** Per-ticker breakdown — report test macro-F1 for each ticker individually to confirm generalisation isn't driven by one stock
@@ -167,40 +169,44 @@ Why this is correct for this use case:
 **When sequential / continual learning would be justified:**
 - Different *tasks* per stock (e.g., sentiment for AAPL vs. volatility for JPM)
 - Strict online/streaming constraint (new stock arrives daily, full re-train is too slow)
-- Dataset too large to fit in memory at once (not the case here: even 500 tickers ×
-  ~69k rows = ~35M rows is manageable with streaming)
+- Dataset genuinely too large to fit in unified memory (not the case on this machine — see note below)
 
 ---
 
-> ⚠️ **Memory reality check (2026-07-14):** The `~35M rows` figure above assumed every
-> stock has AAPL-level coverage, which is almost certainly wrong — AAPL is the
-> highest-volume news ticker in the universe. We currently only have **1 parquet file
-> cached (AAPL, 311k raw / 69k labeled rows, 24.6 MB on disk)**.
+> 📝 **Memory note — Apple Silicon unified memory (verified 2026-07-14):**
 >
-> **Tokenized memory at AAPL density** (3 × int32[128] + int64 label = ~1.5 KB/row):
+> On Apple Silicon (M-series), there is **no separate GPU VRAM**. RAM and the MPS
+> accelerator share the same physical unified memory pool. Whatever fits in RAM
+> automatically fits on the GPU — there is no separate "copy to VRAM" step and no
+> OOM risk from exceeding a GPU memory limit that is smaller than system RAM.
+> > **This machine: Apple M4 Max, 128 GB unified memory, 40 GPU cores.**
+ > (`system_profiler SPHardwareDataType` → 128 GB; `SPDisplaysDataType` → 40 GPU cores.
+ > `sysctl hw.memsize` returns 137,438,953,472 bytes = 128 GiB in base-2 — the "137 GB"
+ > figure that sometimes appears is just a base-2 vs base-10 conversion artefact.)
 >
-> | Tickers | Rows (AAPL density) | Tokenized RAM |
-> |---|---|---|
-> | 1 (AAPL alone) | 69k | ~106 MB ✅ |
-> | 5 pilot | ~344k | ~530 MB ✅ |
-> | 10 | ~687k | ~1.0 GB ✅ |
-> | 50 | ~3.4M | ~5.2 GB ⚠️ tight on 8 GB |
-> | 100 | ~6.9M | ~10.4 GB ❌ OOM on 8 GB MPS |
-> | 500 | ~34M | ~52 GB ❌ definitely OOM |
+> Even at AAPL-level coverage (59k labeled rows per ticker), the full 500-ticker
+> worst-case tokenized dataset is ~61 GB — well within the available pool:
+> > | Tickers | Rows (AAPL density, worst case) | Tokenized size | Fits in 128 GB? |
+ > |---|---|---|---|
+ > | 1 (AAPL) | 59k | ~118 MB | ✅ |
+ > | 5 pilot | ~297k | ~0.6 GB | ✅ |
+ > | 50 | ~2.97M | ~6.1 GB | ✅ |
+ > | 250 | ~14.8M | ~30.5 GB | ✅ |
+ > | 500 | ~29.7M | ~61.0 GB | ✅ fits comfortably |
 >
-> **In practice** most stocks have far less coverage than AAPL (fewer analyst-followed,
-> less media attention), so real numbers are likely 5–20× lower. But we cannot assume
-> everything fits in memory past ~50 tickers on a MacBook with 8–16 GB unified memory.
+> **In practice** most tickers have far less coverage than AAPL (which is the
+> highest-volume news ticker in the universe), so real numbers are likely 5–20×
+> lower than the table above.
 >
-> **Mitigation strategy for large-scale runs:**
-> - For the **5-ticker pilot**: load all into memory — safe (~530 MB tokenized)
-> - For **50+ tickers**: use HuggingFace `datasets` memory-mapped Arrow format
->   (`Dataset.from_pandas(...).save_to_disk()` / `load_from_disk()`) — data lives on
->   disk, batches are paged in during training; no OOM risk
-> - For **500 tickers**: streaming mode (`IterableDataset`) or batch the parquet
->   loading per-ticker, write to a single Arrow dataset on disk, then train from disk
-> - `train_ravenpack()` currently loads everything into RAM — this needs a
->   `use_disk_cache=True` code path before scaling beyond ~20 tickers on a laptop
+> **Tokenized size per sample:** `input_ids` (128 × int32) + `attention_mask`
+> (128 × int32) + `label` (1 × int64) ≈ **1 KB/sample**. HF `datasets` stores
+> tokenized data in memory-mapped Arrow format by default, so loading is lazy
+> and batches are paged in as needed — reducing the actual working-set pressure
+> further.
+> > **Bottom line:** pooled joint training across all 500 tickers is safe to run
+ > in a single `train_ravenpack()` call on this machine without any streaming or
+ > disk-cache workarounds. The `use_disk_cache` path would only be needed if
+ > running on a machine with ≤ 32 GB unified/system memory.
 
 ---
 
