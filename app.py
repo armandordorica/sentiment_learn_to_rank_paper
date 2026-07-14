@@ -75,6 +75,7 @@ phrasebank_baseline_recipe = _phrasebank_sentiment.phrasebank_baseline_recipe
 predict_sentences = _phrasebank_sentiment.predict_sentences
 resolve_model_dir = _phrasebank_sentiment.resolve_model_dir
 train_baseline = _phrasebank_sentiment.train_baseline
+evaluate_checkpoint_on_split = _phrasebank_sentiment.evaluate_checkpoint_on_split
 from sentiment_ltr.models import ravenpack_sentiment as _ravenpack_sentiment
 
 _ravenpack_sentiment = importlib.reload(_ravenpack_sentiment)
@@ -2999,6 +3000,22 @@ def _cached_ravenpack_baseline_eval(
     )
 
 
+@st.cache_data(ttl=3600, show_spinner="Scoring PhraseBank split with the saved checkpoint…")
+def _cached_phrasebank_split_eval(
+    split_name: str,
+    cache_token: str,
+) -> dict[str, object]:
+    """Evaluate a saved PhraseBank checkpoint on any dataset split (cached).
+
+    Used to reproduce the **train-split** macro-F1/accuracy that
+    ``train_baseline()`` never persists to ``metrics.json`` (it only evaluates
+    validation + test). Shared with the FastAPI webapp via the same
+    ``evaluate_checkpoint_on_split()`` function so both UIs show identical numbers.
+    """
+    del cache_token
+    return evaluate_checkpoint_on_split(split_name, model_dir=resolve_model_dir())
+
+
 @st.cache_data(ttl=3600, show_spinner="Scoring RavenPack test headlines with fine-tuned checkpoint…")
 def _cached_ravenpack_finetuned_eval(
     ticker: str,
@@ -4370,6 +4387,57 @@ def render_phrasebank_hf_baseline_tab() -> None:
 
     with st.expander("Raw training metrics (metrics.json)", expanded=False):
         st.json(metrics)
+
+    # ── Train-set performance (not in metrics.json — computed on demand) ───────
+    st.markdown("#### Performance on the training set")
+    st.caption(
+        "`train_baseline()` only evaluates the **validation** and **test** splits during "
+        "training — the train-split score is never computed or saved to `metrics.json`. "
+        "Click below to score the saved checkpoint on the **train split itself** "
+        "(the same rows it was fine-tuned on) using the identical accuracy + macro-F1 "
+        "metrics as everywhere else in this app. This number is expected to be **higher** "
+        "than validation/test (the model has seen these exact sentences)."
+    )
+    if not has_model:
+        st.info("No saved checkpoint — train the model in **Sentiment Lab** first.")
+    else:
+        if st.button(
+            "▶ Evaluate on train split",
+            key="pb3c_eval_train_split_btn",
+        ):
+            try:
+                train_eval = _cached_phrasebank_split_eval(
+                    "train", _phrasebank_model_cache_token()
+                )
+                st.session_state["pb3c_train_eval_result"] = train_eval
+            except Exception as exc:
+                st.error(f"Could not evaluate train split: {exc}")
+
+        train_eval = st.session_state.get("pb3c_train_eval_result")
+        if train_eval is not None:
+            tr1, tr2, tr3 = st.columns(3)
+            tr1.metric("Train macro-F1", f"{train_eval['macro_f1']:.1%}")
+            tr2.metric("Train accuracy", f"{train_eval['accuracy']:.1%}")
+            tr3.metric("Rows scored", f"{train_eval['n_rows']:,}")
+            with st.expander("Train-split classification report & confusion matrix", expanded=False):
+                st.text(train_eval["classification_report"])
+                cm_styler, cm_pct_styler = ravenpack_confusion_matrix_stylers(
+                    train_eval["confusion_counts"], train_eval["confusion_pct"]
+                )
+                cc1, cc2 = st.columns(2)
+                with cc1:
+                    st.caption("Counts")
+                    st.dataframe(cm_styler, use_container_width=True)
+                with cc2:
+                    st.caption("Row-normalized %")
+                    st.dataframe(cm_pct_styler, use_container_width=True)
+                if not train_eval["mismatches_sample"].empty:
+                    st.caption("Sample of misclassified train sentences")
+                    st.dataframe(
+                        train_eval["mismatches_sample"],
+                        hide_index=True,
+                        use_container_width=True,
+                    )
 
     st.divider()
 

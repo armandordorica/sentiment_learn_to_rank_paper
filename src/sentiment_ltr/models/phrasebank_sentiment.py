@@ -223,6 +223,82 @@ def build_compute_metrics():
     return compute_metrics
 
 
+def evaluate_checkpoint_on_split(
+    split_name: str = "train",
+    *,
+    model_dir: Path | None = None,
+    batch_size: int = 64,
+    mismatch_sample: int = 10,
+) -> dict[str, Any]:
+    """Score a saved PhraseBank checkpoint on one dataset split (default: train).
+
+    ``train_baseline()`` only calls ``trainer.evaluate()`` on the validation and
+    test splits — the **train-split** metrics (e.g. "how well does the model fit
+    the data it was trained on") are never computed or persisted to
+    ``metrics.json``. This function reproduces that missing number on demand by
+    running the saved checkpoint over ``split_name`` and computing the same
+    accuracy + macro-F1 metrics used everywhere else in this module.
+
+    Used by both the Streamlit **PhraseBank HF Baseline** tab and the FastAPI
+    webapp so the two UIs show identical numbers from the same code path.
+    """
+    from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
+
+    model_dir = resolve_model_dir() if model_dir is None else Path(model_dir)
+    tokenizer, model, device = load_classifier(model_dir)
+    raw = load_phrasebank()
+    if split_name not in raw:
+        raise ValueError(f"Unknown PhraseBank split {split_name!r}; expected one of {list(raw)}.")
+
+    _, id2label, _ = label_maps(raw)
+    split_ds = raw[split_name]
+    sentences = list(split_ds["sentence"])
+    actual_labels = [id2label[int(i)] for i in split_ds["label"]]
+
+    pred_chunks: list[pd.DataFrame] = []
+    for start in range(0, len(sentences), batch_size):
+        batch = sentences[start : start + batch_size]
+        pred_chunks.append(predict_sentences(batch, tokenizer, model, device, id2label=id2label))
+    preds = pd.concat(pred_chunks, ignore_index=True) if pred_chunks else pd.DataFrame()
+
+    results = pd.DataFrame({"sentence": sentences, "actual": actual_labels})
+    results = results.join(preds.drop(columns=["sentence"])) if not preds.empty else results
+    results["match"] = results["actual"] == results["pred"]
+
+    label_order = [id2label[i] for i in sorted(id2label)]
+    y_true = results["actual"]
+    y_pred = results["pred"]
+
+    cm = pd.DataFrame(
+        confusion_matrix(y_true, y_pred, labels=label_order),
+        index=pd.Index(label_order, name="actual"),
+        columns=pd.Index(label_order, name="pred"),
+    )
+    cm_pct = cm.div(cm.sum(axis=1), axis=0).mul(100)
+
+    mismatches = results.loc[~results["match"]]
+    sample_n = min(mismatch_sample, len(mismatches))
+
+    return {
+        "model_dir": str(model_dir),
+        "split": split_name,
+        "n_rows": int(len(results)),
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "macro_f1": float(
+            f1_score(y_true, y_pred, labels=label_order, average="macro", zero_division=0)
+        ),
+        "classification_report": classification_report(
+            y_true, y_pred, labels=label_order, digits=3, zero_division=0,
+        ),
+        "confusion_counts": cm,
+        "confusion_pct": cm_pct,
+        "label_order": label_order,
+        "mismatches_sample": mismatches.sample(sample_n, random_state=42).reset_index(drop=True)
+        if sample_n
+        else pd.DataFrame(),
+    }
+
+
 def load_metrics(model_dir: Path | None = None) -> dict[str, Any]:
     """Load saved training metrics, or return documented fallback."""
     model_dir = resolve_model_dir() if model_dir is None else Path(model_dir)

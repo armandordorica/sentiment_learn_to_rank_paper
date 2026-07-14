@@ -121,3 +121,42 @@ select[multiple] { width: 100%; max-width: 320px; }
 .alert-success { background: #f0fdf4; border: 1px solid #bbf7d0; }
 .alert-error { background: #fef2f2; border: 1px solid #fecaca; }
 .alert pre { white-space: pre-wrap; font-size: 0.8rem; }
+
+.htmx-indicator { display: none; }
+.htmx-request .htmx-indicator,
+.htmx-request.htmx-indicator { display: inline; }
+
+.chart-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin: 0.5rem 0 1.5rem;
+}
+.chart-cell {
+  margin: 0.5rem 0 1.5rem;
+  overflow-x: auto;
+}
+@media (max-width: 800px) {
+  .chart-grid { grid-template-columns: 1fr; }
+}
+
+.chart-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin: 0.75rem 0 1.25rem;
+}
+.chart-cell {
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  padding: 0.25rem;
+  margin: 0.75rem 0;
+  overflow-x: auto;
+}
+@media (max-width: 900px) {
+  .chart-grid { grid-template-columns: 1fr; }
+}
+
+details { margin: 0.75rem 0; }
+details summary { margin-bottom: 0.5rem; }
+

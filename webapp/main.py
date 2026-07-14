@@ -19,6 +19,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from webapp.api import phrasebank_baseline as pb
 from webapp.api import ravenpack_finetune as rp
 from webapp.jobs import job_manager
 
@@ -32,7 +33,7 @@ templates = Jinja2Templates(directory=str(WEBAPP_DIR / "templates"))
 NAV_ITEMS = [
     {"num": "1", "label": "Data Explorer", "href": "#", "enabled": False},
     {"num": "2", "label": "Batch Pipeline", "href": "#", "enabled": False},
-    {"num": "3", "label": "PhraseBank Baseline", "href": "#", "enabled": False},
+    {"num": "3", "label": "PhraseBank Baseline", "href": "/phrasebank", "enabled": True},
     {"num": "4", "label": "RavenPack Baseline Eval", "href": "#", "enabled": False},
     {"num": "5", "label": "RavenPack Fine-Tuning", "href": "/finetune", "enabled": True},
     {"num": "6", "label": "Sentiment Lab", "href": "#", "enabled": False},
@@ -122,4 +123,41 @@ def finetune_train_status(request: Request, job_id: str) -> HTMLResponse:
         "partials/train_status.html",
         {"job": job, "error": None if job else "Job not found."},
     )
+
+
+@app.get("/phrasebank", response_class=HTMLResponse)
+def phrasebank_page(request: Request) -> HTMLResponse:
+    """Tab 3 — mirrors Streamlit's ``render_phrasebank_hf_baseline_tab`` (3A/3C/3D)."""
+    deps = pb.deps_status()
+    ctx = _base_context(active_href="/phrasebank")
+    ctx.update({
+        "deps": deps,
+        "training": pb.training_summary() if deps["has_phrasebank_checkpoint"] else None,
+        "train_eval": None,
+        "dataset": pb.dataset_dashboard() if deps["finetuning_deps_available"] else None,
+        "probability_charts": pb.probability_charts() if deps["finetuning_deps_available"] else None,
+    })
+    return templates.TemplateResponse(request, "phrasebank.html", ctx)
+
+
+@app.post("/phrasebank/train-eval", response_class=HTMLResponse)
+def phrasebank_train_eval(request: Request) -> HTMLResponse:
+    """HTMX partial: run (or fetch cached) train-split evaluation on button click.
+
+    Calls the exact same ``evaluate_checkpoint_on_split("train", ...)`` as the
+    Streamlit "▶ Evaluate on train split" button, so both UIs report identical
+    macro-F1 / accuracy / confusion matrix numbers.
+    """
+    try:
+        train_eval = pb.train_split_eval()
+        error = None
+    except Exception as exc:  # noqa: BLE001
+        train_eval = None
+        error = f"Could not evaluate train split: {exc}"
+    return templates.TemplateResponse(
+        request,
+        "partials/phrasebank_train_eval.html",
+        {"train_eval": train_eval, "error": error},
+    )
+
 

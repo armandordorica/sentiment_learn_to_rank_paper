@@ -1,0 +1,69 @@
+{% if error %}
+  <div class="alert alert-error">{{ error }}</div>
+{% elif train_eval is none %}
+  <p class="muted">Not evaluated yet — click the button above.</p>
+{% else %}
+  <div class="metric-row">
+    <div class="metric"><span class="metric-label">Train macro-F1</span><span class="metric-value">{{ "%.1f%%"|format(train_eval.macro_f1 * 100) }}</span></div>
+    <div class="metric"><span class="metric-label">Train accuracy</span><span class="metric-value">{{ "%.1f%%"|format(train_eval.accuracy * 100) }}</span></div>
+    <div class="metric"><span class="metric-label">Rows scored</span><span class="metric-value">{{ "{:,}".format(train_eval.n_rows) }}</span></div>
+  </div>
+
+  <details>
+    <summary class="muted" style="cursor:pointer;">Train-split classification report &amp; confusion matrix</summary>
+    <pre style="font-size:0.8rem;overflow-x:auto;">{{ train_eval.classification_report }}</pre>
+
+    <div style="display:flex; gap:2rem; flex-wrap:wrap;">
+      <div>
+        <p class="muted">Counts</p>
+        <table class="data-table">
+          <thead>
+            <tr><th>actual \ pred</th>{% for l in train_eval.confusion_counts.labels %}<th>{{ l }}</th>{% endfor %}</tr>
+          </thead>
+          <tbody>
+            {% for row in train_eval.confusion_counts.rows %}
+              <tr>
+                <td><strong>{{ row.actual }}</strong></td>
+                {% for l in train_eval.confusion_counts.labels %}<td>{{ "{:,}".format(row[l]) }}</td>{% endfor %}
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div>
+        <p class="muted">Row-normalized %</p>
+        <table class="data-table">
+          <thead>
+            <tr><th>actual \ pred</th>{% for l in train_eval.confusion_pct.labels %}<th>{{ l }}</th>{% endfor %}</tr>
+          </thead>
+          <tbody>
+            {% for row in train_eval.confusion_pct.rows %}
+              <tr>
+                <td><strong>{{ row.actual }}</strong></td>
+                {% for l in train_eval.confusion_pct.labels %}<td>{{ "%.1f"|format(row[l]) }}%</td>{% endfor %}
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    {% if train_eval.mismatches_sample %}
+      <p class="muted">Sample of misclassified train sentences</p>
+      <table class="data-table">
+        <thead>
+          <tr>
+            {% for key in train_eval.mismatches_sample[0].keys() %}<th>{{ key }}</th>{% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in train_eval.mismatches_sample %}
+            <tr>
+              {% for value in row.values() %}<td>{{ value }}</td>{% endfor %}
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+  </details>
+{% endif %}
