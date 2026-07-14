@@ -34,6 +34,10 @@
 - [ ] Package the inference path into `src/sentiment_ltr/` with tests
 
 ### 📋 To Do
+- [ ] **4.1.5a** Pick 5 pilot tickers with rich RavenPack exports (e.g. MSFT, GOOG, AMZN, JPM, XOM) — confirm ≥20k labeled headlines each via `discover_ravenpack_article_files` + `ravenpack_split_summary`
+- [ ] **4.1.5b** Run `train_ravenpack(tickers=[...5 tickers...])` — single multi-ticker training call; verify test macro-F1 ≥ AAPL-only baseline
+- [ ] **4.1.5c** Per-ticker breakdown — report test macro-F1 for each ticker individually to confirm generalisation isn't driven by one stock
+- [ ] **4.1.5d** Scale to all ~500 universe tickers once 5-ticker run validates the pipeline; gate on coverage (skip tickers with < N labeled rows)
 - [ ] **0.2** Skim the HF docs you'll touch: `AutoTokenizer`, `AutoModelForSequenceClassification`, `Trainer`, `TrainingArguments`, `datasets.load_dataset`
 - [ ] **2.4** Swap in `ProsusAI/finbert`; compare metrics; read its model card for label order
 - [ ] **3.1** Plot class balance + confusion matrix; write down what each error type means
@@ -49,6 +53,7 @@
 - _(move the card you're actively working on here)_
 
 ### ✅ Done
+- [x] **Iteration 4 — AAPL fine-tune complete** — `train_ravenpack(tickers=["AAPL"])` trained on ~38k headlines (2003–2011), validated on 2012, tested on 2013–2014; test macro-F1 improved from **27.5% → 82.1%** (+54.6 pp); checkpoint saved to `data/models/ravenpack_distilbert_best/`; full before/after comparison in `notebooks/finetune_on_ravenpack.ipynb` and **RavenPack Fine-Tuning** tab in `app.py`.
 - [x] **0.1** Env ready — `torch`/`transformers`/`datasets`/`evaluate`/`accelerate`/`ipywidgets` installed into the `sentiment-ltr-paper` conda env (clean `pip check`); pinned in `requirements-finetuning.txt` + `environment.yml`/`environment.lock.yml`; notebook auto-detects and runs on Apple **MPS**
 - [x] **1.1** Load Financial PhraseBank via Parquet mirror `atrost/financial_phrasebank` (datasets-v5 safe); inspect schema, labels, samples, class balance (neutral 59.7% / positive 27.9% / negative 12.3%), token-length stats — `notebooks/liquidAI_prep.ipynb`
 - [x] **1.1b** Load + inspect tokenizer & `distilbert-base-uncased` head (66.9M params, `768→3`), wire label maps into config, and run a one-batch untrained **forward-pass sanity check** — `notebooks/liquidAI_prep.ipynb`
@@ -103,7 +108,101 @@
 - Batch-score cached headlines → per-article sentiment probabilities.
 - Aggregate to weekly per-stock sentiment **shock** and **trend** (paper's design).
 
-### Iteration 5 — Learning-to-rank backtest (post-interview)
+**Status:** AAPL fine-tune ✅ complete (see progress log). Multi-ticker generalisation is Iteration 4.1.5 below.
+
+---
+
+### Iteration 4.1.5 — Multi-ticker generalisation (5-ticker pilot → full universe)
+
+**Goal:** Confirm that a single RavenPack-fine-tuned checkpoint generalises across stocks
+before scaling to all ~500 universe tickers. The AAPL-only run is a proof-of-concept;
+a robust TRNA substitute needs to score *any* stock, not just Apple.
+
+#### Why this step matters
+- A model trained only on AAPL headlines may learn Apple-specific vocabulary (product
+  launches, Tim Cook quotes, iPhone cycle language) that doesn't transfer.
+- A multi-ticker checkpoint trained on diverse stocks is far more likely to generalise
+  to unseen tickers in the full universe.
+- Validating on 5 tickers first is cheap insurance before a multi-hour full-universe run.
+
+#### Pilot ticker selection criteria
+Pick 5 tickers that are:
+1. **Coverage-rich** — ≥20k labeled RavenPack headlines each (check with `ravenpack_split_summary`)
+2. **Sector-diverse** — at least 3 different GICS sectors to avoid sector overfitting
+3. **Already in the batch cache** — avoid needing a fresh WRDS pull
+
+Suggested pilot set (adjust based on actual coverage):
+
+| Ticker | Sector | Rationale |
+| --- | --- | --- |
+| MSFT | Technology | Large-cap tech, different product cycle than AAPL |
+| JPM | Financials | Macro-sensitive; earnings/credit news differs structurally |
+| XOM | Energy | Commodity-driven; very different headline vocabulary |
+| JNJ | Healthcare | Regulatory/FDA news cadence |
+| WMT | Consumer Staples | Retail; volume-driven, low headline volatility |
+
+#### Implementation steps
+
+**Step 1 — Confirm coverage**
+```python
+from sentiment_ltr.models.ravenpack_sentiment import (
+    discover_ravenpack_article_files, load_ravenpack_labeled_frame, ravenpack_split_summary
+)
+PILOT_TICKERS = ["MSFT", "JPM", "XOM", "JNJ", "WMT"]
+for t in PILOT_TICKERS:
+    paths = discover_ravenpack_article_files([t])
+    if paths:
+        labeled = load_ravenpack_labeled_frame([t])
+        print(t, ravenpack_split_summary(labeled))
+    else:
+        print(t, "— no export found")
+```
+
+**Step 2 — Train on pilot set (including AAPL)**
+```python
+from sentiment_ltr.models.ravenpack_sentiment import train_ravenpack
+metrics = train_ravenpack(
+    tickers=["AAPL", "MSFT", "JPM", "XOM", "JNJ", "WMT"],
+    init_from_phrasebank=True,   # warm start
+    num_train_epochs=2,
+    learning_rate=2e-5,
+    per_device_train_batch_size=16,
+    seed=42,
+)
+```
+Checkpoint saved to `data/models/ravenpack_distilbert_best/` (same path — overwrites AAPL-only run).
+
+**Step 3 — Per-ticker evaluation**
+After training, re-evaluate on each ticker's test split individually to confirm the
+checkpoint doesn't sacrifice single-ticker performance for average performance:
+```python
+from sentiment_ltr.models.ravenpack_sentiment import evaluate_phrasebank_baseline_on_ravenpack
+from sentiment_ltr.models.phrasebank_sentiment import resolve_model_dir
+for t in ["AAPL", "MSFT", "JPM", "XOM", "JNJ", "WMT"]:
+    result = evaluate_phrasebank_baseline_on_ravenpack(
+        [t], model_dir=DEFAULT_RAVENPACK_MODEL_DIR, eval_split="test"
+    )
+    print(f"{t:6s}  macro-F1={result['macro_f1']:.1%}  acc={result['accuracy']:.1%}")
+```
+
+**Step 4 — Full universe (gate on coverage)**
+Once the 5-ticker pilot validates:
+- Loop over all tickers in `data/raw/news/ravenpack/` with `discover_ravenpack_article_files()`
+- Skip tickers with < 5,000 labeled rows (insufficient training signal)
+- Train a single checkpoint on the full pooled dataset
+- Store per-ticker test metrics in `metrics.json` under `per_ticker_test`
+
+#### Success criteria
+- [ ] All 5 pilot tickers have test macro-F1 ≥ 60% (well above the 27.5% zero-shot baseline)
+- [ ] No single ticker's F1 collapses below 50% (would indicate negative transfer)
+- [ ] Checkpoint loads and scores an unseen ticker's headlines without error
+
+#### Data leakage check
+The same time-based split (`TRAIN_END = 2011-12-31`, `TEST_START = 2013-01-01`) is applied
+independently per ticker within `ravenpack_to_hf_dataset()`. There is no cross-ticker
+leakage risk — each ticker's articles are entirely independent time series.
+
+---
 **Goal:** Close the loop to the paper.
 - Join weekly sentiment + market features; build quartile rank labels.
 - Train RankNet / ListNet; rolling 2006–2014 backtest; compare to paper Table 3.
@@ -171,8 +270,11 @@ The setup notebook runs end-to-end locally on Apple **MPS**; Colab GPU also work
 | 2026-06-28 | **First training baseline (1.2 + 1.3)** — full-dataset tokenization + 1-epoch `Trainer` on DistilBERT; **val acc 78.9%**, **test acc 80.6%** (~41s on MPS). |
 | 2026-06-29 | **Iteration 2 complete (2.1–2.3)** — macro-F1 in `compute_metrics`, 3 epochs, `load_best_model_at_end` on val F1; **val F1 83.5% / acc 85.2%**, **test F1 82.1% / acc 83.9%** (~125s MPS); saved to `phrasebank_distilbert_best/`. |
 
-**Next up:** card **2.4** — swap in `ProsusAI/finbert` and compare. Then **3.1** confusion matrix + **3.3** raw PyTorch loop for interview prep.
+| 2026-07-06 | **Iteration 4 AAPL fine-tune complete** — `train_ravenpack(["AAPL"])` test macro-F1 **82.1%** (+54.6 pp vs PhraseBank zero-shot); RavenPack Fine-Tuning tab added to `app.py`; colour-coded mismatch tables in notebook. |
+| 2026-07-14 | **Iteration 4.1.5 planned** — multi-ticker generalisation (5-ticker pilot → full universe); section added to this doc. |
+
+**Next up:** **4.1.5a** — confirm RavenPack coverage for MSFT / JPM / XOM / JNJ / WMT; then **4.1.5b** multi-ticker training run.
 
 ---
 
-_Last updated: 2026-06-29_
+_Last updated: 2026-07-14_
