@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}4 — RavenPack Baseline Eval{% endblock %}
+{% block content %}
+<div class="card">
+  <h1>4 · RavenPack Baseline Evaluation</h1>
+  <p class="muted">
+    Score cached RavenPack headlines with the <strong>PhraseBank-trained DistilBERT
+    checkpoint</strong> (no RavenPack fine-tuning). Actual labels come from RavenPack
+    <code>event_sentiment_score</code> (±0.05 → negative / neutral / positive). Mirrors
+    <code>notebooks/finetune_on_ravenpack.ipynb</code> — use this as the out-of-domain
+    baseline before adapting the model to news.
+  </p>
+
+  <nav class="section-nav">
+    <a href="#rp-be-4c">4C Class-level metrics</a>
+    <a href="#rp-be-4d">4D Label distribution shift</a>
+    <a href="#rp-be-4e">4E Run evaluation</a>
+  </nav>
+
+  {% if not deps.finetuning_deps_available %}
+    <div class="alert alert-error">
+      Fine-tuning dependencies are not installed. Run
+      <code>pip install -r requirements-finetuning.txt</code> to run evaluation.
+    </div>
+  {% elif not deps.has_phrasebank_checkpoint %}
+    <div class="alert alert-info">
+      No PhraseBank checkpoint found. Train one from the Sentiment Lab tab or
+      <code>notebooks/liquidAI_prep.ipynb</code> (expected at <code>{{ deps.model_dir }}</code>).
+    </div>
+  {% elif not tickers %}
+    <div class="alert alert-error">
+      No RavenPack article exports found under <code>data/raw/news/ravenpack/</code> or
+      <code>data/raw/data_explorer_top1k/by_ticker/</code>.
+    </div>
+  {% else %}
+    <form id="ticker-form">
+      <label>Ticker
+        <select name="ticker"
+                hx-get="/raven-eval/dataset" hx-trigger="change"
+                hx-target="#dataset-summary" hx-swap="innerHTML"
+                hx-indicator="#dataset-spinner">
+          {% for t in tickers %}<option value="{{ t }}" {% if t == ticker %}selected{% endif %}>{{ t }}</option>{% endfor %}
+        </select>
+      </label>
+      <span id="dataset-spinner" class="htmx-indicator muted"> Loading dataset…</span>
+    </form>
+
+    <div id="dataset-summary">
+      {% include "partials/raven_eval_dataset.html" %}
+    </div>
+
+    <section id="rp-be-4d">
+      <h3>4D · Label distribution shift</h3>
+      <p class="muted">
+        How label prevalence differs between the <strong>PhraseBank training domain</strong> and the
+        <strong>RavenPack out-of-domain</strong> dataset. A large shift here explains any drop in
+        out-of-domain accuracy. Section 4C (class-level metrics) renders below the shift charts,
+        exactly as in the Streamlit tab. First load scores the test split with the checkpoint,
+        which can take a few minutes — results are cached afterwards.
+      </p>
+      <div id="static-dashboard"
+           hx-get="/raven-eval/static?ticker={{ ticker }}"
+           hx-trigger="load"
+           hx-swap="innerHTML">
+        <p class="muted">⏳ Scoring the {{ ticker }} test split with the PhraseBank checkpoint…
+          (first run can take a few minutes; cached afterwards)</p>
+      </div>
+    </section>
+
+    <section id="provenance">
+      <h3>Model provenance &amp; reproducibility snapshot</h3>
+      <p class="muted">
+        Metadata captured at fine-tune time so this exact checkpoint can be reproduced or audited
+        later — git revision, weight checksums, model/tokenizer config, and training data
+        provenance. Mirrors <code>notebooks/finetune_on_ravenpack.ipynb</code>.
+      </p>
+      {% include "partials/raven_eval_provenance.html" %}
+    </section>
+
+    <section id="rp-be-4e">
+      <h3>4E · Run evaluation</h3>
+      <form hx-post="/raven-eval/run" hx-target="#eval-results" hx-swap="innerHTML"
+            hx-include="#ticker-form select" hx-indicator="#eval-spinner">
+        <div class="form-grid">
+          <label>Evaluation split
+            <select name="eval_split">
+              {% for value, label in eval_splits.items() %}
+                <option value="{{ value }}">{{ label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>Max rows (0 = full split)
+            <input type="number" name="max_rows" min="0" step="500" value="0"
+                   title="Cap rows for a faster smoke test. 0 scores the entire split.">
+          </label>
+        </div>
+        <button class="btn btn-primary" type="submit">Run baseline evaluation</button>
+        <span id="eval-spinner" class="htmx-indicator muted"> Scoring headlines with PhraseBank model…</span>
+      </form>
+      <div id="eval-results"></div>
+    </section>
+  {% endif %}
+</div>
+{% endblock %}

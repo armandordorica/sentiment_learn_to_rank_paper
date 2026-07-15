@@ -1,0 +1,58 @@
+{% if provenance is none %}
+  <div class="alert alert-info">
+    No <code>provenance.json</code> found in <code>{{ deps.model_dir }}</code>.
+    Run the provenance cells at the end of <code>notebooks/finetune_on_ravenpack.ipynb</code>
+    to generate one for this checkpoint.
+  </div>
+{% else %}
+  <p class="muted">
+    Generated <strong>{{ provenance.generated_at }}</strong> for checkpoint
+    <strong>{{ provenance.checkpoint_label }}</strong> (<code>{{ provenance.checkpoint_path }}</code>).
+  </p>
+
+  <p><strong>1. Revision hash</strong></p>
+  <div class="metric-row">
+    <div class="metric"><span class="metric-label">Commit</span><span class="metric-value compact">{{ provenance.git_commit }}</span></div>
+    <div class="metric"><span class="metric-label">Branch</span><span class="metric-value compact">{{ provenance.git_branch }}</span></div>
+    <div class="metric"><span class="metric-label">Dirty tree at run time</span><span class="metric-value compact">{{ "Yes" if provenance.git_dirty else "No" }}</span></div>
+  </div>
+  {% if provenance.dirty_files %}
+    <details>
+      <summary>Uncommitted files at run time</summary>
+      <pre class="log-pre">{{ provenance.dirty_files | join("\n") }}</pre>
+    </details>
+  {% endif %}
+
+  <p><strong>2. Weights snapshot</strong></p>
+  {% if provenance.weights %}
+    {% set table = provenance.weights %}
+    {% include "partials/data_table.html" %}
+  {% else %}
+    <p class="muted">No weight files recorded.</p>
+  {% endif %}
+
+  <p><strong>3. Config info</strong></p>
+  <div class="metric-row">
+    <div class="metric"><span class="metric-label">num_labels</span><span class="metric-value">{{ provenance.num_labels }}</span></div>
+    <div class="metric"><span class="metric-label">Model type</span><span class="metric-value compact">{{ provenance.model_type }}</span></div>
+    <div class="metric"><span class="metric-label">Architecture</span><span class="metric-value compact">{{ provenance.architecture }}</span></div>
+  </div>
+  <p class="muted"><code>id2label</code>: {{ provenance.id2label }}</p>
+
+  <p><strong>4. Tokenizer settings</strong></p>
+  <div class="metric-row">
+    <div class="metric"><span class="metric-label">max_length (train time)</span><span class="metric-value">{{ provenance.tok_max_length }}</span></div>
+    <div class="metric"><span class="metric-label">Padding strategy</span><span class="metric-value compact">{{ provenance.tok_padding }}</span></div>
+    <div class="metric"><span class="metric-label">Truncation</span><span class="metric-value compact">{{ "Yes" if provenance.tok_truncation else "No" }}</span></div>
+  </div>
+
+  <p><strong>5. Data provenance</strong></p>
+  <p class="muted">
+    Dataset: <code>{{ provenance.dataset_repo }}</code> ({{ provenance.dataset_config }}) —
+    {{ provenance.split_type }}. Training seed <strong>{{ provenance.training_seed }}</strong>.
+  </p>
+  {% if provenance.splits %}
+    {% set table = provenance.splits %}
+    {% include "partials/data_table.html" %}
+  {% endif %}
+{% endif %}

@@ -1,0 +1,47 @@
+{% if eval_error %}
+  <div class="alert alert-error">Baseline evaluation failed: {{ eval_error }}</div>
+{% elif result %}
+  <div class="metric-row">
+    <div class="metric"><span class="metric-label">Rows scored</span><span class="metric-value">{{ "{:,}".format(result.n_rows) }}</span></div>
+    <div class="metric"><span class="metric-label">Accuracy</span><span class="metric-value">{{ "%.1f%%"|format(result.accuracy * 100) }}</span></div>
+    <div class="metric"><span class="metric-label">Macro-F1</span><span class="metric-value">{{ "%.1f%%"|format(result.macro_f1 * 100) }}</span></div>
+    <div class="metric"><span class="metric-label">PhraseBank test (in-domain)</span>
+      <span class="metric-value">{{ "%.1f%% F1"|format(result.pb_test_f1 * 100) if result.pb_test_f1 is not none else "—" }}</span></div>
+  </div>
+  <p class="muted">
+    In-domain PhraseBank test:
+    {% if result.pb_test_acc is not none and result.pb_test_f1 is not none %}
+      accuracy <strong>{{ "%.1f%%"|format(result.pb_test_acc * 100) }}</strong> ·
+      macro-F1 <strong>{{ "%.1f%%"|format(result.pb_test_f1 * 100) }}</strong>
+    {% else %}see PhraseBank HF Baseline tab{% endif %}
+    · checkpoint <code>{{ result.model_dir }}</code>
+  </p>
+
+  <div class="chart-cell">{{ result.heatmap | safe }}</div>
+
+  <div class="chart-grid">
+    <div>
+      <p><strong>Confusion matrix — counts</strong></p>
+      {% set table = result.cm_counts %}
+      {% include "partials/data_table.html" %}
+    </div>
+    <div>
+      <p><strong>Confusion matrix — % of actual class</strong></p>
+      {% set table = result.cm_pct %}
+      {% include "partials/data_table.html" %}
+    </div>
+  </div>
+
+  <details>
+    <summary>Classification report</summary>
+    <pre class="log-pre">{{ result.classification_report }}</pre>
+  </details>
+
+  {% if result.mismatches %}
+    <details>
+      <summary>Sample mismatches</summary>
+      {% set table = result.mismatches %}
+      {% include "partials/data_table.html" %}
+    </details>
+  {% endif %}
+{% endif %}

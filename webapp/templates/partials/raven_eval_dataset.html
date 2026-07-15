@@ -1,0 +1,15 @@
+{% if dataset_error %}
+  <div class="alert alert-error">Could not load RavenPack data for {{ ticker }}: {{ dataset_error }}</div>
+{% elif dataset %}
+  <div class="metric-row">
+    <div class="metric"><span class="metric-label">Labeled headlines</span><span class="metric-value">{{ "{:,}".format(dataset.n_labeled) }}</span></div>
+    <div class="metric"><span class="metric-label">Train rows</span><span class="metric-value">{{ "{:,}".format(dataset.n_train) }}</span></div>
+    <div class="metric"><span class="metric-label">Test rows</span><span class="metric-value">{{ "{:,}".format(dataset.n_test) }}</span></div>
+  </div>
+  <details>
+    <summary>Dataset splits &amp; class balance</summary>
+    {% set table = dataset.splits %}
+    {% include "partials/data_table.html" %}
+    <div class="chart-cell">{{ dataset.balance_chart | safe }}</div>
+  </details>
+{% endif %}

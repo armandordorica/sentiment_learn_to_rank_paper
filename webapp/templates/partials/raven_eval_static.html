@@ -1,0 +1,28 @@
+{% if static_error %}
+  <div class="alert alert-error">Could not compute static RavenPack baseline metrics: {{ static_error }}</div>
+{% else %}
+  <div class="chart-cell">{{ shift.shift_chart | safe }}</div>
+  <div class="chart-cell">{{ shift.per_split_chart | safe }}</div>
+
+  <h3 id="rp-be-4c">4C · Class-level baseline metrics</h3>
+  <p class="muted">
+    Same checkpoint, compared across PhraseBank train/validation/test and the selected RavenPack
+    split. Precision and recall are the two components that drive each class F1; macro-F1 averages
+    class F1 equally.
+  </p>
+  {% set table = metrics.summary %}
+  {% include "partials/data_table.html" %}
+
+  <div class="chart-cell">{{ metrics.prevalence_chart | safe }}</div>
+  <details>
+    <summary>Prediction prevalence gap</summary>
+    <p class="muted">Positive values mean the checkpoint predicts that label more often than it appears in RavenPack.</p>
+    {% set table = metrics.gap %}
+    {% include "partials/data_table.html" %}
+  </details>
+
+  <div class="chart-grid">
+    <div class="chart-cell">{{ metrics.f1_chart | safe }}</div>
+    <div class="chart-cell">{{ metrics.pr_chart | safe }}</div>
+  </div>
+{% endif %}

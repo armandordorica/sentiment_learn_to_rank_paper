@@ -320,10 +320,22 @@ See `docs/fastapi_migration_plan.md` for the tab-by-tab migration status.
   delisting reasons, cash-merger exits, filterable per-ticker status table).
 - **Tab 3 — PhraseBank HF Baseline** → `/phrasebank` (dataset dashboard, training
   metrics, live train/val/test evaluation, probability charts).
+- **Tab 4 — RavenPack Baseline Eval** → `/raven-eval` (zero-shot PhraseBank
+  checkpoint on RavenPack headlines: label distribution shift, class-level
+  metrics, provenance snapshot, on-demand evaluation with split/row-cap
+  controls).
 - **Tab 5·8 — RavenPack Fine-Tuning** → `/finetune` (ticker multi-select, coverage
   table, background training job with live HTMX status polling).
 
-Not yet ported: RavenPack Baseline Eval, Sentiment Lab, Paper Validation.
+Not yet ported: Sentiment Lab, Paper Validation.
+
+The webapp has a small test suite under `tests/` (adapter metric math +
+route/template rendering with the model layer mocked):
+
+```bash
+pip install -r requirements-webapp.txt   # includes pytest + httpx
+python -m pytest
+```
 
 ### Run it locally
 

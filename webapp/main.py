@@ -22,6 +22,7 @@ from fastapi.templating import Jinja2Templates
 
 from webapp.api import batch_pipeline as bp
 from webapp.api import phrasebank_baseline as pb
+from webapp.api import ravenpack_eval as re_
 from webapp.api import ravenpack_finetune as rp
 from webapp.api import data_explorer as de
 from webapp.jobs import job_manager
@@ -37,7 +38,7 @@ NAV_ITEMS = [
     {"num": "1", "label": "Data Explorer", "href": "/data-explorer", "enabled": True},
     {"num": "2", "label": "Batch Pipeline", "href": "/batch", "enabled": True},
     {"num": "3", "label": "PhraseBank Baseline", "href": "/phrasebank", "enabled": True},
-    {"num": "4", "label": "RavenPack Baseline Eval", "href": "#", "enabled": False},
+    {"num": "4", "label": "RavenPack Baseline Eval", "href": "/raven-eval", "enabled": True},
     {"num": "5", "label": "RavenPack Fine-Tuning", "href": "/finetune", "enabled": True},
     {"num": "6", "label": "Sentiment Lab", "href": "#", "enabled": False},
     {"num": "7", "label": "Paper Validation", "href": "#", "enabled": False},
@@ -322,6 +323,93 @@ def finetune_train_status(request: Request, job_id: str) -> HTMLResponse:
         request,
         "partials/train_status.html",
         {"job": job, "error": None if job else "Job not found."},
+    )
+
+
+@app.get("/raven-eval", response_class=HTMLResponse)
+def raven_eval_page(request: Request) -> HTMLResponse:
+    """Tab 4 — mirrors ``render_ravenpack_baseline_eval_tab()`` in app.py."""
+    deps = re_.deps_status()
+    tickers = (
+        re_.available_tickers()
+        if deps["finetuning_deps_available"] and deps["has_phrasebank_checkpoint"]
+        else []
+    )
+    # Default to AAPL — currently the only ticker with a rich RavenPack export
+    # (headline column); same reason rp.pilot_default_tickers() defaults to it.
+    ticker = ("AAPL" if "AAPL" in tickers else tickers[0]) if tickers else None
+    dataset, dataset_error = None, None
+    if ticker:
+        try:
+            dataset = re_.dataset_summary(ticker)
+        except Exception as exc:  # noqa: BLE001
+            dataset_error = str(exc)
+    ctx = _base_context(active_href="/raven-eval")
+    ctx.update({
+        "deps": deps,
+        "tickers": tickers,
+        "ticker": ticker,
+        "dataset": dataset,
+        "dataset_error": dataset_error,
+        "eval_splits": re_.EVAL_SPLITS,
+        "provenance": re_.provenance_context(),
+    })
+    return templates.TemplateResponse(request, "ravenpack_eval.html", ctx)
+
+
+@app.get("/raven-eval/dataset", response_class=HTMLResponse)
+def raven_eval_dataset(request: Request, ticker: str = "") -> HTMLResponse:
+    """HTMX partial: dataset summary when the ticker selection changes."""
+    dataset, dataset_error = None, None
+    try:
+        dataset = re_.dataset_summary(ticker)
+    except Exception as exc:  # noqa: BLE001
+        dataset_error = str(exc)
+    return templates.TemplateResponse(
+        request, "partials/raven_eval_dataset.html",
+        {"ticker": ticker, "dataset": dataset, "dataset_error": dataset_error},
+    )
+
+
+@app.get("/raven-eval/static", response_class=HTMLResponse)
+def raven_eval_static(
+    request: Request,
+    ticker: str = "",
+    eval_split: str = "test",
+    max_rows: int = 0,
+) -> HTMLResponse:
+    """HTMX partial: 4D distribution-shift charts + 4C class-metric dashboard.
+
+    Requires scoring the selected split with the checkpoint (slow on first
+    call, memoized afterwards) — hence loaded lazily after page render.
+    """
+    try:
+        eval_result = re_.run_eval(ticker, eval_split, max_rows)
+        ctx = {
+            "shift": re_.distribution_shift_context(ticker, eval_result),
+            "metrics": re_.class_metrics_context(eval_result),
+            "static_error": None,
+        }
+    except Exception as exc:  # noqa: BLE001
+        ctx = {"shift": None, "metrics": None, "static_error": str(exc)}
+    return templates.TemplateResponse(request, "partials/raven_eval_static.html", ctx)
+
+
+@app.post("/raven-eval/run", response_class=HTMLResponse)
+def raven_eval_run(
+    request: Request,
+    ticker: str = Form(default=""),
+    eval_split: str = Form(default="test"),
+    max_rows: int = Form(default=0),
+) -> HTMLResponse:
+    """4E — run (or fetch memoized) baseline evaluation and render results."""
+    try:
+        result, eval_error = re_.eval_results_context(ticker, eval_split, max_rows), None
+    except Exception as exc:  # noqa: BLE001
+        result, eval_error = None, str(exc)
+    return templates.TemplateResponse(
+        request, "partials/raven_eval_results.html",
+        {"result": result, "eval_error": eval_error},
     )
 
 

@@ -60,7 +60,7 @@ Legend: ⬜ Not started · 🟨 In progress · ✅ Done · 🚫 Deferred/won't p
 | 1 | **Data Explorer** | ✅ | 1A API status & ticker form · 1B Overview pane · 1C Prices pane · 1D News pane · 1E Sentiment pane · 1F Raw data pane | Ported at `/data-explorer`: cache-first loading, optional live refresh, provider status, Plotly price/news/sentiment charts, and raw tables. |
 | 2 | **Batch Pipeline (Top-1K)** | ✅ | 2A Runner controls & live progress · 2B Cached data snapshot · 2C Failure reasons by provider · 2D Delisting reasons (CRSP) · 2E Cash-merger exits | Ported at `/batch` (`webapp/api/batch_pipeline.py`): same `scripts/run_batch_pipeline.py` subprocess (pid/status/log files), HTMX 5s status polling, manifests table with emoji provider/delisting/exit cells, delisting + cash-merger WRDS fetch, CSV export, combined parquets. Verified side by side against the running Streamlit tab — all metrics identical (see "Tab 2 port — what was built & verified" below). Caveat: launch/stop builds the identical runner CLI but a live batch hasn't been started from the new UI yet. |
 | 3 | **PhraseBank HF Baseline** | 🟨 | 3A Model & training ✅ · 3B Reproduction recipe · 3C Performance metrics ✅ · 3D Dataset dashboard ✅ · 3F W&B experiment tracking | Ported at `/phrasebank` (`webapp/api/phrasebank_baseline.py`): dataset dashboard, training metrics, on-demand train/val/test split evaluation via `evaluate_checkpoint_on_split()`, probability charts — same Plotly figures as Streamlit. 3B and 3F not yet ported. |
-| 4 | **RavenPack Baseline Eval** | ⬜ | 4C Class-level metrics · 4D Label distribution shift · 4E Run evaluation | Zero-shot eval of PhraseBank checkpoint on RavenPack headlines. |
+| 4 | **RavenPack Baseline Eval** | ✅ | 4C Class-level metrics · 4D Label distribution shift · 4E Run evaluation | Ported at `/raven-eval` (`webapp/api/ravenpack_eval.py`): same `evaluate_phrasebank_baseline_on_ravenpack()` scoring, 4C/4D lazy-load via HTMX (first run scores the split, memoized after), provenance snapshot, on-demand 4E eval with split/row-cap controls. Covered by `tests/test_ravenpack_eval.py` (15 tests) and verified in-browser on real AAPL data — see "Tab 4 port" below. |
 | 5 | **RavenPack Fine-Tuning ⭐** | 🟨 | 5·1 Train/val/test split · 5·2 Tokenization & padding · 5·3 Macro-F1 before/after · 5·4 Per-class F1 · 5·5 Label prevalence · 5·6 Sample headlines · 5·7 Hyperparameters & provenance · **5·8 Train (1/5/N tickers) ✅ ported** | Main experiment tab — most complex. **5·8 is the first ported section** (`webapp/templates/finetune.html` + `webapp/api/ravenpack_finetune.py`): ticker multi-select, HTMX-updated coverage table, background training job via `webapp/jobs.py`, live-polled status. Sections 5·1–5·7 (charts/tables) not yet ported. |
 | 6 | **Sentiment Lab** | ⬜ | 6A News data coverage · 6B Compute device · 6C Financial PhraseBank dataset · 6D RavenPack articles browser · 6E Live inference (score a headline) | Interactive version of `liquidAI_prep.ipynb`; live-inference form is a good HTMX exercise. |
 | 7 | **Paper Validation (2003–2014)** | ⬜ | 7A Universe summary · 7B Top 20 by volume · 7C Monthly volume over time · 7D Monthly prices | Sanity-check charts/tables over the CRSP candidate universe. Simplest, mostly static — **recommended first proof-of-concept**. |
@@ -151,6 +151,50 @@ Ported 2026-07-15 (commits `fd98260`, `2000f27`).
   UI (identical CLI construction to `app.py`'s `_launch_batch`, but a real
   run takes hours over 1,000 tickers) — exercise on the next intentional
   batch run before fully trusting 2A's launch path.
+
+## Tab 4 port — what was built & verified
+
+Ported 2026-07-15.
+
+- `webapp/api/ravenpack_eval.py` — adapter. The confusion-matrix → metrics
+  transforms (`class_metrics_from_confusion`, `summary_from_class_metrics`,
+  `label_prevalence_from_confusion`, `prevalence_gap_table`) are verbatim
+  ports of the app.py helpers kept as **pure functions** so they're
+  unit-testable without loading DistilBERT. Expensive computations
+  (`run_eval`, `phrasebank_class_metrics`) are memoized on a checkpoint
+  mtime token — the FastAPI equivalent of app.py's
+  `@st.cache_data(ttl=3600)` wrappers.
+- Routes: `GET /raven-eval` (page — fast, no inference), `GET
+  /raven-eval/dataset` (ticker-change partial), `GET /raven-eval/static`
+  (4D shift charts + 4C class dashboard; lazy-loaded via HTMX on page load
+  because the first call scores the whole split), `POST /raven-eval/run`
+  (4E results). Default ticker is AAPL (only rich RavenPack export), not
+  the alphabetical first, deliberately improving on Streamlit's index-0
+  default which errors on ticker "A".
+- Templates: `ravenpack_eval.html` + partials `raven_eval_dataset`,
+  `raven_eval_static`, `raven_eval_provenance`, `raven_eval_results`.
+- **Tests** — `tests/test_ravenpack_eval.py` (15 passed, ~2s), first test
+  suite in the repo (`pytest` + `httpx` added to requirements-webapp.txt):
+  hand-computed precision/recall/F1 on a synthetic confusion matrix,
+  cross-checked against scikit-learn; prevalence/gap math;
+  presentation-context builders with the model layer monkeypatched; route
+  wiring + template rendering + error paths via FastAPI `TestClient`.
+  Run with `python -m pytest` from the project root.
+- **Verified in-browser on real data:** AAPL dataset summary (68,722
+  labeled / 37,832 train / 18,154 test — matches the fine-tune tab), 4C
+  summary (PhraseBank train 94.7% / validation 83.5% / test 82.1% macro-F1
+  vs RavenPack test 27.5% out-of-domain), 4E full test-split eval (18,154
+  rows, accuracy 27.3%, macro-F1 27.5%, confusion matrices consistent with
+  the prevalence charts), provenance section, graceful error for tickers
+  without a rich export (e.g. MSFT) — zero console errors. Numbers come
+  from the same `evaluate_phrasebank_baseline_on_ravenpack()` call as
+  Streamlit, which is deterministic given the same checkpoint (row caps
+  use a fixed sampling seed).
+- **Known caveat (inherited from Streamlit):** only AAPL currently has a
+  RavenPack export with a `headline` column; other tickers error with
+  `'str' object has no attribute 'map'` in `load_ravenpack_labeled_frame`.
+  Both UIs surface this as an error box. Fixing the message (or filtering
+  the ticker list to rich exports) would improve both.
 
 ## Working agreement
 
