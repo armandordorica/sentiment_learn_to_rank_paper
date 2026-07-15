@@ -1,0 +1,38 @@
+{% if message %}<div class="alert alert-info">{{ message }}</div>{% endif %}
+{% if s.is_running %}
+  <div hx-get="/batch/status" hx-trigger="load delay:5s" hx-target="#batch-status" hx-swap="innerHTML">
+    <div class="alert alert-success">
+      <strong>Batch running</strong> (PID {{ s.pid }}){% if s.status.current_step %} — <em>{{ s.status.current_step }}</em>{% endif %}<br>
+      Now on: <strong>{{ s.status.current_ticker or "starting…" }}</strong> [rank {{ s.status.current_rank or "—" }}]{% if s.ticker_elapsed is not none %} | <strong>{{ s.ticker_elapsed }}s</strong> on this ticker{% endif %}
+      | <strong>{{ "{:,}".format(s.done) }}</strong> of <strong>{{ "{:,}".format(s.total) }}</strong> done
+      <button class="btn btn-secondary" style="float:right"
+              hx-post="/batch/stop" hx-target="#batch-status" hx-swap="innerHTML"
+              hx-confirm="Kill the running batch process (PID {{ s.pid }})?">🛑 Stop</button>
+    </div>
+    {% if s.total %}
+      <div class="progress-track"><div class="progress-fill" style="width: {{ "%.1f"|format(s.progress * 100) }}%"></div></div>
+      <p class="muted">{{ "{:,}".format(s.done) }} / {{ "{:,}".format(s.total) }} tickers ({{ "%.1f%%"|format(s.progress * 100) }}) — auto-refreshing every 5 s</p>
+    {% else %}
+      <div class="progress-track"><div class="progress-fill" style="width: 0%"></div></div>
+      <p class="muted">Starting… — auto-refreshing every 5 s</p>
+    {% endif %}
+    <details>
+      <summary>📜 Live batch log</summary>
+      {% if s.log_tail %}<pre class="log-pre">{{ s.log_tail }}</pre>
+      {% else %}<p class="muted">Log file not yet created — the batch process is still starting up.</p>{% endif %}
+    </details>
+  </div>
+{% elif s.status %}
+  {% set final = s.status.get("status", "unknown") %}
+  {% if final == "complete" %}
+    <div class="alert alert-success">Last batch <strong>completed</strong> — {{ "{:,}".format(s.done) }} tickers — {{ s.status.updated_at or "" }}</div>
+    {% if s.total %}<div class="progress-track"><div class="progress-fill" style="width:100%"></div></div><p class="muted">{{ "{:,}".format(s.done) }} / {{ "{:,}".format(s.total) }} tickers</p>{% endif %}
+  {% elif final == "stopped_failures" %}
+    <div class="alert alert-error">Last batch <strong>stopped</strong> (too many consecutive failures) — {{ s.status.error or "" }} — {{ s.status.updated_at or "" }}</div>
+    {% if s.total %}<div class="progress-track"><div class="progress-fill" style="width: {{ "%.1f"|format(s.progress * 100) }}%"></div></div><p class="muted">{{ "{:,}".format(s.done) }} / {{ "{:,}".format(s.total) }} tickers before stop</p>{% endif %}
+  {% else %}
+    <div class="alert alert-info">Batch status: <strong>{{ final }}</strong> — {{ s.status.updated_at or "" }}</div>
+  {% endif %}
+{% else %}
+  <div class="alert alert-info">No batch has been run yet. Use the configuration below to launch one.</div>
+{% endif %}

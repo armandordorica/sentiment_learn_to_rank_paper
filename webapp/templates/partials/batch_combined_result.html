@@ -1,0 +1,8 @@
+{% if written %}
+  <div class="alert alert-success">
+    Written:
+    <ul>{% for w in written %}<li><code>{{ w }}</code></li>{% endfor %}</ul>
+  </div>
+{% else %}
+  <div class="alert alert-info">No ticker parquets found yet.</div>
+{% endif %}

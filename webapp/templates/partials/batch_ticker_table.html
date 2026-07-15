@@ -1,0 +1,13 @@
+{% if ticker_view.table %}
+  {% set table = ticker_view.table %}
+  {% include "partials/data_table.html" %}
+  <p class="muted">
+    Showing {{ "{:,}".format(ticker_view.n_shown) }} of {{ "{:,}".format(ticker_view.n_total) }} cached tickers.
+    Provider cells: ✅ ok + row count · ❌/⚠️ fail_reason code.
+    Exit (cash mergers): ✅ CRSP dlret · 🟡 SDC deal price · ⬜ fallback · — n/a.
+    CRSP delisting: 🟢 active · ⛔ code + reason + delisting return (dlret);
+    <code>…</code> = not looked up yet (use the Delisting reasons section to fetch).
+  </p>
+{% else %}
+  <div class="alert alert-info">No ticker data cached yet.</div>
+{% endif %}

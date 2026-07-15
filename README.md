@@ -315,13 +315,15 @@ See `docs/fastapi_migration_plan.md` for the tab-by-tab migration status.
 - **Tab 1 — Data Explorer** → `/data-explorer` (cache-first ticker/date query,
   provider status, price/news/sentiment charts, and raw provider tables; optional
   live refresh across Refinitiv, WRDS/CRSP, Yahoo, and RavenPack).
+- **Tab 2 — Batch Pipeline (Top-1K)** → `/batch` (runner controls with live
+  progress polling, cached-data snapshot, failure reasons by provider, CRSP
+  delisting reasons, cash-merger exits, filterable per-ticker status table).
 - **Tab 3 — PhraseBank HF Baseline** → `/phrasebank` (dataset dashboard, training
   metrics, live train/val/test evaluation, probability charts).
 - **Tab 5·8 — RavenPack Fine-Tuning** → `/finetune` (ticker multi-select, coverage
   table, background training job with live HTMX status polling).
 
-Not yet ported: Batch Pipeline, RavenPack Baseline Eval, Sentiment Lab,
-Paper Validation.
+Not yet ported: RavenPack Baseline Eval, Sentiment Lab, Paper Validation.
 
 ### Run it locally
 

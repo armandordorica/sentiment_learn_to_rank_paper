@@ -11,14 +11,16 @@ Run with:
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from webapp.api import batch_pipeline as bp
 from webapp.api import phrasebank_baseline as pb
 from webapp.api import ravenpack_finetune as rp
 from webapp.api import data_explorer as de
@@ -33,7 +35,7 @@ templates = Jinja2Templates(directory=str(WEBAPP_DIR / "templates"))
 
 NAV_ITEMS = [
     {"num": "1", "label": "Data Explorer", "href": "/data-explorer", "enabled": True},
-    {"num": "2", "label": "Batch Pipeline", "href": "#", "enabled": False},
+    {"num": "2", "label": "Batch Pipeline", "href": "/batch", "enabled": True},
     {"num": "3", "label": "PhraseBank Baseline", "href": "/phrasebank", "enabled": True},
     {"num": "4", "label": "RavenPack Baseline Eval", "href": "#", "enabled": False},
     {"num": "5", "label": "RavenPack Fine-Tuning", "href": "/finetune", "enabled": True},
@@ -87,6 +89,166 @@ def data_explorer_query(
         result, error = None, str(exc)
     return templates.TemplateResponse(
         request, "partials/data_explorer_results.html", {"result": result, "error": error}
+    )
+
+
+@app.get("/batch", response_class=HTMLResponse)
+def batch_page(request: Request) -> HTMLResponse:
+    """Tab 2 — mirrors ``render_batch_pipeline_tab()`` in app.py."""
+    mdf = bp.load_manifests()
+    ctx = _base_context(active_href="/batch")
+    ctx.update({
+        "status_ctx": bp.status_context(),
+        "form": bp.form_defaults(),
+        "snapshot": bp.snapshot(mdf),
+        "fail_sections": bp.fail_reasons(mdf),
+        "delisting": bp.delisting_context(mdf),
+        "delisting_message": None, "delisting_error": None,
+        "cash": bp.cash_merger_context(),
+        "cash_message": None, "cash_error": None,
+        "ticker_view": bp.ticker_table(mdf),
+        "tickers": bp.ticker_options(mdf),
+        "storage": bp.storage_context(),
+    })
+    return templates.TemplateResponse(request, "batch_pipeline.html", ctx)
+
+
+@app.get("/batch/status", response_class=HTMLResponse)
+def batch_status(request: Request) -> HTMLResponse:
+    """HTMX partial: live banner + progress + log tail, self-polls while running."""
+    return templates.TemplateResponse(
+        request, "partials/batch_status.html",
+        {"s": bp.status_context(), "message": None},
+    )
+
+
+@app.post("/batch/launch", response_class=HTMLResponse)
+def batch_launch(
+    request: Request,
+    start_date: str = Form(default="2003-01-01"),
+    end_date: str = Form(default="2014-12-31"),
+    start_rank: int = Form(default=1),
+    max_tickers: str = Form(default=""),
+    sleep_sec: float = Form(default=0.25),
+    stop_after: int = Form(default=25),
+    provider_timeout: float = Form(default=300),
+    year_timeout: int = Form(default=90),
+    use_wrds: bool = Form(default=False),
+    use_yahoo: bool = Form(default=False),
+    use_ravenpack: bool = Form(default=False),
+    use_refinitiv: bool = Form(default=False),
+    force_rerun: bool = Form(default=False),
+    rerun_failed: bool = Form(default=False),
+    rerun_partial: bool = Form(default=False),
+    combined_parquets: bool = Form(default=False),
+) -> HTMLResponse:
+    message = None
+    if bp.pid_running() is not None:
+        message = "A batch is already running — stop it before launching another."
+    else:
+        bp.launch(
+            start=start_date, end=end_date,
+            start_rank=start_rank,
+            max_tickers=int(max_tickers) if max_tickers.strip().isdigit() else None,
+            force_rerun=force_rerun, rerun_failed=rerun_failed, rerun_partial=rerun_partial,
+            sleep_sec=sleep_sec, stop_after=stop_after,
+            provider_timeout=provider_timeout, year_timeout=year_timeout,
+            use_wrds=use_wrds, use_yahoo=use_yahoo,
+            use_ravenpack=use_ravenpack, use_refinitiv=use_refinitiv,
+            combined_parquets=combined_parquets,
+        )
+        time.sleep(1.5)  # give the runner a moment to write batch.pid
+        message = "Batch launched."
+    return templates.TemplateResponse(
+        request, "partials/batch_status.html",
+        {"s": bp.status_context(), "message": message},
+    )
+
+
+@app.post("/batch/stop", response_class=HTMLResponse)
+def batch_stop(request: Request) -> HTMLResponse:
+    message = bp.stop() or "No running batch process found."
+    time.sleep(0.5)
+    return templates.TemplateResponse(
+        request, "partials/batch_status.html",
+        {"s": bp.status_context(), "message": message},
+    )
+
+
+@app.post("/batch/tickers", response_class=HTMLResponse)
+def batch_tickers(
+    request: Request,
+    status_filter: list[str] = Form(default=[]),
+    ticker_filter: str = Form(default=""),
+    only_failed: bool = Form(default=False),
+) -> HTMLResponse:
+    ticker_view = bp.ticker_table(
+        bp.load_manifests(),
+        status_filter=status_filter or None,
+        ticker_filter=ticker_filter.strip(),
+        only_failed=only_failed,
+    )
+    return templates.TemplateResponse(
+        request, "partials/batch_ticker_table.html", {"ticker_view": ticker_view},
+    )
+
+
+@app.get("/batch/ticker", response_class=HTMLResponse)
+def batch_ticker_detail(request: Request, ticker: str = "") -> HTMLResponse:
+    detail = bp.ticker_detail(bp.load_manifests(), ticker) if ticker else None
+    return templates.TemplateResponse(
+        request, "partials/batch_ticker_detail.html", {"detail": detail},
+    )
+
+
+@app.get("/batch/log", response_class=HTMLResponse)
+def batch_log(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request, "partials/batch_log.html", {"log": bp.log_tail(100)},
+    )
+
+
+@app.post("/batch/delisting/fetch", response_class=HTMLResponse)
+def batch_delisting_fetch(request: Request, mode: str = Form(default="missing")) -> HTMLResponse:
+    n_new, error = bp.fetch_delisting(refetch_all=mode == "all")
+    message = None
+    if error is None:
+        message = (f"Updated delisting cache — queried {n_new:,} PERMNO(s). "
+                   f"Saved to {bp.DELISTING_CACHE_PATH.relative_to(bp.PROJECT_ROOT)}.")
+    return templates.TemplateResponse(
+        request, "partials/batch_delisting.html",
+        {"delisting": bp.delisting_context(bp.load_manifests()),
+         "delisting_message": message, "delisting_error": error},
+    )
+
+
+@app.post("/batch/cash-merger/fetch", response_class=HTMLResponse)
+def batch_cash_merger_fetch(request: Request, mode: str = Form(default="missing")) -> HTMLResponse:
+    n_new, error = bp.fetch_cash_merger(refetch_all=mode == "all")
+    message = None
+    if error is None:
+        message = (f"Updated cash-merger cache — checked {n_new:,} PERMNO(s). "
+                   f"Saved to {bp.CASH_MERGER_CACHE_PATH.relative_to(bp.PROJECT_ROOT)}.")
+    return templates.TemplateResponse(
+        request, "partials/batch_cash_merger.html",
+        {"cash": bp.cash_merger_context(),
+         "cash_message": message, "cash_error": error},
+    )
+
+
+@app.get("/batch/cash-merger.csv")
+def batch_cash_merger_csv() -> Response:
+    return Response(
+        content=bp.cash_merger_csv(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=cash_merger_exits.csv"},
+    )
+
+
+@app.post("/batch/combined", response_class=HTMLResponse)
+def batch_write_combined(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request, "partials/batch_combined_result.html", {"written": bp.write_combined()},
     )
 
 

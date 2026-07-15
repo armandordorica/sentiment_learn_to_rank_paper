@@ -1,0 +1,34 @@
+{% if detail %}
+  <div class="metric-row">
+    <div class="metric"><span class="metric-label">Rank</span><span class="metric-value">{{ detail.rank }}</span></div>
+    <div class="metric"><span class="metric-label">Ticker</span><span class="metric-value">{{ detail.ticker }}</span></div>
+    <div class="metric"><span class="metric-label">Status</span><span class="metric-value compact">{{ detail.status }}</span></div>
+    <div class="metric"><span class="metric-label">OK / Fail providers</span><span class="metric-value">{{ detail.ok }} / {{ detail.fail }}</span></div>
+  </div>
+  <p class="muted">Company: {{ detail.company }} | Cached: {{ detail.created_at }}</p>
+
+  {% set table = detail.providers %}
+  {% include "partials/data_table.html" %}
+
+  <p><strong>CRSP delisting (crsp.msedelist)</strong></p>
+  {% if detail.delisting is none %}
+    <p class="muted">Not looked up yet — use the <strong>Delisting reasons (CRSP)</strong> section above to fetch this ticker's delisting code.</p>
+  {% elif detail.delisting.active %}
+    <div class="alert alert-success">🟢 Still active — no CRSP delisting record (dlstcd 100).</div>
+  {% else %}
+    <div class="metric-row">
+      <div class="metric"><span class="metric-label">Delisting code</span><span class="metric-value">{{ detail.delisting.dlstcd }}</span></div>
+      <div class="metric"><span class="metric-label">Delisting return</span><span class="metric-value">{{ detail.delisting.dlret }}</span></div>
+      <div class="metric"><span class="metric-label">Delisting date</span><span class="metric-value compact">{{ detail.delisting.dlstdt }}</span></div>
+      <div class="metric"><span class="metric-label">Successor PERMNO</span><span class="metric-value">{{ detail.delisting.nwperm }}</span></div>
+    </div>
+    <p class="muted"><strong>{{ detail.delisting.category }}</strong> — {{ detail.delisting.label }}</p>
+  {% endif %}
+
+  {% if detail.outputs %}
+    <p><strong>Cached files</strong></p>
+    {% for path in detail.outputs %}<pre class="log-pre">{{ path }}</pre>{% endfor %}
+  {% endif %}
+{% else %}
+  <p class="muted">Ticker not found in cached manifests.</p>
+{% endif %}

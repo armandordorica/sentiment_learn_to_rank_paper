@@ -1,0 +1,55 @@
+{% if cash.universe_missing %}
+  <div class="alert alert-error">Universe file not found: <code>{{ cash.universe_path }}</code></div>
+{% else %}
+  {% if cash_message %}<div class="alert alert-success">{{ cash_message }}</div>{% endif %}
+  {% if cash_error %}<div class="alert alert-error">Cash-merger resolution failed: {{ cash_error }}</div>{% endif %}
+
+  <div class="metric-row">
+    <div class="metric"><span class="metric-label">Cash-merger candidates</span><span class="metric-value">{{ "{:,}".format(cash.n_candidates) }}</span></div>
+    <div class="metric"><span class="metric-label">Resolved (cached)</span><span class="metric-value">{{ "{:,}".format(cash.n_resolved) }}</span></div>
+    <div class="metric"><span class="metric-label">Missing (not yet checked)</span><span class="metric-value">{{ "{:,}".format(cash.n_missing) }}</span></div>
+  </div>
+
+  {% if not cash.n_candidates %}
+    <div class="alert alert-info">
+      No cash-merger candidates found yet. Populate the <strong>Delisting reasons (CRSP)</strong>
+      cache first so dlstcd 232/233 names can be identified.
+    </div>
+  {% else %}
+    <form hx-post="/batch/cash-merger/fetch" hx-target="#cash-merger-section" hx-swap="innerHTML"
+          hx-indicator="#cash-spinner" style="display:inline">
+      <button class="btn btn-secondary" name="mode" value="missing"
+              {% if not cash.creds_ok or not cash.n_missing %}disabled{% endif %}>
+        ⬇️ Resolve missing ({{ "{:,}".format(cash.n_missing) }})
+      </button>
+      <button class="btn btn-secondary" name="mode" value="all"
+              {% if not cash.creds_ok %}disabled{% endif %}
+              hx-confirm="Ignore the cache and re-query every cash-merger PERMNO?">
+        🔄 Re-resolve all candidates
+      </button>
+      <span id="cash-spinner" class="htmx-indicator muted"> Resolving cash-merger exits…</span>
+    </form>
+    {% if not cash.creds_ok %}
+      <div class="alert alert-info">WRDS credentials not configured — set <code>WRDS_USERNAME</code> / <code>WRDS_PASSWORD</code> to fetch.</div>
+    {% endif %}
+
+    {% if cash.cache_empty %}
+      <div class="alert alert-info">No cash-merger exits resolved yet. Click <strong>Resolve missing</strong> to compute them.</div>
+    {% elif not cash.n_resolved_rows %}
+      <p class="muted">No resolved cash-merger exits in the cache yet.</p>
+    {% else %}
+      {% if cash.summary %}
+        {% set table = cash.summary %}
+        {% include "partials/data_table.html" %}
+      {% endif %}
+      {% if cash.source_counts %}
+        <p>
+          <strong>{{ cash.source_counts.crsp }} of {{ cash.n_resolved_rows }}</strong> cash merger tickers
+          resolved via CRSP <code>dlret</code> | <strong>{{ cash.source_counts.sdc }}</strong> via SDC deal
+          price | <strong>{{ cash.source_counts.fallback }}</strong> fallback (last price).
+        </p>
+      {% endif %}
+      <a class="btn btn-secondary" href="/batch/cash-merger.csv" download>⬇️ Download cash-merger exits (CSV)</a>
+    {% endif %}
+  {% endif %}
+{% endif %}

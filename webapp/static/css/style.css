@@ -175,3 +175,30 @@ select[multiple] { width: 100%; max-width: 320px; }
 
 details { margin: 0.75rem 0; }
 details summary { margin-bottom: 0.5rem; }
+
+/* Batch pipeline (Tab 2) */
+.progress-track {
+  width: 100%;
+  height: 0.6rem;
+  background: var(--border);
+  border-radius: 0.3rem;
+  overflow: hidden;
+  margin: 0.5rem 0 0.25rem;
+}
+.progress-fill {
+  height: 100%;
+  background: var(--accent, #2563eb);
+  border-radius: 0.3rem;
+  transition: width 0.4s ease;
+}
+.log-pre {
+  background: #0f172a;
+  color: #e2e8f0;
+  font-size: 0.78rem;
+  padding: 0.75rem;
+  border-radius: 0.4rem;
+  overflow-x: auto;
+  max-height: 24rem;
+  overflow-y: auto;
+  white-space: pre-wrap;
+}

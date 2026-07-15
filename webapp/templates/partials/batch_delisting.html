@@ -1,0 +1,54 @@
+{% if delisting.universe_missing %}
+  <div class="alert alert-error">Universe file not found: <code>{{ delisting.universe_path }}</code></div>
+{% else %}
+  {% if delisting_message %}<div class="alert alert-success">{{ delisting_message }}</div>{% endif %}
+  {% if delisting_error %}<div class="alert alert-error">Delisting lookup failed: {{ delisting_error }}</div>{% endif %}
+
+  <div class="metric-row">
+    <div class="metric"><span class="metric-label">Universe tickers</span><span class="metric-value">{{ "{:,}".format(delisting.n_universe) }}</span></div>
+    <div class="metric"><span class="metric-label">Delisting info cached</span><span class="metric-value">{{ "{:,}".format(delisting.n_cached) }}</span></div>
+    <div class="metric"><span class="metric-label">Missing (not yet checked)</span><span class="metric-value">{{ "{:,}".format(delisting.n_missing) }}</span></div>
+    <div class="metric"><span class="metric-label">Cache rows total</span><span class="metric-value">{{ "{:,}".format(delisting.n_cache_rows) }}</span></div>
+  </div>
+
+  <form hx-post="/batch/delisting/fetch" hx-target="#delisting-section" hx-swap="innerHTML"
+        hx-indicator="#delisting-spinner" style="display:inline">
+    <button class="btn btn-secondary" name="mode" value="missing"
+            {% if not delisting.creds_ok or not delisting.n_missing %}disabled{% endif %}>
+      ⬇️ Fetch missing ({{ "{:,}".format(delisting.n_missing) }})
+    </button>
+    <button class="btn btn-secondary" name="mode" value="all"
+            {% if not delisting.creds_ok %}disabled{% endif %}
+            hx-confirm="Ignore the cache and re-query all 1,000 PERMNOs from CRSP?">
+      🔄 Re-fetch entire universe
+    </button>
+    <span id="delisting-spinner" class="htmx-indicator muted"> Querying CRSP delisting info…</span>
+  </form>
+  {% if not delisting.creds_ok %}
+    <div class="alert alert-info">WRDS credentials not configured — set <code>WRDS_USERNAME</code> / <code>WRDS_PASSWORD</code> to fetch.</div>
+  {% endif %}
+
+  {% if delisting.cache_empty %}
+    <div class="alert alert-info">No delisting info cached yet. Click <strong>Fetch missing</strong> to pull it from CRSP.</div>
+  {% elif delisting.n_delisted is not none %}
+    <div class="metric-row">
+      <div class="metric"><span class="metric-label">Delisted (CRSP exit)</span><span class="metric-value">{{ "{:,}".format(delisting.n_delisted) }}</span></div>
+      <div class="metric"><span class="metric-label">Still active</span><span class="metric-value">{{ "{:,}".format(delisting.n_active) }}</span></div>
+      <div class="metric"><span class="metric-label">Mean delisting return</span><span class="metric-value">{{ delisting.mean_dlret }}</span></div>
+    </div>
+    {% if delisting.category_chart %}<div class="chart-cell">{{ delisting.category_chart | safe }}</div>{% endif %}
+    {% if delisting.code_counts %}
+      {% set table = delisting.code_counts %}
+      {% include "partials/data_table.html" %}
+    {% endif %}
+    {% if delisting.detail %}
+      <details>
+        <summary>📋 Per-ticker delisting detail ({{ "{:,}".format(delisting.detail.total) }} universe tickers)</summary>
+        {% set table = delisting.detail %}
+        {% include "partials/data_table.html" %}
+      </details>
+    {% endif %}
+  {% else %}
+    <p class="muted">No cached delisting rows match the universe.</p>
+  {% endif %}
+{% endif %}

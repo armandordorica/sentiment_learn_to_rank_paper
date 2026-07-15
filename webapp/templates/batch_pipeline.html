@@ -1,0 +1,233 @@
+{% extends "base.html" %}
+{% block title %}2 — Batch Pipeline (Top-1K){% endblock %}
+{% block content %}
+<div class="card">
+  <h1>2 · Top-1,000 Batch Pipeline</h1>
+  <p class="muted">
+    Pull and cache WRDS/CRSP, Yahoo, and RavenPack data for every ticker in the CRSP
+    top-volume universe. Each ticker is cached immediately; reruns skip completed tickers
+    automatically.
+  </p>
+
+  <nav class="section-nav">
+    <a href="#bp-2a">2A Runner &amp; progress</a><a href="#bp-2b">2B Cached snapshot</a>
+    <a href="#bp-2c">2C Failure reasons</a><a href="#bp-2d">2D Delisting (CRSP)</a>
+    <a href="#bp-2e">2E Cash-merger exits</a><a href="#bp-tickers">Per-ticker status</a>
+  </nav>
+
+  <section id="bp-2a">
+    <h3>2A · Runner controls &amp; live progress</h3>
+    <div id="batch-status"
+         hx-get="/batch/status"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+      <p class="muted">Loading batch status…</p>
+    </div>
+
+    <details {% if not status_ctx.is_running %}open{% endif %}>
+      <summary><strong>⚙️ Configuration</strong></summary>
+      <form hx-post="/batch/launch" hx-target="#batch-status" hx-swap="innerHTML"
+            hx-indicator="#launch-spinner">
+        <div class="form-grid">
+          <label>Start date<input type="date" name="start_date" value="{{ form.start_date }}" required></label>
+          <label>End date<input type="date" name="end_date" value="{{ form.end_date }}" required></label>
+          <label>Start rank<input type="number" name="start_rank" min="1" max="999" value="{{ form.start_rank }}"></label>
+          <label>Max tickers (blank = all)<input type="number" name="max_tickers" min="1" placeholder="all"></label>
+          <label>Sleep between tickers (s)<input type="number" name="sleep_sec" min="0" max="10" step="0.05" value="{{ form.sleep_sec }}"></label>
+          <label>Stop after N consecutive failures<input type="number" name="stop_after" min="1" max="200" value="{{ form.stop_after }}"></label>
+          <label>Provider timeout (s)<input type="number" name="provider_timeout" min="30" max="1800" step="30" value="{{ form.provider_timeout }}"></label>
+          <label>RavenPack per-year timeout (s)<input type="number" name="year_timeout" min="10" max="300" step="10" value="{{ form.year_timeout }}"></label>
+        </div>
+        <p><strong>Providers</strong></p>
+        <div class="check-grid">
+          <label><input type="checkbox" name="use_wrds" value="true" {% if form.use_wrds %}checked{% endif %}> WRDS/CRSP</label>
+          <label><input type="checkbox" name="use_yahoo" value="true" {% if form.use_yahoo %}checked{% endif %}> Yahoo Finance</label>
+          <label><input type="checkbox" name="use_ravenpack" value="true" {% if form.use_ravenpack %}checked{% endif %}> RavenPack</label>
+          <label><input type="checkbox" name="use_refinitiv" value="true" {% if form.use_refinitiv %}checked{% endif %}> Refinitiv</label>
+        </div>
+        <p><strong>Options</strong></p>
+        <div class="check-grid">
+          <label><input type="checkbox" name="force_rerun" value="true"> Force rerun (ignore cache)</label>
+          <label><input type="checkbox" name="rerun_failed" value="true" checked> Retry failed tickers</label>
+          <label><input type="checkbox" name="rerun_partial" value="true" checked title="Re-fetch only the providers that failed; keeps already-ok data intact."> Smart retry partial tickers</label>
+          <label><input type="checkbox" name="combined_parquets" value="true" checked> Write combined parquets</label>
+        </div>
+        {% if not form.creds_ok %}
+          <div class="alert alert-info">WRDS credentials not configured — set <code>WRDS_USERNAME</code> / <code>WRDS_PASSWORD</code> to enable WRDS/CRSP and RavenPack.</div>
+        {% endif %}
+        <button class="btn btn-primary" type="submit">🚀 Launch Batch</button>
+        <span id="launch-spinner" class="htmx-indicator muted"> Launching…</span>
+      </form>
+    </details>
+  </section>
+
+  <section id="bp-2b">
+    <h3>2B · 📦 Cached data snapshot</h3>
+    {% if snapshot.empty %}
+      <div class="alert alert-info">No tickers cached yet — 0 / {{ "{:,}".format(snapshot.universe_size) }} in the universe.</div>
+    {% else %}
+      <div class="metric-row">
+        <div class="metric"><span class="metric-label">Cached</span><span class="metric-value">{{ "{:,}".format(snapshot.n_cached) }} / {{ "{:,}".format(snapshot.universe_size) }}</span></div>
+        <div class="metric"><span class="metric-label">🟢 Complete</span><span class="metric-value">{{ "{:,}".format(snapshot.n_complete) }}</span></div>
+        <div class="metric"><span class="metric-label">🟡 Partial</span><span class="metric-value">{{ "{:,}".format(snapshot.n_partial) }}</span></div>
+        <div class="metric"><span class="metric-label">🔴 Failed</span><span class="metric-value">{{ "{:,}".format(snapshot.n_failed) }}</span></div>
+        <div class="metric"><span class="metric-label">⬜ Not cached</span><span class="metric-value">{{ "{:,}".format(snapshot.n_never) }}</span></div>
+        <div class="metric"><span class="metric-label">Fully done</span><span class="metric-value">{{ "%.1f%%"|format(snapshot.pct_complete) }}</span></div>
+      </div>
+      <div class="progress-track" title="{{ "{:,}".format(snapshot.n_cached) }} tickers have at least one cached manifest">
+        <div class="progress-fill" style="width: {{ "%.1f"|format(snapshot.cached_frac * 100) }}%"></div>
+      </div>
+      <p class="muted">{{ "{:,}".format(snapshot.n_cached) }} tickers have at least one cached manifest · {{ "{:,}".format(snapshot.n_complete) }} fully complete ({{ "%.1f%%"|format(snapshot.pct_complete) }} of universe)</p>
+
+      <p><strong>Provider coverage</strong> — across all cached tickers</p>
+      <div class="table-scroll">
+        <table class="data-table">
+          <thead><tr><th>Provider</th><th>✅ ok</th><th>❌ failed</th><th>⚠️ empty</th><th>other</th><th>% ok</th></tr></thead>
+          <tbody>
+            {% for row in snapshot.coverage %}
+              <tr>
+                <td>{{ row.provider }}</td><td>{{ "{:,}".format(row.ok) }}</td><td>{{ "{:,}".format(row.failed) }}</td>
+                <td>{{ "{:,}".format(row.empty) }}</td><td>{{ "{:,}".format(row.other) }}</td><td>{{ "%.1f%%"|format(row.pct_ok) }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
+  </section>
+
+  <section id="bp-2c">
+    <h3>2C · Failure reasons by provider</h3>
+    <p class="muted">
+      Counts of non-ok tickers among cached manifests, grouped by machine-readable
+      <code>fail_reason</code> code. Hover a bar for the human-readable label.
+    </p>
+    {% if snapshot.empty %}
+      <div class="alert alert-info">No cached tickers yet — failure breakdown will appear after the first batch run.</div>
+    {% else %}
+      {% for sec in fail_sections %}
+        <h4>{{ sec.provider }}</h4>
+        {% if sec.total == 0 %}
+          <div class="alert alert-success">No failures recorded for this provider.</div>
+        {% else %}
+          <div class="metric-row">
+            <div class="metric"><span class="metric-label">Non-ok tickers</span><span class="metric-value">{{ "{:,}".format(sec.total) }}</span></div>
+          </div>
+          {% set table = sec.table %}
+          {% include "partials/data_table.html" %}
+          <div class="chart-cell">{{ sec.chart | safe }}</div>
+        {% endif %}
+      {% endfor %}
+    {% endif %}
+  </section>
+
+  <section id="bp-2d">
+    <h3>2D · Delisting reasons (CRSP)</h3>
+    <p class="muted">
+      CRSP <code>crsp.msedelist</code> records <em>why</em> a stock left the market
+      (<code>dlstcd</code>) and the return on exit (<code>dlret</code>). Cached for all
+      1,000 universe PERMNOs — only missing names are queried from WRDS.
+    </p>
+    <div id="delisting-section">
+      {% include "partials/batch_delisting.html" %}
+    </div>
+  </section>
+
+  <section id="bp-2e">
+    <h3>2E · 💵 Cash-merger exits</h3>
+    <p class="muted">
+      For stocks that left the market via a <strong>cash merger</strong> (CRSP
+      <code>dlstcd</code> 232/233), the final-week return is recovered from CRSP
+      <code>dlret</code>, estimated from the SDC M&amp;A deal price, or set to 0 as a
+      last-price fallback. Only missing PERMNOs are queried from WRDS.
+    </p>
+    <div id="cash-merger-section">
+      {% include "partials/batch_cash_merger.html" %}
+    </div>
+  </section>
+
+  <section id="bp-tickers">
+    <h3>Per-ticker status</h3>
+    <form hx-post="/batch/tickers" hx-target="#ticker-table" hx-swap="innerHTML"
+          hx-trigger="change, submit" hx-indicator="#ticker-spinner">
+      <div class="check-grid">
+        <label><input type="checkbox" name="status_filter" value="complete"> complete</label>
+        <label><input type="checkbox" name="status_filter" value="partial"> partial</label>
+        <label><input type="checkbox" name="status_filter" value="failed"> failed</label>
+        <label><input type="checkbox" name="status_filter" value="error"> error</label>
+        <label><input type="checkbox" name="only_failed" value="true"> Only show provider failures</label>
+        <label>Filter ticker <input name="ticker_filter" value="" maxlength="16" style="width:7rem"></label>
+      </div>
+      <button class="btn btn-secondary" type="submit">🔄 Refresh table</button>
+      <span id="ticker-spinner" class="htmx-indicator muted"> Loading…</span>
+    </form>
+    <div id="ticker-table">
+      {% include "partials/batch_ticker_table.html" %}
+    </div>
+
+    <h3>Ticker detail</h3>
+    <form hx-get="/batch/ticker" hx-target="#ticker-detail" hx-swap="innerHTML" hx-trigger="change">
+      <label>Select ticker for detail
+        <select name="ticker">
+          <option value="">—</option>
+          {% for t in tickers %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
+        </select>
+      </label>
+    </form>
+    <div id="ticker-detail"></div>
+  </section>
+
+  <section id="bp-misc">
+    <details>
+      <summary><strong>📄 Full batch log</strong></summary>
+      <div hx-get="/batch/log" hx-trigger="click from:closest details" hx-swap="innerHTML">
+        <p class="muted">Loading…</p>
+      </div>
+    </details>
+
+    <details {% if snapshot.empty %}open{% endif %}>
+      <summary><strong>📁 Storage — where files are saved</strong></summary>
+      <p><strong>Root directory:</strong> <code>{{ storage.root }}/</code></p>
+      <pre class="log-pre">by_ticker/
+  rank_0001_C/
+    wrds_prices.parquet       ← CRSP daily prices
+    wrds_names.parquet        ← CRSP name history
+    yahoo_prices.parquet      ← Yahoo Finance daily prices
+    ravenpack_articles.parquet← RavenPack sentiment articles
+    refinitiv_prices.parquet  ← Refinitiv daily prices (if enabled)
+    manifest.json             ← row counts, status, file paths
+    provider_status.parquet   ← per-provider ok/fail summary
+  rank_0002_BAC/
+  ...
+combined/
+  wrds_prices.parquet         ← all tickers merged (written at end)
+  yahoo_prices.parquet
+  ravenpack_articles.parquet
+batch_progress.csv            ← one row per ticker processed
+batch_status.json             ← current run state
+batch_runner.log              ← full stdout log</pre>
+      {% if storage.n_dirs %}
+        <div class="metric-row">
+          <div class="metric"><span class="metric-label">Ticker folders</span><span class="metric-value">{{ "{:,}".format(storage.n_dirs) }}</span></div>
+          <div class="metric"><span class="metric-label">Total size on disk</span><span class="metric-value">{{ storage.total_mb }}</span></div>
+          <div class="metric"><span class="metric-label">Avg per ticker</span><span class="metric-value">{{ storage.avg_mb }}</span></div>
+        </div>
+      {% endif %}
+    </details>
+
+    <details>
+      <summary><strong>📦 Combined parquets</strong></summary>
+      <p class="muted">
+        Once the batch is complete (or partially done), merge all per-ticker parquets into
+        provider-level files under <code>data/raw/data_explorer_top1k/combined/</code>.
+      </p>
+      <button class="btn btn-secondary"
+              hx-post="/batch/combined"
+              hx-target="#combined-result" hx-swap="innerHTML"
+              hx-indicator="#combined-spinner">Write combined parquets now</button>
+      <span id="combined-spinner" class="htmx-indicator muted"> Merging…</span>
+      <div id="combined-result"></div>
+    </details>
+  </section>
+</div>
+{% endblock %}
