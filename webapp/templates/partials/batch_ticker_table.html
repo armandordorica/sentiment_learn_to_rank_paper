@@ -8,6 +8,8 @@
     CRSP delisting: 🟢 active · ⛔ code + reason + delisting return (dlret);
     <code>…</code> = not looked up yet (use the Delisting reasons section to fetch).
   </p>
+{% elif ticker_view.n_total %}
+  <p class="muted">No tickers match the current filters — showing 0 of {{ "{:,}".format(ticker_view.n_total) }} cached tickers.</p>
 {% else %}
   <div class="alert alert-info">No ticker data cached yet.</div>
 {% endif %}

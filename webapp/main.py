@@ -195,9 +195,11 @@ def batch_tickers(
 
 @app.get("/batch/ticker", response_class=HTMLResponse)
 def batch_ticker_detail(request: Request, ticker: str = "") -> HTMLResponse:
-    detail = bp.ticker_detail(bp.load_manifests(), ticker) if ticker else None
+    if not ticker:
+        return HTMLResponse("")  # "—" placeholder selected — clear the panel
     return templates.TemplateResponse(
-        request, "partials/batch_ticker_detail.html", {"detail": detail},
+        request, "partials/batch_ticker_detail.html",
+        {"detail": bp.ticker_detail(bp.load_manifests(), ticker)},
     )
 
 
