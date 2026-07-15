@@ -1,0 +1,7 @@
+{% if table %}
+<div class="table-scroll">
+  <table class="data-table"><thead><tr>{% for col in table.columns %}<th>{{ col }}</th>{% endfor %}</tr></thead>
+  <tbody>{% for row in table.rows %}<tr>{% for col in table.columns %}<td>{{ row[col] if row[col] is not none else "—" }}</td>{% endfor %}</tr>{% endfor %}</tbody></table>
+</div>
+{% if table.total > table.rows|length %}<p class="muted">Showing {{ table.rows|length }} of {{ table.total }} rows.</p>{% endif %}
+{% else %}<p class="muted">No rows available.</p>{% endif %}

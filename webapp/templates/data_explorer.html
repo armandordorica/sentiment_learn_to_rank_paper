@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}1 — Data Explorer{% endblock %}
+{% block content %}
+<div class="card">
+  <h1>1 · Unified Ticker Data Explorer</h1>
+  <p class="muted">One ticker and date range across Refinitiv, WRDS/CRSP, Yahoo Finance, and RavenPack. Cached batch data is used first; a live refresh ignores the cache.</p>
+
+  <nav class="section-nav">
+    <a href="#de-1a">1A Form</a><a href="#de-1b">1B Overview</a><a href="#de-1c">1C Prices</a>
+    <a href="#de-1d">1D News</a><a href="#de-1e">1E Sentiment</a><a href="#de-1f">1F Raw data</a>
+  </nav>
+
+  <section id="de-1a">
+    <h3>1A · API status &amp; ticker form</h3>
+    <div class="metric-row">
+      <div class="metric"><span class="metric-label">Refinitiv</span><span class="metric-value compact">{{ status.refinitiv }}</span></div>
+      <div class="metric"><span class="metric-label">WRDS/CRSP</span><span class="metric-value compact">{{ status.wrds }}</span></div>
+      <div class="metric"><span class="metric-label">Yahoo</span><span class="metric-value compact">{{ status.yahoo }}</span></div>
+      <div class="metric"><span class="metric-label">RavenPack</span><span class="metric-value compact">{{ status.ravenpack }}</span></div>
+    </div>
+
+    {% if cache %}
+      <div class="alert alert-success">Cached data is available for AAPL{% if cache.company_name %} ({{ cache.company_name }}){% endif %}. Window {{ cache.start_date or "—" }} → {{ cache.end_date or "—" }}.</div>
+    {% endif %}
+
+    <form hx-post="/data-explorer/query" hx-target="#explorer-results" hx-swap="innerHTML" hx-indicator="#explorer-spinner">
+      <div class="quick-buttons">
+        {% for symbol in quick_tickers %}<button type="button" class="btn btn-secondary" onclick="this.form.ticker.value='{{ symbol }}'">{{ symbol }}</button>{% endfor %}
+        <button type="button" class="btn btn-secondary" onclick="this.form.start_date.value='2003-01-01';this.form.end_date.value='2014-12-31'">Paper window</button>
+        <button type="button" class="btn btn-secondary" onclick="this.form.start_date.value='1990-01-01';this.form.end_date.value='{{ today }}'">Full history</button>
+      </div>
+      <div class="form-grid">
+        <label>Ticker<input name="ticker" value="{{ ticker }}" maxlength="16" required></label>
+        <label>Start date<input type="date" name="start_date" value="{{ start_date }}" min="1990-01-01" max="{{ today }}" required></label>
+        <label>End date<input type="date" name="end_date" value="{{ end_date }}" min="1990-01-01" max="{{ today }}" required></label>
+      </div>
+      <div class="check-grid">
+        <label><input type="checkbox" name="use_refinitiv" value="true" {% if defaults.refinitiv %}checked{% endif %}> Refinitiv prices/news</label>
+        <label><input type="checkbox" name="use_wrds" value="true" {% if defaults.wrds %}checked{% endif %}> WRDS/CRSP prices</label>
+        <label><input type="checkbox" name="use_yahoo" value="true" checked> Yahoo prices</label>
+        <label><input type="checkbox" name="use_ravenpack" value="true" {% if defaults.ravenpack %}checked{% endif %}> RavenPack sentiment</label>
+        <label><input type="checkbox" name="include_refinitiv_news" value="true" {% if defaults.refinitiv %}checked{% endif %}> Include Refinitiv headlines</label>
+      </div>
+      <p class="muted">Load data prefers the local cache. Provider choices apply when a live pull is needed.</p>
+      <button class="btn btn-primary" type="submit" name="action" value="load">Load data</button>
+      <button class="btn btn-secondary" type="submit" name="action" value="live">Re-pull live (ignore cache)</button>
+      <span id="explorer-spinner" class="htmx-indicator muted"> Retrieving data…</span>
+    </form>
+  </section>
+</div>
+<div id="explorer-results"><div class="card result-card"><p class="muted">Choose a ticker and click <strong>Load data</strong>.</p></div></div>
+{% endblock %}

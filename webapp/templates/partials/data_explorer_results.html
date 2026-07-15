@@ -1,0 +1,14 @@
+{% if error %}<div class="card result-card"><div class="alert alert-error">{{ error }}</div></div>
+{% elif result %}
+<div class="card result-card">
+  <section id="de-1b"><h3>1B · Overview</h3>
+    <div class="metric-row">{% for name, item in result.statuses.items() %}<div class="metric"><span class="metric-label">{{ name|title }}</span><span class="metric-value compact">{{ item.status|upper }} ({{ item.rows }})</span></div>{% endfor %}</div>
+    <p class="muted">{{ "📦 Local cache" if result.source == "cache" else "🌐 Live API pull" }} · {{ result.ticker }} · {{ result.start_date }} → {{ result.end_date }}{% if result.cache_created_at %} · cached {{ result.cache_created_at }}{% endif %}</p>
+    {% if result.charts.price_overview %}<div class="chart-cell">{{ result.charts.price_overview|safe }}</div>{% else %}<div class="alert alert-info">No provider returned price data for this window.</div>{% endif %}
+  </section>
+  <section id="de-1c"><h3>1C · Prices</h3>{% if result.charts.prices %}<div class="chart-cell">{{ result.charts.prices|safe }}</div>{% else %}<p class="muted">No price rows returned.</p>{% endif %}</section>
+  <section id="de-1d"><h3>1D · News</h3>{% if result.charts.news %}<div class="chart-cell">{{ result.charts.news|safe }}</div>{% endif %}{% with table=result.news %}{% include "partials/data_table.html" %}{% endwith %}</section>
+  <section id="de-1e"><h3>1E · Sentiment</h3>{% if result.charts.sentiment %}<div class="chart-cell">{{ result.charts.sentiment|safe }}</div>{% endif %}{% with table=result.sentiment %}{% include "partials/data_table.html" %}{% endwith %}</section>
+  <section id="de-1f"><h3>1F · Raw data</h3>{% for item in result.raw %}<details><summary>{{ item.label }}</summary>{% with table=item.table %}{% include "partials/data_table.html" %}{% endwith %}</details>{% endfor %}</section>
+</div>
+{% endif %}

@@ -45,3 +45,7 @@ wandb/
 # OS/editor noise
 .DS_Store
 .vscode/
+
+# Claude Code local config (machine-specific)
+.claude/settings.local.json
+.claude/launch.json

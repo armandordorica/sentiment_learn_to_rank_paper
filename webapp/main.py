@@ -21,6 +21,7 @@ from fastapi.templating import Jinja2Templates
 
 from webapp.api import phrasebank_baseline as pb
 from webapp.api import ravenpack_finetune as rp
+from webapp.api import data_explorer as de
 from webapp.jobs import job_manager
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -31,7 +32,7 @@ app.mount("/static", StaticFiles(directory=str(WEBAPP_DIR / "static")), name="st
 templates = Jinja2Templates(directory=str(WEBAPP_DIR / "templates"))
 
 NAV_ITEMS = [
-    {"num": "1", "label": "Data Explorer", "href": "#", "enabled": False},
+    {"num": "1", "label": "Data Explorer", "href": "/data-explorer", "enabled": True},
     {"num": "2", "label": "Batch Pipeline", "href": "#", "enabled": False},
     {"num": "3", "label": "PhraseBank Baseline", "href": "/phrasebank", "enabled": True},
     {"num": "4", "label": "RavenPack Baseline Eval", "href": "#", "enabled": False},
@@ -51,6 +52,41 @@ def index(request: Request) -> HTMLResponse:
         request,
         "index.html",
         _base_context(active_href="/"),
+    )
+
+
+@app.get("/data-explorer", response_class=HTMLResponse)
+def data_explorer_page(request: Request) -> HTMLResponse:
+    ctx = _base_context(active_href="/data-explorer")
+    ctx.update(de.page_defaults())
+    ctx.update({"cache": de.cache_info("AAPL"), "result": None, "error": None})
+    return templates.TemplateResponse(request, "data_explorer.html", ctx)
+
+
+@app.post("/data-explorer/query", response_class=HTMLResponse)
+def data_explorer_query(
+    request: Request,
+    ticker: str = Form(default="AAPL"),
+    start_date: str = Form(default=de.DEFAULT_START),
+    end_date: str = Form(default=de.DEFAULT_END),
+    action: str = Form(default="load"),
+    use_refinitiv: bool = Form(default=False),
+    use_wrds: bool = Form(default=False),
+    use_yahoo: bool = Form(default=False),
+    use_ravenpack: bool = Form(default=False),
+    include_refinitiv_news: bool = Form(default=False),
+) -> HTMLResponse:
+    try:
+        raw = de.query(
+            ticker, start_date, end_date, force_live=action == "live",
+            refinitiv=use_refinitiv, wrds=use_wrds, yahoo=use_yahoo,
+            ravenpack=use_ravenpack, include_news=include_refinitiv_news,
+        )
+        result, error = de.present(raw), None
+    except Exception as exc:  # noqa: BLE001
+        result, error = None, str(exc)
+    return templates.TemplateResponse(
+        request, "partials/data_explorer_results.html", {"result": result, "error": error}
     )
 
 
@@ -159,5 +195,4 @@ def phrasebank_train_eval(request: Request) -> HTMLResponse:
         "partials/phrasebank_train_eval.html",
         {"train_eval": train_eval, "error": error},
     )
-
 

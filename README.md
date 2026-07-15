@@ -303,6 +303,63 @@ In **Data Explorer**, enter a ticker such as `AAPL`, choose a start and end date
 
 The Plotly charts use point-level hover behavior so you can inspect the exact date, provider, article count, sentiment score, relevance, and headline metadata behind each point.
 
+## FastAPI Web App (migration in progress)
+
+The Streamlit app above is being ported, one tab at a time, to a FastAPI + Jinja2 +
+HTMX stack under `webapp/`. Both apps currently run side by side against the same
+underlying code in `src/sentiment_ltr/`, so numbers match exactly between the two UIs.
+See `docs/fastapi_migration_plan.md` for the tab-by-tab migration status.
+
+**Ported so far:**
+
+- **Tab 1 — Data Explorer** → `/data-explorer` (cache-first ticker/date query,
+  provider status, price/news/sentiment charts, and raw provider tables; optional
+  live refresh across Refinitiv, WRDS/CRSP, Yahoo, and RavenPack).
+- **Tab 3 — PhraseBank HF Baseline** → `/phrasebank` (dataset dashboard, training
+  metrics, live train/val/test evaluation, probability charts).
+- **Tab 5·8 — RavenPack Fine-Tuning** → `/finetune` (ticker multi-select, coverage
+  table, background training job with live HTMX status polling).
+
+Not yet ported: Batch Pipeline, RavenPack Baseline Eval, Sentiment Lab,
+Paper Validation.
+
+### Run it locally
+
+Install the extra webapp dependencies (FastAPI, Jinja2, Uvicorn, python-multipart) on
+top of the base/fine-tuning requirements:
+
+```bash
+conda activate sentiment-ltr-paper
+pip install -r requirements-webapp.txt
+```
+
+Start the dev server with auto-reload from the project root:
+
+```bash
+uvicorn webapp.main:app --reload --port 8001
+```
+
+Then open <http://localhost:8001> (or <http://localhost:8001/phrasebank> /
+`/finetune` directly). You can keep the Streamlit app running at the same time on its
+own port (`8501`) to compare the two side by side.
+
+### Expose a public link
+
+The same `share.sh` Cloudflare quick-tunnel helper used for the Streamlit app works for
+the FastAPI app — just point it at the FastAPI port instead of the default:
+
+```bash
+uvicorn webapp.main:app --reload --port 8001   # terminal 1
+./share.sh 8001                                 # terminal 2
+```
+
+`share.sh` prints a temporary public `https://<random>.trycloudflare.com` URL that
+proxies to your local FastAPI server. The same caveats as the Streamlit tunnel apply:
+the URL is ephemeral, regenerates every run, requires your laptop and the `uvicorn`
+process to stay up, and is publicly reachable while the tunnel is open — see
+[Sharing a demo URL](#sharing-a-demo-url) above for how the tunnel mechanism works and
+what `share.sh` adds on top of raw `cloudflared`.
+
 ### Data Sources And Requirements
 
 | Source | Used For | Required Setup |

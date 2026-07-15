@@ -57,7 +57,7 @@ Legend: ⬜ Not started · 🟨 In progress · ✅ Done · 🚫 Deferred/won't p
 
 | # | Tab | Status | Sections | Notes |
 |---|-----|--------|----------|-------|
-| 1 | **Data Explorer** | ⬜ | 1A API status & ticker form · 1B Overview pane · 1C Prices pane · 1D News pane · 1E Sentiment pane · 1F Raw data pane | Unified ticker/date form — prices (WRDS, Yahoo, Refinitiv), Refinitiv news drill-down, RavenPack sentiment charts. Candidate for first proof-of-concept. |
+| 1 | **Data Explorer** | ✅ | 1A API status & ticker form · 1B Overview pane · 1C Prices pane · 1D News pane · 1E Sentiment pane · 1F Raw data pane | Ported at `/data-explorer`: cache-first loading, optional live refresh, provider status, Plotly price/news/sentiment charts, and raw tables. |
 | 2 | **Batch Pipeline (Top-1K)** | ⬜ | 2A Runner controls & live progress · 2B Cached data snapshot · 2C Failure reasons by provider · 2D Delisting reasons (CRSP) · 2E Cash-merger exits | Background job control + polling; needs a clean way to stream/poll progress (HTMX polling or SSE/WebSocket). |
 | 3 | **PhraseBank HF Baseline** | ⬜ | 3A Model & training · 3B Reproduction recipe · 3C Performance metrics · 3D Dataset dashboard · 3F W&B experiment tracking | Mostly static/read-only reporting — good simple candidate too. |
 | 4 | **RavenPack Baseline Eval** | ⬜ | 4C Class-level metrics · 4D Label distribution shift · 4E Run evaluation | Zero-shot eval of PhraseBank checkpoint on RavenPack headlines. |
@@ -71,9 +71,9 @@ Legend: ⬜ Not started · 🟨 In progress · ✅ Done · 🚫 Deferred/won't p
 |------|--------|-------|
 | FastAPI project scaffold (`webapp/`, deps, run script) | ✅ | `webapp/main.py`, `webapp/api/`, `webapp/templates/`, `webapp/static/`. Run with `conda run -n sentiment-ltr-paper uvicorn webapp.main:app --reload --port 8001`. |
 | Shared base layout + top nav (mirrors the 7-tab structure) | ✅ | `webapp/templates/base.html` — disabled/greyed-out nav items for unmigrated tabs. |
-| In-tab anchor/section navigation (real `<a href="#...">` + native scroll, no sanitizer fighting) | ⬜ | Not yet needed — 5·8 is a single section. Revisit once a multi-section tab (5·1–5·7) is ported. |
+| In-tab anchor/section navigation (real `<a href="#...">` + native scroll, no sanitizer fighting) | ✅ | Implemented for Data Explorer sections 1A–1F. |
 | Data access layer reused from `src/sentiment_ltr/` (no duplication) | ✅ | `webapp/api/ravenpack_finetune.py` wraps `sentiment_ltr.models.ravenpack_sentiment` directly — same `train_ravenpack()`, `load_ravenpack_labeled_frame()`, etc. as `app.py`. |
-| Charting approach decided (Plotly.js vs ECharts vs server-rendered images) | ⬜ | Not yet needed — 5·8 has no charts. Decide when porting 5·1–5·7 (Macro-F1/per-class F1/prevalence charts). |
+| Charting approach decided (Plotly.js vs ECharts vs server-rendered images) | ✅ | Existing Plotly figures are embedded as HTML, matching the approach used by PhraseBank. |
 | Background job polling pattern (batch pipeline tab) decided | ✅ (for training jobs) | In-process `webapp/jobs.py` `JobManager` (thread + polling), used by 5·8's fine-tune button. HTMX polls `/finetune/train/{job_id}/status` every 2s. Same pattern should work for Tab 2's batch pipeline runner. |
 | Dev task/run config (`tasks.json` or `uvicorn --reload`) | 🟨 | Documented run command above; no VS Code task added yet. |
 | Auth/session parity if `app.py` has any (check) | ⬜ | `app.py` has no auth — likely N/A, not yet explicitly verified. |
