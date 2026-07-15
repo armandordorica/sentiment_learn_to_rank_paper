@@ -58,7 +58,7 @@ Legend: ⬜ Not started · 🟨 In progress · ✅ Done · 🚫 Deferred/won't p
 | # | Tab | Status | Sections | Notes |
 |---|-----|--------|----------|-------|
 | 1 | **Data Explorer** | ✅ | 1A API status & ticker form · 1B Overview pane · 1C Prices pane · 1D News pane · 1E Sentiment pane · 1F Raw data pane | Ported at `/data-explorer`: cache-first loading, optional live refresh, provider status, Plotly price/news/sentiment charts, and raw tables. |
-| 2 | **Batch Pipeline (Top-1K)** | ✅ | 2A Runner controls & live progress · 2B Cached data snapshot · 2C Failure reasons by provider · 2D Delisting reasons (CRSP) · 2E Cash-merger exits | Ported at `/batch` (`webapp/api/batch_pipeline.py`): same `scripts/run_batch_pipeline.py` subprocess (pid/status/log files), HTMX 5s status polling, manifests table with emoji provider/delisting/exit cells, delisting + cash-merger WRDS fetch, CSV export, combined parquets. 2B/2C/2D/2E verified for parity against raw manifests (437 complete / 563 partial, WRDS 1000 · Yahoo 517 · RavenPack 598 · Refinitiv 483 ok). Caveat: launch/stop builds the identical runner CLI but a live batch hasn't been started from the new UI yet. |
+| 2 | **Batch Pipeline (Top-1K)** | ✅ | 2A Runner controls & live progress · 2B Cached data snapshot · 2C Failure reasons by provider · 2D Delisting reasons (CRSP) · 2E Cash-merger exits | Ported at `/batch` (`webapp/api/batch_pipeline.py`): same `scripts/run_batch_pipeline.py` subprocess (pid/status/log files), HTMX 5s status polling, manifests table with emoji provider/delisting/exit cells, delisting + cash-merger WRDS fetch, CSV export, combined parquets. Verified side by side against the running Streamlit tab — all metrics identical (see "Tab 2 port — what was built & verified" below). Caveat: launch/stop builds the identical runner CLI but a live batch hasn't been started from the new UI yet. |
 | 3 | **PhraseBank HF Baseline** | 🟨 | 3A Model & training ✅ · 3B Reproduction recipe · 3C Performance metrics ✅ · 3D Dataset dashboard ✅ · 3F W&B experiment tracking | Ported at `/phrasebank` (`webapp/api/phrasebank_baseline.py`): dataset dashboard, training metrics, on-demand train/val/test split evaluation via `evaluate_checkpoint_on_split()`, probability charts — same Plotly figures as Streamlit. 3B and 3F not yet ported. |
 | 4 | **RavenPack Baseline Eval** | ⬜ | 4C Class-level metrics · 4D Label distribution shift · 4E Run evaluation | Zero-shot eval of PhraseBank checkpoint on RavenPack headlines. |
 | 5 | **RavenPack Fine-Tuning ⭐** | 🟨 | 5·1 Train/val/test split · 5·2 Tokenization & padding · 5·3 Macro-F1 before/after · 5·4 Per-class F1 · 5·5 Label prevalence · 5·6 Sample headlines · 5·7 Hyperparameters & provenance · **5·8 Train (1/5/N tickers) ✅ ported** | Main experiment tab — most complex. **5·8 is the first ported section** (`webapp/templates/finetune.html` + `webapp/api/ravenpack_finetune.py`): ticker multi-select, HTMX-updated coverage table, background training job via `webapp/jobs.py`, live-polled status. Sections 5·1–5·7 (charts/tables) not yet ported. |
@@ -109,6 +109,48 @@ Legend: ⬜ Not started · 🟨 In progress · ✅ Done · 🚫 Deferred/won't p
   completing successfully through the UI (kicked off but not confirmed to
   finish) — do this before marking 5·8 ✅.
 
+
+## Tab 2 port — what was built & verified
+
+Ported 2026-07-15 (commits `fd98260`, `2000f27`).
+
+- `webapp/api/batch_pipeline.py` — adapter porting the Tab 2 helpers from
+  `app.py`. Key design choice: the batch runner stays the **same detached
+  subprocess** (`scripts/run_batch_pipeline.py`), which writes its own
+  `batch.pid` / `batch_status.json` / `batch_runner.log` under
+  `data/raw/data_explorer_top1k/`. Both UIs (and the runner itself) share those
+  files, so either app can monitor or stop a batch the other started, and a
+  run survives webapp restarts. Manifest loading is cached on a
+  `count:mtime` token (same invalidation rule as the Streamlit
+  `_manifest_cache_token()`), and all emoji cell formatters
+  (status/provider/delisting/exit) were ported verbatim.
+- Routes in `webapp/main.py`: `GET /batch` (page), `GET /batch/status`
+  (HTMX partial, self-polls every 5s while a run is live), `POST
+  /batch/launch`, `POST /batch/stop`, `POST /batch/tickers` (filtered
+  per-ticker table), `GET /batch/ticker` (detail panel), `GET /batch/log`,
+  `POST /batch/delisting/fetch`, `POST /batch/cash-merger/fetch`,
+  `GET /batch/cash-merger.csv` (download), `POST /batch/combined`.
+- Templates: `batch_pipeline.html` + partials `batch_status`,
+  `batch_ticker_table`, `batch_ticker_detail`, `batch_delisting`,
+  `batch_cash_merger`, `batch_log`, `batch_combined_result`.
+- **Verified (two passes):**
+  1. Output parity against an independent count of the raw
+     `by_ticker/rank_*/manifest.json` files: 437 complete / 563 partial;
+     provider ok-counts WRDS 1,000 · Yahoo 517 · RavenPack 598 ·
+     Refinitiv 483.
+  2. Side-by-side against the running Streamlit tab (port 8501): identical
+     last-run banner/timestamp, 2B snapshot metrics, delisting metrics
+     (561 delisted / 439 active / mean dlret −0.115), cash-merger counts
+     (195/195 resolved via CRSP dlret), and "Showing 1,000 of 1,000".
+     Also exercised: status/ticker/provider-failure filters, ticker detail
+     panel, full-log lazy-load, CSV export — zero browser console errors.
+- **Fixed during verification:** no-match filters now say "showing 0 of N"
+  (was a misleading "No ticker data cached yet"), and clearing the
+  ticker-detail select empties the panel instead of showing "not found".
+- **Not yet verified:** launching/stopping a *live* batch run from the new
+  UI (identical CLI construction to `app.py`'s `_launch_batch`, but a real
+  run takes hours over 1,000 tickers) — exercise on the next intentional
+  batch run before fully trusting 2A's launch path.
 
 ## Working agreement
 
