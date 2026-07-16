@@ -44,10 +44,22 @@
     <div id="article-results"></div>
   </section>
 
-  <section id="inference"><h2>6E Try it — score a headline</h2>
-    <form hx-post="/sentiment-lab/score" hx-target="#score-results"><label>One sentence per line<textarea name="text" rows="6">The company reported record quarterly profit and raised its dividend.
+  <section id="inference"><h2>6E Compare model versions</h2>
+    <p class="muted">Use the same headlines across saved checkpoints to compare labels and class probabilities side by side.</p>
+    <form hx-post="/sentiment-lab/score" hx-target="#score-results">
+      <label>One sentence per line<textarea name="text" rows="6">The company reported record quarterly profit and raised its dividend.
 Shares plunged after the firm warned of widening losses and layoffs.
-The board will meet on Thursday to review the quarterly filing.</textarea></label><button class="btn btn-primary" {% if not has_model %}disabled{% endif %}>Score sentiment</button></form><div id="score-results"></div>
+The board will meet on Thursday to review the quarterly filing.</textarea></label>
+      <fieldset class="model-picker"><legend>Model versions</legend>
+        <div class="model-options">{% for model in models %}<label class="model-option">
+          <span><input type="checkbox" name="model_ids" value="{{ model.id }}" {% if model.id in default_model_ids %}checked{% endif %}> <strong>{{ model.title }}</strong></span>
+          <span class="muted">{{ model.description }}</span>
+          <span class="model-meta">{{ model.epochs }} epoch(s) · {{ model.dataset }}{% if model.test_f1 is not none %} · test F1 {{ '%.1f%%'|format(model.test_f1 * 100) }}{% endif %}{% if model.test_accuracy is not none %} · accuracy {{ '%.1f%%'|format(model.test_accuracy * 100) }}{% endif %}</span>
+          <span class="checkpoint-meta">Checkpoint <code>{{ model.checkpoint_id }}</code> · weights SHA-256 <code title="{{ model.weights_sha256 }}">{{ model.weights_sha_short }}</code></span>
+        </label>{% endfor %}</div>
+      </fieldset>
+      <button class="btn btn-primary" {% if not models %}disabled{% endif %}>Compare selected models</button>
+    </form><div id="score-results"></div>
   </section>
 
   <section><details {% if not has_model %}open{% endif %}><summary><strong>Train / refresh PhraseBank model</strong></summary><p class="muted">Runs the shared training workflow in the background and saves the best validation-F1 checkpoint.</p><button class="btn btn-primary" hx-post="/sentiment-lab/train" hx-target="#lab-train-status">Train PhraseBank baseline now</button><div id="lab-train-status"></div></details></section>

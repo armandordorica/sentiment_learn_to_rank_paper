@@ -474,13 +474,14 @@ def sentiment_lab_articles(request: Request, ticker: str = Form("AAPL"),
 
 
 @app.post("/sentiment-lab/score", response_class=HTMLResponse)
-def sentiment_lab_score(request: Request, text: str = Form("")) -> HTMLResponse:
+def sentiment_lab_score(request: Request, text: str = Form(""),
+                        model_ids: list[str] = Form(default=[])) -> HTMLResponse:
     try:
-        rows, error = sl.score(text), None
+        results, error = sl.score(text, model_ids), None
     except Exception as exc:  # noqa: BLE001
-        rows, error = None, str(exc)
+        results, error = None, str(exc)
     return templates.TemplateResponse(request, "partials/sentiment_scores.html",
-                                      {"rows": rows, "error": error})
+                                      {"results": results, "error": error})
 
 
 @app.post("/sentiment-lab/train", response_class=HTMLResponse)

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import sys
+import json
+import hashlib
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +21,24 @@ from sentiment_ltr.models import phrasebank_sentiment as ps  # noqa: E402
 RAVENPACK_DIR = PROJECT_ROOT / "data" / "raw" / "news" / "ravenpack"
 DEFAULT_START = "2003-01-01"
 DEFAULT_END = "2014-12-31"
+MODEL_DIR = PROJECT_ROOT / "data" / "models"
+
+
+@lru_cache(maxsize=12)
+def _checkpoint_fingerprint(model_id: str, weights_mtime_ns: int) -> str:
+    """Return the full weights SHA-256, preferring the saved provenance record."""
+    path = MODEL_DIR / model_id
+    provenance_path = path / "provenance.json"
+    if provenance_path.exists():
+        provenance = json.loads(provenance_path.read_text())
+        for item in provenance.get("weights", []):
+            if item.get("file") == "model.safetensors" and item.get("sha256"):
+                return str(item["sha256"])
+    digest = hashlib.sha256()
+    with (path / "model.safetensors").open("rb") as weights:
+        for chunk in iter(lambda: weights.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def page_context() -> dict[str, Any]:
@@ -25,8 +46,62 @@ def page_context() -> dict[str, Any]:
     has_model = ps.model_is_saved(ps.resolve_model_dir())
     metrics = ps.load_metrics()
     device = ps.device_report() if deps else None
+    models = available_models()
     return {"deps_available": deps, "has_model": has_model, "metrics": metrics,
-            "device": device, "coverage": coverage_context()}
+            "device": device, "coverage": coverage_context(), "models": models,
+            "default_model_ids": [m["id"] for m in models if m["recommended"]]}
+
+
+def available_models() -> list[dict[str, Any]]:
+    """Discover usable saved checkpoints and attach comparison-friendly metadata."""
+    phrasebank_ids = ["phrasebank_distilbert_1ep", "phrasebank_distilbert_best"]
+    ravenpack_ids = sorted(
+        path.name for path in MODEL_DIR.glob("ravenpack_distilbert*")
+        if path.is_dir() and ".bak" not in path.name
+    )
+    preferred = phrasebank_ids + ravenpack_ids
+    models: list[dict[str, Any]] = []
+    for model_id in preferred:
+        path = MODEL_DIR / model_id
+        metrics_path = path / "metrics.json"
+        if not (path / "config.json").exists() or not metrics_path.exists():
+            continue
+        metrics = json.loads(metrics_path.read_text())
+        weights_path = path / "model.safetensors"
+        weights_sha = _checkpoint_fingerprint(model_id, weights_path.stat().st_mtime_ns)
+        dataset = str(metrics.get("dataset", "unknown"))
+        epochs = metrics.get("epochs", "—")
+        test = metrics.get("test", {})
+        if dataset == "ravenpack_headlines":
+            tickers = [str(t).upper() for t in metrics.get("tickers", [])]
+            ticker_label = ", ".join(tickers) if tickers else "tickers not recorded"
+            stock_count = len(tickers)
+            stock_word = "stock" if stock_count == 1 else "stocks"
+            title = f"RavenPack fine-tuned — {stock_count} {stock_word} ({ticker_label})"
+            row_count = metrics.get("labeled_rows")
+            rows_text = f"{int(row_count):,} labeled headlines" if row_count is not None else "labeled headlines"
+            description = (f"Started from the best PhraseBank checkpoint, then fine-tuned on "
+                           f"{rows_text} for {ticker_label}. This version measures adaptation "
+                           f"to a {stock_count}-stock RavenPack training universe.")
+        elif model_id.endswith("_1ep"):
+            title = "PhraseBank — 1 epoch"
+            description = "Early one-epoch baseline trained on Financial PhraseBank."
+        else:
+            title = "PhraseBank — best checkpoint"
+            description = ("Multi-epoch Financial PhraseBank model selected by validation "
+                           "macro-F1; the current primary baseline.")
+        models.append({
+            "id": model_id, "title": title, "description": description,
+            "dataset": dataset, "epochs": epochs,
+            "test_f1": test.get("eval_f1"), "test_accuracy": test.get("eval_accuracy"),
+            "recommended": model_id in {"phrasebank_distilbert_best", "ravenpack_distilbert_best"},
+            "tickers": metrics.get("tickers", []),
+            "labeled_rows": metrics.get("labeled_rows"),
+            "checkpoint_id": model_id,
+            "weights_sha256": weights_sha,
+            "weights_sha_short": weights_sha[:12],
+        })
+    return models
 
 
 def coverage_context() -> dict[str, Any]:
@@ -68,12 +143,42 @@ def cached_articles(ticker: str, start: str, end: str, max_rows: int) -> dict[st
     return {"ticker": ticker, "source": path.name, "rows": rows, "columns": keep}
 
 
-def score(text: str) -> list[dict[str, Any]]:
+@lru_cache(maxsize=6)
+def _load_model(model_id: str):
+    valid = {m["id"] for m in available_models()}
+    if model_id not in valid:
+        raise ValueError(f"Unknown or unavailable model: {model_id}")
+    return ps.load_classifier(MODEL_DIR / model_id)
+
+
+def score(text: str, model_ids: list[str]) -> dict[str, Any]:
     sentences = [line.strip() for line in text.splitlines() if line.strip()]
     if not sentences:
         raise ValueError("Enter at least one sentence.")
-    tokenizer, model, device = ps.load_classifier()
-    return ps.predict_sentences(sentences, tokenizer, model, device).to_dict(orient="records")
+    if not model_ids:
+        raise ValueError("Select at least one model version.")
+    metadata = {m["id"]: m for m in available_models()}
+    results = []
+    for model_id in dict.fromkeys(model_ids):
+        if model_id not in metadata:
+            raise ValueError(f"Unknown or unavailable model: {model_id}")
+        tokenizer, model, device = _load_model(model_id)
+        rows = ps.predict_sentences(sentences, tokenizer, model, device).to_dict(orient="records")
+        results.append({"model": metadata[model_id], "rows": rows})
+    comparisons = []
+    for row_index, sentence in enumerate(sentences):
+        model_scores = []
+        for result in results:
+            prediction = result["rows"][row_index]
+            model_scores.append({
+                "model_id": result["model"]["id"],
+                "pred": prediction["pred"],
+                "negative": prediction["p(negative)"],
+                "neutral": prediction["p(neutral)"],
+                "positive": prediction["p(positive)"],
+            })
+        comparisons.append({"sentence": sentence, "scores": model_scores})
+    return {"models": [result["model"] for result in results], "comparisons": comparisons}
 
 
 def train(job: Any) -> dict[str, Any]:
