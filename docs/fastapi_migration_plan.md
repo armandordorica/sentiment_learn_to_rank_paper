@@ -196,6 +196,28 @@ Ported 2026-07-15.
   Both UIs surface this as an error box. Fixing the message (or filtering
   the ticker list to rich exports) would improve both.
 
+## Full-app interactive pass — 2026-07-15
+
+After the Tab 4 port, a button-by-button pass over all five ported tabs
+found **no defects** (nothing to fix, no code changes):
+
+- **Tab 4:** dataset expander (split counts cross-check against
+  confusion-matrix row totals), section anchors, three real 4E evals
+  (test full split · validation capped 500 · "all" capped 500, exercising
+  the `eval_split=None` path), report + mismatch expanders.
+- **Tab 3:** train-split eval button → 94.7% macro-F1, identical to
+  Tab 4's 4C row for the same split (shared checkpoint, shared numbers).
+- **Tab 1:** quick-ticker + paper-window buttons, cached MSFT load
+  (4 providers ok, 4 charts; RavenPack rows 499,136 = Tab 2's cell).
+- **Tab 5·8:** ticker multi-select coverage refresh.
+- **Tab 2:** status banner, fetch buttons correctly disabled at 0
+  missing, CSV link, lazy log, table filters.
+- **Cross-cutting:** all 9 GET routes 200, homepage/nav links correct
+  (tabs 6/7 disabled), zero console errors, 15/15 tests green.
+
+Still never exercised (long-running/heavy): batch launch, fine-tune
+training job, combined-parquets write, Data Explorer live pulls.
+
 ## Working agreement
 
 1. Update this file's status table whenever a tab/section moves state.
