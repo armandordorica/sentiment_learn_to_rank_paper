@@ -1,0 +1,1 @@
+{% if error %}<div class="alert alert-error">{{ error }}</div>{% else %}<table class="data-table"><thead><tr>{% for key in rows[0].keys() %}<th>{{ key }}</th>{% endfor %}</tr></thead><tbody>{% for row in rows %}<tr>{% for value in row.values() %}<td>{{ value }}</td>{% endfor %}</tr>{% endfor %}</tbody></table>{% endif %}

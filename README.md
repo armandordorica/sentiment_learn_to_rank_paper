@@ -327,7 +327,7 @@ See `docs/fastapi_migration_plan.md` for the tab-by-tab migration status.
 - **Tab 5·8 — RavenPack Fine-Tuning** → `/finetune` (ticker multi-select, coverage
   table, background training job with live HTMX status polling).
 
-Not yet ported: Sentiment Lab, Paper Validation.
+Not yet ported: Paper Validation.
 
 The webapp has a small test suite under `tests/` (adapter metric math +
 route/template rendering with the model layer mocked):

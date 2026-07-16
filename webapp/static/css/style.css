@@ -175,6 +175,9 @@ select[multiple] { width: 100%; max-width: 320px; }
 
 details { margin: 0.75rem 0; }
 details summary { margin-bottom: 0.5rem; }
+.lab section { scroll-margin-top: 6rem; border-top: 1px solid var(--border); padding-top: 1.25rem; margin-top: 1.5rem; }
+textarea { width: 100%; border: 1px solid var(--border); border-radius: .4rem; padding: .65rem; font: inherit; }
+button:disabled { opacity: .5; cursor: not-allowed; }
 
 /* Batch pipeline (Tab 2) */
 .progress-track {

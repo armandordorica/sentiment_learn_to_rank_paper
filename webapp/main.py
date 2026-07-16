@@ -25,6 +25,7 @@ from webapp.api import phrasebank_baseline as pb
 from webapp.api import ravenpack_eval as re_
 from webapp.api import ravenpack_finetune as rp
 from webapp.api import data_explorer as de
+from webapp.api import sentiment_lab as sl
 from webapp.jobs import job_manager
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -40,7 +41,7 @@ NAV_ITEMS = [
     {"num": "3", "label": "PhraseBank Baseline", "href": "/phrasebank", "enabled": True},
     {"num": "4", "label": "RavenPack Baseline Eval", "href": "/raven-eval", "enabled": True},
     {"num": "5", "label": "RavenPack Fine-Tuning", "href": "/finetune", "enabled": True},
-    {"num": "6", "label": "Sentiment Lab", "href": "#", "enabled": False},
+    {"num": "6", "label": "Sentiment Lab", "href": "/sentiment-lab", "enabled": True},
     {"num": "7", "label": "Paper Validation", "href": "#", "enabled": False},
 ]
 
@@ -448,3 +449,49 @@ def phrasebank_train_eval(request: Request) -> HTMLResponse:
         {"train_eval": train_eval, "error": error},
     )
 
+
+@app.get("/sentiment-lab", response_class=HTMLResponse)
+def sentiment_lab_page(request: Request) -> HTMLResponse:
+    ctx = _base_context(active_href="/sentiment-lab")
+    ctx.update(sl.page_context())
+    try:
+        ctx["dataset"], ctx["dataset_error"] = sl.phrasebank_dataset(), None
+    except Exception as exc:  # noqa: BLE001
+        ctx["dataset"], ctx["dataset_error"] = None, str(exc)
+    return templates.TemplateResponse(request, "sentiment_lab.html", ctx)
+
+
+@app.post("/sentiment-lab/articles", response_class=HTMLResponse)
+def sentiment_lab_articles(request: Request, ticker: str = Form("AAPL"),
+                           start: str = Form(sl.DEFAULT_START), end: str = Form(sl.DEFAULT_END),
+                           max_rows: int = Form(50)) -> HTMLResponse:
+    try:
+        result, error = sl.cached_articles(ticker, start, end, max_rows), None
+    except Exception as exc:  # noqa: BLE001
+        result, error = None, str(exc)
+    return templates.TemplateResponse(request, "partials/sentiment_articles.html",
+                                      {"result": result, "error": error})
+
+
+@app.post("/sentiment-lab/score", response_class=HTMLResponse)
+def sentiment_lab_score(request: Request, text: str = Form("")) -> HTMLResponse:
+    try:
+        rows, error = sl.score(text), None
+    except Exception as exc:  # noqa: BLE001
+        rows, error = None, str(exc)
+    return templates.TemplateResponse(request, "partials/sentiment_scores.html",
+                                      {"rows": rows, "error": error})
+
+
+@app.post("/sentiment-lab/train", response_class=HTMLResponse)
+def sentiment_lab_train(request: Request) -> HTMLResponse:
+    job_id = job_manager.start(kind="phrasebank_train", fn=sl.train)
+    return templates.TemplateResponse(request, "partials/sentiment_train_status.html",
+                                      {"job": job_manager.get(job_id), "error": None})
+
+
+@app.get("/sentiment-lab/train/{job_id}/status", response_class=HTMLResponse)
+def sentiment_lab_train_status(request: Request, job_id: str) -> HTMLResponse:
+    job = job_manager.get(job_id)
+    return templates.TemplateResponse(request, "partials/sentiment_train_status.html",
+                                      {"job": job, "error": None if job else "Job not found."})
