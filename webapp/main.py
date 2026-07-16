@@ -26,6 +26,7 @@ from webapp.api import ravenpack_eval as re_
 from webapp.api import ravenpack_finetune as rp
 from webapp.api import data_explorer as de
 from webapp.api import sentiment_lab as sl
+from webapp.api import paper_validation as pv
 from webapp.jobs import job_manager
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -42,7 +43,7 @@ NAV_ITEMS = [
     {"num": "4", "label": "RavenPack Baseline Eval", "href": "/raven-eval", "enabled": True},
     {"num": "5", "label": "RavenPack Fine-Tuning", "href": "/finetune", "enabled": True},
     {"num": "6", "label": "Sentiment Lab", "href": "/sentiment-lab", "enabled": True},
-    {"num": "7", "label": "Paper Validation", "href": "#", "enabled": False},
+    {"num": "7", "label": "Paper Validation", "href": "/paper-validation", "enabled": True},
 ]
 
 
@@ -496,3 +497,24 @@ def sentiment_lab_train_status(request: Request, job_id: str) -> HTMLResponse:
     job = job_manager.get(job_id)
     return templates.TemplateResponse(request, "partials/sentiment_train_status.html",
                                       {"job": job, "error": None if job else "Job not found."})
+
+
+@app.get("/paper-validation", response_class=HTMLResponse)
+def paper_validation_page(request: Request) -> HTMLResponse:
+    ctx = _base_context(active_href="/paper-validation")
+    try:
+        ctx.update(pv.page_context())
+        ctx["error"] = None
+    except Exception as exc:  # noqa: BLE001
+        ctx["error"] = str(exc)
+    return templates.TemplateResponse(request, "paper_validation.html", ctx)
+
+
+@app.get("/paper-validation/prices", response_class=HTMLResponse)
+def paper_validation_prices(request: Request, ticker: str = "") -> HTMLResponse:
+    try:
+        result, error = pv.price_chart(ticker), None
+    except Exception as exc:  # noqa: BLE001
+        result, error = None, str(exc)
+    return templates.TemplateResponse(request, "partials/paper_validation_prices.html",
+                                      {"result": result, "error": error})
