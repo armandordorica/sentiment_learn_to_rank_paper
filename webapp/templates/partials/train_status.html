@@ -37,6 +37,8 @@
         </p>
       {% endif %}
     {% endif %}
+    {% set chart = loss_chart(job.progress) %}
+    {% include "partials/loss_chart.html" %}
   </div>
 {% elif job.status == "done" %}
   <div class="alert alert-success">
@@ -45,6 +47,8 @@
     {% if job.result.device %}Trained on <strong>{{ job.result.device }}</strong>. {% endif %}
     Checkpoint saved to <code>{{ job.result.checkpoint_dir }}</code>.
   </div>
+  {% set chart = loss_chart(job.progress) %}
+  {% include "partials/loss_chart.html" %}
 {% elif job.status == "error" %}
   <div class="alert alert-error">
     ❌ Training failed.

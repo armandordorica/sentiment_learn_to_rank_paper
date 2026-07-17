@@ -1,0 +1,45 @@
+{% if chart %}
+<div class="loss-chart">
+  <p class="muted" style="margin-bottom:0.25rem">
+    <strong>Training loss</strong> — latest {{ "%.4f"|format(chart.last_loss) }}
+    at step {{ "{:,}".format(chart.last_step) }} ({{ chart.n_points }} points logged)
+  </p>
+  <svg viewBox="0 0 {{ chart.width }} {{ chart.height }}" width="100%"
+       style="max-width:{{ chart.width }}px; height:auto; display:block"
+       role="img" aria-label="Training loss curve over steps">
+    <!-- horizontal gridlines + y (loss) labels -->
+    {% for t in chart.yticks %}
+      <line x1="{{ chart.plot_left }}" y1="{{ t.y }}" x2="{{ chart.plot_right }}" y2="{{ t.y }}"
+            style="stroke: var(--border, #ccc)" stroke-width="1" />
+      <text x="{{ chart.plot_left - 6 }}" y="{{ t.y + 3 }}" text-anchor="end"
+            font-size="10" fill="#64748b">{{ t.label }}</text>
+    {% endfor %}
+    <!-- dashed epoch-boundary lines -->
+    {% for m in chart.epoch_marks %}
+      <line x1="{{ m.x }}" y1="{{ chart.plot_top }}" x2="{{ m.x }}" y2="{{ chart.plot_bottom }}"
+            style="stroke: var(--border, #ccc)" stroke-width="1" stroke-dasharray="4 3" />
+      <text x="{{ m.x }}" y="{{ chart.plot_top + 9 }}" text-anchor="middle"
+            font-size="9" fill="#64748b">{{ m.label }}</text>
+    {% endfor %}
+    <!-- x axis -->
+    <line x1="{{ chart.plot_left }}" y1="{{ chart.plot_bottom }}"
+          x2="{{ chart.plot_right }}" y2="{{ chart.plot_bottom }}"
+          style="stroke: var(--border, #999)" stroke-width="1" />
+    <text x="{{ chart.plot_left }}" y="{{ chart.plot_bottom + 16 }}" font-size="10" fill="#64748b">0</text>
+    <text x="{{ chart.plot_right }}" y="{{ chart.plot_bottom + 16 }}" text-anchor="end"
+          font-size="10" fill="#64748b">{{ chart.x_max_label }} steps</text>
+    <!-- loss curve -->
+    <polyline points="{{ chart.polyline }}" fill="none"
+              style="stroke: var(--accent, #2563eb)" stroke-width="2"
+              stroke-linejoin="round" stroke-linecap="round" />
+  </svg>
+  {% if chart.eval_history %}
+    <p class="muted" style="margin-top:0.25rem">Per-epoch validation:
+      {% for e in chart.eval_history -%}
+        epoch {{ "%.0f"|format(e.epoch) }} → macro-F1 {{ "%.1f%%"|format((e.eval_f1 or 0) * 100) }},
+        acc {{ "%.1f%%"|format((e.eval_accuracy or 0) * 100) }}{% if not loop.last %} · {% endif %}
+      {%- endfor %}
+    </p>
+  {% endif %}
+</div>
+{% endif %}
