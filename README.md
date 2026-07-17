@@ -357,6 +357,51 @@ Then open <http://localhost:8001> (or <http://localhost:8001/phrasebank> /
 `/finetune` directly). You can keep the Streamlit app running at the same time on its
 own port (`8501`) to compare the two side by side.
 
+### Deploy locally (persistent — survives closed terminals)
+
+`uvicorn … --reload` in a terminal dies with that terminal. To keep both webapps
+running as a lightweight local deployment, run each inside a **tmux** session and
+wrap it in **caffeinate** so macOS doesn't idle-sleep while they're up:
+
+```bash
+DIR="$(pwd)"                                             # project root
+ENVBIN="$HOME/miniconda/envs/sentiment-ltr-paper/bin"    # adjust to your conda path
+
+# FastAPI app on :8001
+tmux new-session -d -s fastapi -c "$DIR" \
+  "caffeinate -is $ENVBIN/python -m uvicorn webapp.main:app --host 0.0.0.0 --port 8001 --reload"
+
+# Streamlit app on :8501
+tmux new-session -d -s streamlit -c "$DIR" \
+  "caffeinate -is $ENVBIN/python -m streamlit run app.py --server.port 8501 --server.headless true"
+```
+
+Managing the sessions:
+
+```bash
+tmux ls                      # list running sessions
+tmux attach -t fastapi       # watch the FastAPI logs (Ctrl-b d to detach)
+tmux attach -t streamlit     # watch the Streamlit logs
+tmux kill-session -t fastapi # stop one app
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8001   # health check → 200
+```
+
+Notes and caveats:
+
+- **Closing the terminal window (or an SSH session) is safe** — tmux keeps the
+  processes alive in the background.
+- **Sleep still pauses everything.** tmux cannot survive the Mac itself going to
+  sleep; `caffeinate -is` prevents *idle* sleep, but physically closing the lid on
+  battery power still sleeps the machine. To keep the apps reachable with the lid
+  closed, keep the Mac plugged into power. Processes resume automatically on wake,
+  so for your own use a sleep is a harmless pause.
+- `--host 0.0.0.0` makes the FastAPI app reachable from other devices on your
+  network; drop it to keep the app localhost-only.
+- Using `$ENVBIN/python` directly (instead of `conda activate`) means the commands
+  work from any shell regardless of PATH — handy inside tmux.
+- Both apps read the same `.env` (WRDS credentials etc.) and the same on-disk
+  caches, so they can run side by side and will show identical numbers.
+
 ### Expose a public link
 
 The same `share.sh` Cloudflare quick-tunnel helper used for the Streamlit app works for
