@@ -247,3 +247,65 @@ def run_view(job_id: str) -> SimpleNamespace | None:
         result=result,
         error=state.get("error"),
     )
+
+
+def loss_chart(progress: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Geometry for the live training-loss chart, drawn as inline SVG.
+
+    Returns pixel coordinates (in a fixed 640×230 viewBox) so the template can
+    render a self-contained line chart with no JS/Plotly — it simply redraws on
+    each HTMX status poll. ``None`` until at least two loss points exist.
+    """
+    if not progress:
+        return None
+    history = progress.get("loss_history") or []
+    if len(history) < 2:
+        return None
+
+    steps = [int(h["step"]) for h in history]
+    losses = [float(h["loss"]) for h in history]
+    total = int(progress.get("total_steps") or 0) or max(steps)
+    lo, hi = min(losses), max(losses)
+    if hi <= lo:
+        hi = lo + 1e-6
+    pad = (hi - lo) * 0.10
+    lo_p, hi_p = lo - pad, hi + pad
+
+    W, H = 640, 230
+    L, R, T, B = 52, 14, 12, 26  # margins: L leaves room for y labels, B for x
+    pw, ph = W - L - R, H - T - B
+
+    def px(step: float) -> float:
+        return L + (step / total) * pw if total else L
+
+    def py(val: float) -> float:
+        return T + (1 - (val - lo_p) / (hi_p - lo_p)) * ph
+
+    polyline = " ".join(f"{px(s):.1f},{py(v):.1f}" for s, v in zip(steps, losses))
+
+    # Three horizontal gridlines: top = max loss, bottom = min loss.
+    yticks = []
+    for frac in (0.0, 0.5, 1.0):
+        val = hi_p - frac * (hi_p - lo_p)
+        yticks.append({"y": round(py(val), 1), "label": f"{val:.3f}"})
+
+    # Dashed vertical lines at epoch boundaries.
+    epochs = int(progress.get("epochs") or 0)
+    epoch_marks = []
+    if epochs > 1 and total:
+        for i in range(1, epochs):
+            s = total * i / epochs
+            epoch_marks.append({"x": round(px(s), 1), "label": f"end e{i}"})
+
+    return {
+        "width": W, "height": H,
+        "plot_left": L, "plot_right": W - R, "plot_top": T, "plot_bottom": H - B,
+        "polyline": polyline,
+        "yticks": yticks,
+        "epoch_marks": epoch_marks,
+        "x_max_label": f"{total:,}",
+        "last_loss": losses[-1],
+        "last_step": steps[-1],
+        "n_points": len(history),
+        "eval_history": progress.get("eval_history") or [],
+    }

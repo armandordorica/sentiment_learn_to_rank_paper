@@ -86,6 +86,11 @@ def main() -> int:
 
     _write()
 
+    # Series for the live convergence chart (small: loss is logged every
+    # ~100 steps, eval once per epoch).
+    loss_history: list[dict[str, Any]] = []
+    eval_history: list[dict[str, Any]] = []
+
     def _on_progress(update: dict[str, Any]) -> None:
         state.update(update)
         step = int(state.get("step") or 0)
@@ -103,7 +108,21 @@ def main() -> int:
                     eta_s = int((total - step) / rate)
                     state["rate"] = f"{rate:.1f} steps/s"
                     state["eta"] = f"{eta_s // 60}m {eta_s % 60:02d}s"
+        if "loss" in update:
+            loss_history.append({
+                "step": step,
+                "epoch": round(float(state.get("epoch") or 0), 3),
+                "loss": float(update["loss"]),
+            })
+            state["loss_history"] = loss_history
         if update.get("phase") == "evaluating":
+            em = update.get("eval_metrics") or {}
+            eval_history.append({
+                "step": step,
+                "epoch": round(float(state.get("epoch") or 0), 3),
+                **{k: float(v) for k, v in em.items()},
+            })
+            state["eval_history"] = eval_history
             state["message"] = f"Evaluating checkpoint… (step {step:,} / {total:,})"
         elif step and total:
             state["phase"] = "training"

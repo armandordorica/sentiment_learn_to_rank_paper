@@ -91,3 +91,24 @@ def test_run_view_error_surfaces_traceback(run_dir):
 
 def test_run_view_missing_returns_none(run_dir):
     assert rp.run_view("ghost") is None
+
+
+def test_loss_chart_requires_two_history_points():
+    assert rp.loss_chart(None) is None
+    assert rp.loss_chart({"loss_history": [{"step": 10, "loss": 0.9}]}) is None
+
+
+def test_loss_chart_builds_svg_geometry_and_keeps_eval_history():
+    chart = rp.loss_chart({
+        "total_steps": 100, "epochs": 2,
+        "loss_history": [
+            {"step": 10, "epoch": 0.2, "loss": 0.9},
+            {"step": 50, "epoch": 1.0, "loss": 0.5},
+        ],
+        "eval_history": [{"step": 50, "epoch": 1.0, "eval_f1": 0.6}],
+    })
+    assert chart["n_points"] == 2
+    assert chart["last_loss"] == 0.5
+    assert len(chart["polyline"].split()) == 2
+    assert chart["epoch_marks"][0]["label"] == "end e1"
+    assert chart["eval_history"][0]["eval_f1"] == 0.6

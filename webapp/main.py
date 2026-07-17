@@ -35,6 +35,9 @@ WEBAPP_DIR = Path(__file__).resolve().parent
 app = FastAPI(title="Sentiment LTR — FastAPI (migration POC)")
 app.mount("/static", StaticFiles(directory=str(WEBAPP_DIR / "static")), name="static")
 templates = Jinja2Templates(directory=str(WEBAPP_DIR / "templates"))
+# Expose the loss-chart geometry builder so the training-status partial can draw
+# the live convergence chart directly from job.progress, wherever it renders.
+templates.env.globals["loss_chart"] = rp.loss_chart
 
 NAV_ITEMS = [
     {"num": "1", "label": "Data Explorer", "href": "/data-explorer", "enabled": True},
