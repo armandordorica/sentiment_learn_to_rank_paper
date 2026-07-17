@@ -3,17 +3,46 @@
 {% elif job is none %}
   <p class="muted">No training job started yet.</p>
 {% elif job.status in ["pending", "running"] %}
-  <div class="alert alert-info"
-       hx-get="/finetune/train/{{ job.id }}/status"
+  <div hx-get="/finetune/train/{{ job.id }}/status"
        hx-trigger="load delay:2s"
        hx-swap="outerHTML">
-    ⏳ Training job <code>{{ job.id }}</code> — status: <strong>{{ job.status }}</strong>.
-    This may take several minutes… (auto-refreshing)
+    <div class="alert alert-info">
+      ⏳ Training job <code>{{ job.id }}</code> — status: <strong>{{ job.status }}</strong>.<br>
+      {{ job.progress_message }}
+      {% if job.progress.device_name %}
+        <br><strong>Device:</strong>
+        {% if job.progress.device in ['cuda', 'mps'] %}🟢{% else %}🟡{% endif %}
+        {{ job.progress.device_name }}
+        {% if job.progress.device == 'cpu' %}(CPU — no GPU backend){% endif %}
+      {% endif %}
+    </div>
+    {% if job.progress.total_steps %}
+      <div class="progress-track">
+        <div class="progress-fill" style="width: {{ "%.1f"|format(job.progress.pct or 0) }}%"></div>
+      </div>
+      <p class="muted">
+        Step {{ "{:,}".format(job.progress.step) }} / {{ "{:,}".format(job.progress.total_steps) }}
+        ({{ "%.1f%%"|format(job.progress.pct or 0) }})
+        {% if job.progress.epoch %} · epoch {{ "%.2f"|format(job.progress.epoch) }}{% endif %}
+        {% if job.progress.loss %} · loss {{ "%.4f"|format(job.progress.loss) }}{% endif %}
+        {% if job.progress.rate %} · {{ job.progress.rate }}{% endif %}
+        {% if job.progress.eta %} · ~{{ job.progress.eta }} left{% endif %}
+      </p>
+      {% if job.progress.eval_metrics %}
+        <p class="muted">
+          Last epoch eval: macro-F1
+          <strong>{{ "%.1f%%"|format(job.progress.eval_metrics.eval_f1 * 100) if job.progress.eval_metrics.eval_f1 is defined else "—" }}</strong>
+          · accuracy
+          <strong>{{ "%.1f%%"|format(job.progress.eval_metrics.eval_accuracy * 100) if job.progress.eval_metrics.eval_accuracy is defined else "—" }}</strong>
+        </p>
+      {% endif %}
+    {% endif %}
   </div>
 {% elif job.status == "done" %}
   <div class="alert alert-success">
     ✅ Done — test macro-F1 <strong>{{ "%.1f%%"|format(job.result.test_f1 * 100) if job.result.test_f1 is not none else "—" }}</strong>,
     accuracy <strong>{{ "%.1f%%"|format(job.result.test_acc * 100) if job.result.test_acc is not none else "—" }}</strong>.
+    {% if job.result.device %}Trained on <strong>{{ job.result.device }}</strong>. {% endif %}
     Checkpoint saved to <code>{{ job.result.checkpoint_dir }}</code>.
   </div>
 {% elif job.status == "error" %}

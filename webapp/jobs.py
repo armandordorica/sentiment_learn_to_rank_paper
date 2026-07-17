@@ -22,6 +22,9 @@ class Job:
     kind: str
     status: str = "pending"  # pending | running | done | error
     progress_message: str = "Queued…"
+    # Structured live-progress fields (step counts, pct, eta, …) — written by
+    # the job function via its progress callback, read by the status partial.
+    progress: dict[str, Any] = field(default_factory=dict)
     result: dict[str, Any] | None = None
     error: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))

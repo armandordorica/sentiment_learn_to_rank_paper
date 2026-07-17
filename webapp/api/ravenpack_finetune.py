@@ -8,8 +8,10 @@ FastAPI/Jinja2 presentation layer (mirrors Streamlit's ``app.py``
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -107,23 +109,141 @@ def coverage_summary(tickers: list[str]) -> dict[str, Any]:
     }
 
 
+device_report = _phrasebank_sentiment.device_report
+
+FINETUNE_WORKER = PROJECT_ROOT / "scripts" / "finetune_worker.py"
+_FINETUNE_RUN_DIR = PROJECT_ROOT / "data" / "models" / "_finetune_runs"
+
+
 def run_training(
     tickers: list[str],
     *,
     init_from_phrasebank: bool,
     num_train_epochs: int,
+    job: Any | None = None,
 ) -> dict[str, Any]:
-    """Blocking call — run inside a background job thread (see ``webapp/jobs.py``)."""
-    metrics = train_ravenpack(
-        tickers=tickers,
-        init_from_phrasebank=init_from_phrasebank,
-        num_train_epochs=num_train_epochs,
-    )
-    test_f1 = metrics.get("test", {}).get("eval_f1")
-    test_acc = metrics.get("test", {}).get("eval_accuracy")
+    """Run fine-tuning in a **subprocess** and stream its progress into ``job``.
+
+    Training goes through ``scripts/finetune_worker.py`` (a fresh process, main
+    thread) rather than in-thread, because HF ``Trainer`` + ``accelerate``'s
+    process-global state crashes when ``trainer.train()`` runs in the server's
+    background thread. The worker writes a JSON status file after every step;
+    this function polls it and mirrors it into ``job.progress`` /
+    ``job.progress_message`` for the existing HTMX status partial.
+    """
+    import subprocess
+    import sys
+    import time as _time
+
+    _FINETUNE_RUN_DIR.mkdir(parents=True, exist_ok=True)
+    run_id = job.id if job is not None else f"{int(_time.time())}"
+    status_file = _FINETUNE_RUN_DIR / f"{run_id}_status.json"
+    metrics_out = _FINETUNE_RUN_DIR / f"{run_id}_metrics.json"
+    status_file.unlink(missing_ok=True)
+    metrics_out.unlink(missing_ok=True)
+
+    cmd = [
+        sys.executable, str(FINETUNE_WORKER),
+        "--status-file", str(status_file),
+        "--metrics-out", str(metrics_out),
+        "--tickers", *tickers,
+        "--epochs", str(num_train_epochs),
+    ]
+    if init_from_phrasebank:
+        cmd.append("--init-from-phrasebank")
+
+    if job is not None:
+        job.progress_message = "Launching training subprocess…"
+
+    # start_new_session detaches the worker into its own process group so a
+    # dev-server auto-reload (or the JobManager thread dying) can't kill an
+    # in-flight training run — its status file on disk stays the source of truth.
+    proc = subprocess.Popen(cmd, cwd=str(PROJECT_ROOT), start_new_session=True)
+
+    def _sync_job() -> dict[str, Any] | None:
+        if not status_file.exists():
+            return None
+        try:
+            state = json.loads(status_file.read_text(encoding="utf-8"))
+        except Exception:
+            return None  # mid-write; try again next poll
+        if job is not None:
+            job.progress = state
+            job.progress_message = state.get("message", job.progress_message)
+        return state
+
+    # Poll the status file until the worker process exits.
+    last: dict[str, Any] | None = None
+    while proc.poll() is None:
+        last = _sync_job() or last
+        _time.sleep(1.0)
+    last = _sync_job() or last  # final read after exit
+
+    if proc.returncode != 0:
+        err = (last or {}).get("error") or f"Training subprocess exited with code {proc.returncode}."
+        raise RuntimeError(err)
+
+    metrics = json.loads(metrics_out.read_text(encoding="utf-8"))
     return {
         "metrics": metrics,
-        "test_f1": test_f1,
-        "test_acc": test_acc,
+        "test_f1": metrics.get("test", {}).get("eval_f1"),
+        "test_acc": metrics.get("test", {}).get("eval_accuracy"),
+        "device": metrics.get("device"),
         "checkpoint_dir": str(DEFAULT_RAVENPACK_MODEL_DIR.relative_to(PROJECT_ROOT)),
     }
+
+
+# ── Refresh-safe run recovery ─────────────────────────────────────────────────
+# Every run writes a status file to _FINETUNE_RUN_DIR (see run_training). Reading
+# that file lets the fine-tune page rebuild the live status after a browser
+# refresh or even a webapp restart, so a long training run is never "lost".
+
+
+def latest_run_id() -> str | None:
+    """Job id of the most recent run (by status-file mtime), or None."""
+    if not _FINETUNE_RUN_DIR.exists():
+        return None
+    files = sorted(_FINETUNE_RUN_DIR.glob("*_status.json"), key=lambda p: p.stat().st_mtime)
+    return files[-1].name[: -len("_status.json")] if files else None
+
+
+def read_run_state(job_id: str) -> dict[str, Any] | None:
+    """The status dict a running/finished worker last wrote for ``job_id``."""
+    path = _FINETUNE_RUN_DIR / f"{job_id}_status.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None  # mid-write; caller can retry on the next poll
+
+
+def run_view(job_id: str) -> SimpleNamespace | None:
+    """Reconstruct a job-like object from disk for the status template.
+
+    Used when the in-memory ``Job`` is gone (webapp restarted) or hasn't been
+    looked up yet — matches the attributes ``partials/train_status.html`` reads
+    (``id`` / ``status`` / ``progress`` / ``progress_message`` / ``result`` /
+    ``error``) so the same template renders from either source.
+    """
+    state = read_run_state(job_id)
+    if state is None:
+        return None
+    disk_status = state.get("status", "running")
+    status = disk_status if disk_status in ("done", "error") else "running"
+    result = None
+    if disk_status == "done":
+        result = {
+            "test_f1": state.get("test_f1"),
+            "test_acc": state.get("test_acc"),
+            "device": state.get("device"),
+            "checkpoint_dir": str(DEFAULT_RAVENPACK_MODEL_DIR.relative_to(PROJECT_ROOT)),
+        }
+    return SimpleNamespace(
+        id=job_id,
+        status=status,
+        progress=state,
+        progress_message=state.get("message", ""),
+        result=result,
+        error=state.get("error"),
+    )

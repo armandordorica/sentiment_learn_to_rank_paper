@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -408,12 +408,22 @@ def train_ravenpack(
     learning_rate: float = 2e-5,
     per_device_train_batch_size: int = 16,
     seed: int = 42,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    """Continue fine-tuning DistilBERT on RavenPack headline labels."""
+    """Continue fine-tuning DistilBERT on RavenPack headline labels.
+
+    ``progress_callback``, when given, is invoked during training with dicts
+    like ``{"step": int, "total_steps": int, "epoch": float}`` (every step),
+    plus ``{"loss": float}`` on log events and ``{"phase": "evaluating",
+    "eval_metrics": {...}}`` after each evaluation pass — used by the webapp
+    to render a live progress bar. ``None`` (the default) changes nothing for
+    existing callers (app.py, notebooks).
+    """
     from transformers import (
         AutoModelForSequenceClassification,
         AutoTokenizer,
         Trainer,
+        TrainerCallback,
         TrainingArguments,
     )
 
@@ -469,6 +479,37 @@ def train_ravenpack(
         processing_class=tokenizer,
         compute_metrics=build_compute_metrics(),
     )
+
+    if progress_callback is not None:
+        class _ProgressReporter(TrainerCallback):
+            def on_step_end(self, args, state, control, **kwargs):
+                progress_callback({
+                    "step": state.global_step,
+                    "total_steps": state.max_steps,
+                    "epoch": float(state.epoch or 0),
+                })
+
+            def on_log(self, args, state, control, logs=None, **kwargs):
+                if logs and "loss" in logs:
+                    progress_callback({
+                        "step": state.global_step,
+                        "total_steps": state.max_steps,
+                        "epoch": float(state.epoch or 0),
+                        "loss": float(logs["loss"]),
+                    })
+
+            def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+                progress_callback({
+                    "step": state.global_step,
+                    "total_steps": state.max_steps,
+                    "phase": "evaluating",
+                    "eval_metrics": {
+                        k: float(v) for k, v in (metrics or {}).items()
+                        if k in ("eval_f1", "eval_accuracy", "eval_loss")
+                    },
+                })
+
+        trainer.add_callback(_ProgressReporter())
 
     train_result = trainer.train()
     val_metrics = trainer.evaluate(tokenized["validation"])

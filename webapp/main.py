@@ -262,14 +262,19 @@ def finetune_page(request: Request) -> HTMLResponse:
     """Tab 5·8 — mirrors ``render_ravenpack_finetuning_tab`` section 5·8 in app.py."""
     tickers = rp.available_tickers()
     default_tickers = rp.pilot_default_tickers(tickers)
+    # Resume the most recent run so a browser refresh (or webapp restart)
+    # re-attaches to an in-flight training job instead of showing a blank status.
+    latest_id = rp.latest_run_id()
+    resumed_job = (job_manager.get(latest_id) or rp.run_view(latest_id)) if latest_id else None
     ctx = _base_context(active_href="/finetune")
     ctx.update({
         "deps": rp.deps_status(),
+        "device": rp.device_report(),
         "tickers": tickers,
         "default_tickers": default_tickers,
         "default_epochs": rp.DEFAULT_RAVENPACK_TRAIN_EPOCHS,
         "coverage": rp.coverage_summary(default_tickers) if default_tickers else None,
-        "job": None,
+        "job": resumed_job,
         "error": None,
     })
     return templates.TemplateResponse(request, "finetune.html", ctx)
@@ -307,6 +312,7 @@ def finetune_train(
             tickers,
             init_from_phrasebank=init_from_phrasebank,
             num_train_epochs=num_train_epochs,
+            job=job,
         ),
     )
     job = job_manager.get(job_id)
@@ -319,8 +325,13 @@ def finetune_train(
 
 @app.get("/finetune/train/{job_id}/status", response_class=HTMLResponse)
 def finetune_train_status(request: Request, job_id: str) -> HTMLResponse:
-    """Polled by HTMX every couple seconds while a training job is running."""
-    job = job_manager.get(job_id)
+    """Polled by HTMX every couple seconds while a training job is running.
+
+    Falls back to the on-disk status file (``rp.run_view``) when the in-memory
+    job is gone — e.g. after a webapp restart — so polling keeps working and the
+    run's progress is never lost.
+    """
+    job = job_manager.get(job_id) or rp.run_view(job_id)
     return templates.TemplateResponse(
         request,
         "partials/train_status.html",

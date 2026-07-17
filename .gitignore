@@ -49,3 +49,6 @@ wandb/
 # Claude Code local config (machine-specific)
 .claude/settings.local.json
 .claude/launch.json
+
+# Transient webapp fine-tune run status/metrics (subprocess worker)
+data/models/_finetune_runs/
