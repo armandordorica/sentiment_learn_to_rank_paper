@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pandas as pd
 
@@ -22,6 +23,7 @@ from sentiment_ltr.utils import slugify
 
 DEFAULT_WANDB_ENTITY = "armando-ordorica-university-of-toronto"
 DEFAULT_WANDB_PROJECT = "sentiment-ltr-transformers"
+DEFAULT_WANDB_WORKSPACE = "nwuserarmandoordorica"
 IMPORTED_CHECKPOINT_RUN_IDS = {
     "phrasebank_distilbert_best": "ri5500fc",
     "phrasebank_distilbert_1ep": "24rkyvrn",
@@ -32,8 +34,22 @@ def configure_wandb_environment() -> dict[str, str]:
     """Set stable project defaults before Hugging Face initializes W&B."""
     entity = os.environ.setdefault("WANDB_ENTITY", DEFAULT_WANDB_ENTITY)
     project = os.environ.setdefault("WANDB_PROJECT", DEFAULT_WANDB_PROJECT)
-    return {"entity": entity, "project": project,
-            "project_url": f"https://wandb.ai/{entity}/{project}"}
+    workspace = os.getenv("WANDB_WORKSPACE_SELECTOR", DEFAULT_WANDB_WORKSPACE)
+    project_url = _with_workspace_selector(
+        f"https://wandb.ai/{entity}/{project}", workspace
+    )
+    return {"entity": entity, "project": project, "project_url": project_url}
+
+
+def _with_workspace_selector(url: str | None, workspace: str | None = None) -> str | None:
+    """Attach W&B's namespace selector without discarding existing query args."""
+    if not url or "wandb.ai" not in url:
+        return url
+    workspace = workspace or os.getenv("WANDB_WORKSPACE_SELECTOR", DEFAULT_WANDB_WORKSPACE)
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query.setdefault("nw", workspace)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 
 
 def current_wandb_run_metadata() -> dict[str, str | None]:
@@ -45,7 +61,7 @@ def current_wandb_run_metadata() -> dict[str, str | None]:
     except Exception:
         run = None
     return {**base, "run_id": getattr(run, "id", None),
-            "run_url": getattr(run, "url", None)}
+            "run_url": _with_workspace_selector(getattr(run, "url", None))}
 
 
 def checkpoint_wandb_links(model_id: str, metrics: dict[str, Any] | None = None) -> dict[str, str | None]:
@@ -55,7 +71,8 @@ def checkpoint_wandb_links(model_id: str, metrics: dict[str, Any] | None = None)
     run_id = metrics.get("wandb_run_id") or IMPORTED_CHECKPOINT_RUN_IDS.get(model_id)
     run_url = metrics.get("wandb_run_url")
     if not run_url and run_id:
-        run_url = f"{base['project_url']}/runs/{run_id}"
+        run_url = f"https://wandb.ai/{base['entity']}/{base['project']}/runs/{run_id}"
+    run_url = _with_workspace_selector(run_url)
     return {**base, "run_id": run_id, "run_url": run_url,
             "url": run_url or base["project_url"]}
 

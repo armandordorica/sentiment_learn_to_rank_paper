@@ -29,11 +29,17 @@
   {% else %}
     <table class="data-table">
       <thead>
-        <tr><th>Split</th><th>Rows</th></tr>
+        <tr><th>Split</th><th>Actual start</th><th>Actual end</th><th>Rows</th><th>Role</th></tr>
       </thead>
       <tbody>
         {% for row in coverage.splits_table %}
-          <tr><td>{{ row.split }}</td><td>{{ "{:,}".format(row.rows) }}</td></tr>
+          <tr>
+            <td><strong>{{ row.split|title }}</strong></td>
+            <td>{{ row.start_date or "—" }}</td>
+            <td>{{ row.end_date or "—" }}</td>
+            <td>{{ "{:,}".format(row.rows) }}</td>
+            <td>{% if row.split == 'train' %}Fits model weights{% elif row.split == 'validation' %}Selects the best checkpoint{% else %}Held out for final comparison{% endif %}</td>
+          </tr>
         {% endfor %}
       </tbody>
     </table>

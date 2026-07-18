@@ -54,20 +54,29 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="RavenPack fine-tuning worker")
     parser.add_argument("--status-file", required=True)
     parser.add_argument("--metrics-out", required=True)
+    parser.add_argument("--control-file", required=True)
     parser.add_argument("--tickers", nargs="+", required=True)
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--init-from-phrasebank", action="store_true")
+    parser.add_argument("--resume-from-checkpoint")
+    parser.add_argument("--wandb-run-id")
     args = parser.parse_args()
+
+    if args.wandb_run_id:
+        os.environ["WANDB_RUN_ID"] = args.wandb_run_id
+        os.environ["WANDB_RESUME"] = "allow"
 
     status_file = Path(args.status_file)
     metrics_out = Path(args.metrics_out)
+    control_file = Path(args.control_file)
 
     from sentiment_ltr.models.phrasebank_sentiment import device_report
-    from sentiment_ltr.models.ravenpack_sentiment import train_ravenpack
+    from sentiment_ltr.models.ravenpack_sentiment import TrainingPaused, train_ravenpack
 
     report = device_report()
     state: dict[str, Any] = {
         "status": "running",
+        "worker_pid": os.getpid(),
         "phase": "preparing",
         "message": "Preparing dataset (load + tokenize) and model…",
         "device": report["selected"],
@@ -75,6 +84,8 @@ def main() -> int:
         "torch_version": report["torch_version"],
         "tickers": args.tickers,
         "epochs": args.epochs,
+        "init_from_phrasebank": args.init_from_phrasebank,
+        "resumed_from_checkpoint": args.resume_from_checkpoint,
         "step": 0,
         "total_steps": 0,
     }
@@ -129,12 +140,22 @@ def main() -> int:
             state["message"] = f"Training on {state['device_name']} — step {step:,} / {total:,}"
         _write()
 
+    def _pause_requested() -> bool:
+        if not control_file.exists():
+            return False
+        try:
+            return json.loads(control_file.read_text(encoding="utf-8")).get("action") == "pause"
+        except Exception:
+            return False
+
     try:
         metrics = train_ravenpack(
             tickers=args.tickers,
             init_from_phrasebank=args.init_from_phrasebank,
             num_train_epochs=args.epochs,
             progress_callback=_on_progress,
+            pause_requested=_pause_requested,
+            resume_from_checkpoint=args.resume_from_checkpoint,
         )
         _atomic_write_json(metrics_out, metrics)
         state.update({
@@ -148,6 +169,18 @@ def main() -> int:
             "wandb_project_url": metrics.get("wandb_project_url"),
             "wandb_run_id": metrics.get("wandb_run_id"),
             "wandb_run_url": metrics.get("wandb_run_url"),
+        })
+        _write()
+        return 0
+    except TrainingPaused as exc:
+        state.update({
+            "status": "paused",
+            "phase": "paused",
+            "message": f"Paused safely at step {exc.step:,}. Progress is saved.",
+            "checkpoint_path": exc.checkpoint_path,
+            "wandb_run_id": state.get("run_id"),
+            "wandb_run_url": state.get("run_url"),
+            "elapsed_s": round(time.monotonic() - started),
         })
         _write()
         return 0

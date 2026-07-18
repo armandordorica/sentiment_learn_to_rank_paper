@@ -1,0 +1,27 @@
+{% if error %}
+  <div class="alert alert-error">{{ error }}</div>
+{% elif job is none %}
+  <p class="muted">No comparison run yet.</p>
+{% elif job.status in ['pending', 'running'] %}
+  <div class="alert alert-info" hx-get="/finetune/compare/{{ job.id }}/status" hx-trigger="load delay:2s" hx-swap="outerHTML">
+    ⏳ {{ job.progress_message }}
+  </div>
+{% elif job.status == 'error' %}
+  <div class="alert alert-error">Comparison failed.<pre>{{ job.error }}</pre></div>
+{% else %}
+  <div class="comparison-result">
+    <div class="alert alert-success">
+      Compared {{ "{:,}".format(job.result.models[0].n_rows) }} identical test rows.
+      Macro-F1 change: <strong>{{ "%+.1f"|format(job.result.f1_delta * 100) }} points</strong> ·
+      accuracy change: <strong>{{ "%+.1f"|format(job.result.accuracy_delta * 100) }} points</strong>.
+    </div>
+    <table class="data-table">
+      <thead><tr><th>Checkpoint</th><th>Checkpoint SHA</th><th>Test rows</th><th>Macro-F1</th><th>Accuracy</th></tr></thead>
+      <tbody>{% for model in job.result.models %}<tr>
+        <td><strong>{{ model.title }}</strong><br><span class="muted">{{ model.description }}</span></td>
+        <td><code>{{ model.sha }}</code></td><td>{{ "{:,}".format(model.n_rows) }}</td>
+        <td>{{ "%.1f%%"|format(model.macro_f1 * 100) }}</td><td>{{ "%.1f%%"|format(model.accuracy * 100) }}</td>
+      </tr>{% endfor %}</tbody>
+    </table>
+  </div>
+{% endif %}

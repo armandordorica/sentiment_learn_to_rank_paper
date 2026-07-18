@@ -38,6 +38,7 @@ templates = Jinja2Templates(directory=str(WEBAPP_DIR / "templates"))
 # Expose the loss-chart geometry builder so the training-status partial can draw
 # the live convergence chart directly from job.progress, wherever it renders.
 templates.env.globals["loss_chart"] = rp.loss_chart
+templates.env.globals["wandb_project_url"] = rp.wandb_context()["project_url"]
 
 NAV_ITEMS = [
     {"num": "1", "label": "Data Explorer", "href": "/data-explorer", "enabled": True},
@@ -277,6 +278,7 @@ def finetune_page(request: Request) -> HTMLResponse:
         "default_tickers": default_tickers,
         "default_epochs": rp.DEFAULT_RAVENPACK_TRAIN_EPOCHS,
         "coverage": rp.coverage_summary(default_tickers) if default_tickers else None,
+        "comparison_models": rp.comparison_models(),
         "job": resumed_job,
         "error": None,
         "wandb": rp.wandb_context(),
@@ -340,6 +342,77 @@ def finetune_train_status(request: Request, job_id: str) -> HTMLResponse:
         request,
         "partials/train_status.html",
         {"job": job, "error": None if job else "Job not found."},
+    )
+
+
+@app.post("/finetune/train/{job_id}/pause", response_class=HTMLResponse)
+def finetune_pause(request: Request, job_id: str) -> HTMLResponse:
+    job = rp.request_pause(job_id)
+    in_memory = job_manager.get(job_id)
+    if in_memory is not None:
+        in_memory.progress_message = "Pause requested — saving after the current step…"
+    return templates.TemplateResponse(
+        request, "partials/train_status.html",
+        {"job": in_memory or job, "error": None if job else "Job not found."},
+    )
+
+
+@app.post("/finetune/train/{job_id}/resume", response_class=HTMLResponse)
+def finetune_resume(request: Request, job_id: str) -> HTMLResponse:
+    state = rp.read_run_state(job_id)
+    checkpoint = (state or {}).get("checkpoint_path")
+    if not state or state.get("status") != "paused" or not checkpoint:
+        return templates.TemplateResponse(
+            request, "partials/train_status.html",
+            {"job": None, "error": "This run has no saved paused checkpoint to resume."},
+        )
+    tickers = state.get("tickers") or []
+    epochs = int(state.get("epochs") or rp.DEFAULT_RAVENPACK_TRAIN_EPOCHS)
+    init_from_phrasebank = bool(state.get("init_from_phrasebank", True))
+    new_id = job_manager.start(
+        kind="ravenpack_finetune_resume",
+        fn=lambda job: rp.run_training(
+            tickers, init_from_phrasebank=init_from_phrasebank,
+            num_train_epochs=epochs, job=job, resume_from_checkpoint=checkpoint,
+            wandb_run_id=state.get("wandb_run_id") or state.get("run_id"),
+        ),
+    )
+    return templates.TemplateResponse(
+        request, "partials/train_status.html",
+        {"job": job_manager.get(new_id), "error": None},
+    )
+
+
+@app.post("/finetune/compare", response_class=HTMLResponse)
+def finetune_compare(
+    request: Request,
+    tickers: list[str] = Form(default=[]),
+    before_model_id: str = Form(default="phrasebank_distilbert_best"),
+    after_model_id: str = Form(default="ravenpack_distilbert_best"),
+) -> HTMLResponse:
+    if not tickers:
+        return templates.TemplateResponse(
+            request, "partials/model_comparison_status.html",
+            {"job": None, "error": "Select at least one ticker."},
+        )
+    job_id = job_manager.start(
+        kind="ravenpack_model_comparison",
+        fn=lambda job: rp.compare_checkpoints(
+            tickers, before_model_id, after_model_id, job=job,
+        ),
+    )
+    return templates.TemplateResponse(
+        request, "partials/model_comparison_status.html",
+        {"job": job_manager.get(job_id), "error": None},
+    )
+
+
+@app.get("/finetune/compare/{job_id}/status", response_class=HTMLResponse)
+def finetune_compare_status(request: Request, job_id: str) -> HTMLResponse:
+    job = job_manager.get(job_id)
+    return templates.TemplateResponse(
+        request, "partials/model_comparison_status.html",
+        {"job": job, "error": None if job else "Comparison job not found."},
     )
 
 

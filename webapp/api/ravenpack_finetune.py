@@ -22,6 +22,7 @@ if str(SRC_PATH) not in sys.path:
 from sentiment_ltr.models import phrasebank_sentiment as _phrasebank_sentiment  # noqa: E402
 from sentiment_ltr.models import ravenpack_sentiment as _ravenpack_sentiment  # noqa: E402
 from sentiment_ltr.wandb_logging import checkpoint_wandb_links  # noqa: E402
+from webapp.api.sentiment_lab import available_models as _available_models  # noqa: E402
 
 model_is_saved = _phrasebank_sentiment.model_is_saved
 resolve_model_dir = _phrasebank_sentiment.resolve_model_dir
@@ -91,6 +92,14 @@ def coverage_summary(tickers: list[str]) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         return {"error": f"Could not load training data: {exc}"}
     splits = ravenpack_split_summary(labeled)
+    assigned = assign_time_split(labeled["article_date"])
+    date_ranges: dict[str, dict[str, str | None]] = {}
+    for split_name in ("train", "validation", "test"):
+        dates = labeled.loc[assigned == split_name, "article_date"].dropna()
+        date_ranges[split_name] = {
+            "start_date": dates.min().strftime("%Y-%m-%d") if not dates.empty else None,
+            "end_date": dates.max().strftime("%Y-%m-%d") if not dates.empty else None,
+        }
 
     def _split_rows(split_name: str) -> int:
         rows = splits.loc[splits["split"] == split_name, "rows"]
@@ -116,8 +125,52 @@ def coverage_summary(tickers: list[str]) -> dict[str, Any]:
         "train_rows": _split_rows("train"),
         "val_rows": _split_rows("validation"),
         "test_rows": _split_rows("test"),
-        "splits_table": splits.to_dict(orient="records"),
+        "splits_table": [
+            {**row, **date_ranges[row["split"]]}
+            for row in splits.to_dict(orient="records")
+        ],
         "per_ticker": per_ticker,
+    }
+
+
+def comparison_models() -> list[dict[str, Any]]:
+    """Saved checkpoints that can be evaluated on the shared RavenPack test set."""
+    return [
+        {"id": model["id"], "title": model["title"],
+         "sha": model["weights_sha_short"], "description": model["description"]}
+        for model in _available_models()
+        if model["id"] in {"phrasebank_distilbert_best", "ravenpack_distilbert_best"}
+    ]
+
+
+def compare_checkpoints(
+    tickers: list[str], before_model_id: str, after_model_id: str, *, job: Any | None = None,
+) -> dict[str, Any]:
+    """Evaluate two saved checkpoints against identical held-out test rows."""
+    allowed = {model["id"]: model for model in comparison_models()}
+    if before_model_id not in allowed or after_model_id not in allowed:
+        raise ValueError("Select two available saved checkpoints.")
+    results: list[dict[str, Any]] = []
+    for index, model_id in enumerate((before_model_id, after_model_id), start=1):
+        model = allowed[model_id]
+        if job is not None:
+            job.progress_message = f"Evaluating {index}/2: {model['title']} on the test set…"
+        evaluated = _ravenpack_sentiment.evaluate_phrasebank_baseline_on_ravenpack(
+            tickers, model_dir=PROJECT_ROOT / "data" / "models" / model_id,
+            eval_split="test",
+        )
+        results.append({
+            **model,
+            "n_rows": evaluated["n_rows"],
+            "macro_f1": evaluated["macro_f1"],
+            "accuracy": evaluated["accuracy"],
+        })
+    return {
+        "models": results,
+        "f1_delta": results[1]["macro_f1"] - results[0]["macro_f1"],
+        "accuracy_delta": results[1]["accuracy"] - results[0]["accuracy"],
+        "same_test_rows": results[0]["n_rows"] == results[1]["n_rows"],
+        "tickers": tickers,
     }
 
 
@@ -133,6 +186,8 @@ def run_training(
     init_from_phrasebank: bool,
     num_train_epochs: int,
     job: Any | None = None,
+    resume_from_checkpoint: str | None = None,
+    wandb_run_id: str | None = None,
 ) -> dict[str, Any]:
     """Run fine-tuning in a **subprocess** and stream its progress into ``job``.
 
@@ -151,18 +206,26 @@ def run_training(
     run_id = job.id if job is not None else f"{int(_time.time())}"
     status_file = _FINETUNE_RUN_DIR / f"{run_id}_status.json"
     metrics_out = _FINETUNE_RUN_DIR / f"{run_id}_metrics.json"
+    control_file = _FINETUNE_RUN_DIR / f"{run_id}_control.json"
+    log_file = _FINETUNE_RUN_DIR / f"{run_id}.log"
     status_file.unlink(missing_ok=True)
     metrics_out.unlink(missing_ok=True)
+    control_file.unlink(missing_ok=True)
 
     cmd = [
         sys.executable, str(FINETUNE_WORKER),
         "--status-file", str(status_file),
         "--metrics-out", str(metrics_out),
+        "--control-file", str(control_file),
         "--tickers", *tickers,
         "--epochs", str(num_train_epochs),
     ]
     if init_from_phrasebank:
         cmd.append("--init-from-phrasebank")
+    if resume_from_checkpoint:
+        cmd.extend(["--resume-from-checkpoint", resume_from_checkpoint])
+    if wandb_run_id:
+        cmd.extend(["--wandb-run-id", wandb_run_id])
 
     if job is not None:
         job.progress_message = "Launching training subprocess…"
@@ -170,7 +233,13 @@ def run_training(
     # start_new_session detaches the worker into its own process group so a
     # dev-server auto-reload (or the JobManager thread dying) can't kill an
     # in-flight training run — its status file on disk stays the source of truth.
-    proc = subprocess.Popen(cmd, cwd=str(PROJECT_ROOT), start_new_session=True)
+    # Keep output in a durable file. A server restart closes its terminal pipe;
+    # inheriting that pipe previously caused tqdm/W&B BrokenPipeError mid-run.
+    log_handle = log_file.open("a", encoding="utf-8")
+    proc = subprocess.Popen(
+        cmd, cwd=str(PROJECT_ROOT), start_new_session=True,
+        stdout=log_handle, stderr=subprocess.STDOUT,
+    )
 
     def _sync_job() -> dict[str, Any] | None:
         if not status_file.exists():
@@ -190,10 +259,23 @@ def run_training(
         last = _sync_job() or last
         _time.sleep(1.0)
     last = _sync_job() or last  # final read after exit
+    log_handle.close()
 
     if proc.returncode != 0:
         err = (last or {}).get("error") or f"Training subprocess exited with code {proc.returncode}."
         raise RuntimeError(err)
+
+    if (last or {}).get("status") == "paused":
+        return {
+            "paused": True,
+            "checkpoint_path": last.get("checkpoint_path"),
+            "step": last.get("step"),
+            "total_steps": last.get("total_steps"),
+            "tickers": tickers,
+            "epochs": num_train_epochs,
+            "init_from_phrasebank": init_from_phrasebank,
+            "wandb_run_id": last.get("wandb_run_id"),
+        }
 
     metrics = json.loads(metrics_out.read_text(encoding="utf-8"))
     return {
@@ -214,11 +296,37 @@ def run_training(
 
 
 def latest_run_id() -> str | None:
-    """Job id of the most recent run (by status-file mtime), or None."""
+    """Newest completed/error run or genuinely active worker run."""
     if not _FINETUNE_RUN_DIR.exists():
         return None
-    files = sorted(_FINETUNE_RUN_DIR.glob("*_status.json"), key=lambda p: p.stat().st_mtime)
-    return files[-1].name[: -len("_status.json")] if files else None
+    files = sorted(_FINETUNE_RUN_DIR.glob("*_status.json"),
+                   key=lambda p: p.stat().st_mtime, reverse=True)
+    for path in files:
+        job_id = path.name[: -len("_status.json")]
+        state = read_run_state(job_id)
+        if state is None:
+            continue
+        if state.get("status") == "running" and not _running_state_is_live(state, path):
+            continue
+        return job_id
+    return None
+
+
+def _running_state_is_live(state: dict[str, Any], path: Path) -> bool:
+    """True when a running status belongs to a live worker or was just updated."""
+    import os
+    import time
+
+    pid = state.get("worker_pid")
+    if pid:
+        try:
+            os.kill(int(pid), 0)
+            return True
+        except (OSError, ValueError):
+            return False
+    # Compatibility for older workers that did not persist a PID: they write
+    # every step, so a recent file is active; an old one is stale.
+    return time.time() - path.stat().st_mtime < 120
 
 
 def read_run_state(job_id: str) -> dict[str, Any] | None:
@@ -244,16 +352,22 @@ def run_view(job_id: str) -> SimpleNamespace | None:
     if state is None:
         return None
     disk_status = state.get("status", "running")
-    status = disk_status if disk_status in ("done", "error") else "running"
+    status_path = _FINETUNE_RUN_DIR / f"{job_id}_status.json"
+    if disk_status == "running" and not _running_state_is_live(state, status_path):
+        disk_status = "error"
+        state["message"] = "This run stopped updating and no active training worker was found."
+        state["error"] = state["message"]
+    status = disk_status if disk_status in ("done", "error", "paused") else "running"
     result = None
     if disk_status == "done":
+        wandb = wandb_context()
         result = {
             "test_f1": state.get("test_f1"),
             "test_acc": state.get("test_acc"),
             "device": state.get("device"),
             "checkpoint_dir": str(DEFAULT_RAVENPACK_MODEL_DIR.relative_to(PROJECT_ROOT)),
-            "wandb_run_url": state.get("wandb_run_url"),
-            "wandb_project_url": state.get("wandb_project_url"),
+            "wandb_run_url": state.get("wandb_run_url") or wandb.get("run_url"),
+            "wandb_project_url": state.get("wandb_project_url") or wandb.get("project_url"),
         }
     return SimpleNamespace(
         id=job_id,
@@ -262,6 +376,20 @@ def run_view(job_id: str) -> SimpleNamespace | None:
         progress_message=state.get("message", ""),
         result=result,
         error=state.get("error"),
+    )
+
+
+def request_pause(job_id: str) -> SimpleNamespace | None:
+    """Request a graceful checkpoint-and-stop at the end of the current step."""
+    state = read_run_state(job_id)
+    if state is None or state.get("status") != "running":
+        return run_view(job_id)
+    control = _FINETUNE_RUN_DIR / f"{job_id}_control.json"
+    control.write_text(json.dumps({"action": "pause"}), encoding="utf-8")
+    state["message"] = "Pause requested — saving after the current step…"
+    return SimpleNamespace(
+        id=job_id, status="running", progress=state,
+        progress_message=state["message"], result=None, error=None,
     )
 
 

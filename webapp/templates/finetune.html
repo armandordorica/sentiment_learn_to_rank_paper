@@ -100,6 +100,35 @@
       <div id="train-status">
         {% include "partials/train_status.html" with context %}
       </div>
+
+      <hr>
+      <section>
+        <h2>Before vs. after training</h2>
+        <p class="muted">
+          Load two saved checkpoints and evaluate both on the exact same held-out RavenPack
+          test headlines. This comparison never uses the test set for training or checkpoint selection.
+        </p>
+        {% if comparison_models|length >= 2 %}
+          <form hx-post="/finetune/compare" hx-target="#model-comparison-status" hx-swap="innerHTML" hx-include="#tickers">
+            <div class="comparison-selectors">
+              <label><strong>Before training</strong>
+                <select name="before_model_id">
+                  {% for model in comparison_models %}<option value="{{ model.id }}" {% if model.id == 'phrasebank_distilbert_best' %}selected{% endif %}>{{ model.title }} · {{ model.sha }}</option>{% endfor %}
+                </select>
+              </label>
+              <label><strong>After training</strong>
+                <select name="after_model_id">
+                  {% for model in comparison_models %}<option value="{{ model.id }}" {% if model.id == 'ravenpack_distilbert_best' %}selected{% endif %}>{{ model.title }} · {{ model.sha }}</option>{% endfor %}
+                </select>
+              </label>
+            </div>
+            <button type="submit" class="btn btn-primary">Compare on held-out test set</button>
+          </form>
+          <div id="model-comparison-status"><p class="muted">No comparison run yet.</p></div>
+        {% else %}
+          <div class="alert alert-info">Train and save the RavenPack checkpoint to enable before/after comparison.</div>
+        {% endif %}
+      </section>
     {% endif %}
   </div>
 {% endblock %}
