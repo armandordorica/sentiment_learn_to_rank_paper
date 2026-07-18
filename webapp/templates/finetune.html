@@ -113,30 +113,29 @@
 
       <hr>
       <section>
-        <h2>Before vs. after training</h2>
+        <h2>Out-of-domain and cross-stock benchmark</h2>
         <p class="muted">
-          Load two saved checkpoints and evaluate both on the exact same held-out RavenPack
-          test headlines. This comparison never uses the test set for training or checkpoint selection.
+          Compare the out-of-the-box PhraseBank model, the AAPL-only model, and the pooled five-stock
+          model on the exact same 2013–2014 headlines from five stocks excluded from all fine-tuning.
+          The OOD test set is never used for training or checkpoint selection.
         </p>
-        {% if comparison_models|length >= 2 %}
-          <form hx-post="/finetune/compare" hx-target="#model-comparison-status" hx-swap="innerHTML" hx-include="#tickers">
-            <div class="comparison-selectors">
-              <label><strong>Before training</strong>
-                <select name="before_model_id">
-                  {% for model in comparison_models %}<option value="{{ model.id }}" {% if model.id == 'phrasebank_distilbert_best' %}selected{% endif %}>{{ model.title }} · {{ model.sha }}</option>{% endfor %}
-                </select>
-              </label>
-              <label><strong>After training</strong>
-                <select name="after_model_id">
-                  {% for model in comparison_models %}<option value="{{ model.id }}" {% if model.id == 'ravenpack_distilbert_best' %}selected{% endif %}>{{ model.title }} · {{ model.sha }}</option>{% endfor %}
-                </select>
-              </label>
+        <div class="alert alert-success">
+          <strong>Three strict stock-domain OOD baskets:</strong> all 15 stocks are unique and none
+          appears in the training universe (AAPL, MSFT, JPM, XOM, JNJ). Results use 2013–2014 only,
+          and the headline reports the unweighted average of the three basket-level scores.
+        </div>
+        <div class="ood-basket-grid">{% for name, tickers in ood_baskets.items() %}<div><strong>{{ name }}</strong><span>{{ tickers|join(', ') }}</span></div>{% endfor %}</div>
+        {% if comparison_models|length >= 3 %}
+          <form hx-post="/finetune/compare" hx-target="#model-comparison-status" hx-swap="innerHTML">
+            {% for model in comparison_models %}<input type="hidden" name="model_ids" value="{{ model.id }}">{% endfor %}
+            <div class="benchmark-model-list">
+              {% for model in comparison_models %}<div><strong>{{ model.title }}</strong><code>{{ model.sha }}</code><span class="muted">{{ model.description }}</span></div>{% endfor %}
             </div>
-            <button type="submit" class="btn btn-primary">Compare on held-out test set</button>
+            <button type="submit" class="btn btn-primary">Run three-basket OOD benchmark</button>
           </form>
           <div id="model-comparison-status"><p class="muted">No comparison run yet.</p></div>
         {% else %}
-          <div class="alert alert-info">Train and save the RavenPack checkpoint to enable before/after comparison.</div>
+          <div class="alert alert-info">All three checkpoints are required: PhraseBank, AAPL-only, and five-stock.</div>
         {% endif %}
       </section>
     {% endif %}

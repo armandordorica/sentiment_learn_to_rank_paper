@@ -6,6 +6,7 @@
   <div class="metric-row">
     <div class="metric"><span class="metric-label">Total labeled</span><span class="metric-value">{{ "{:,}".format(coverage.total_labeled) }}</span></div>
     <div class="metric"><span class="metric-label">Train rows</span><span class="metric-value">{{ "{:,}".format(coverage.train_rows) }}</span></div>
+    <div class="metric"><span class="metric-label">Validation rows</span><span class="metric-value">{{ "{:,}".format(coverage.val_rows) }}</span></div>
     <div class="metric"><span class="metric-label">Test rows</span><span class="metric-value">{{ "{:,}".format(coverage.test_rows) }}</span></div>
   </div>
 
@@ -18,7 +19,27 @@
     </div>
   {% endif %}
 
+  <h4>Temporal split windows</h4>
+  <p class="muted">These calendar boundaries are shared by every selected ticker and are fixed before pooling.</p>
+  <table class="data-table">
+    <thead>
+      <tr><th>Split</th><th>Actual start</th><th>Actual end</th><th>Rows</th><th>Role</th></tr>
+    </thead>
+    <tbody>
+      {% for row in coverage.splits_table %}
+        <tr>
+          <td><strong>{{ row.split|title }}</strong></td>
+          <td>{{ row.start_date or "—" }}</td>
+          <td>{{ row.end_date or "—" }}</td>
+          <td>{{ "{:,}".format(row.rows) }}</td>
+          <td>{% if row.split == 'train' %}Fits model weights{% elif row.split == 'validation' %}Selects the best checkpoint{% else %}Held out for final comparison{% endif %}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
   {% if coverage.per_ticker %}
+    <h4>Per-ticker coverage</h4>
     <table class="data-table">
       <thead>
         <tr><th>Ticker</th><th>Labeled</th><th>Train</th><th>Val</th><th>Test</th></tr>
@@ -31,23 +52,6 @@
             <td>{{ "{:,}".format(row.train) }}</td>
             <td>{{ "{:,}".format(row.val) }}</td>
             <td>{{ "{:,}".format(row.test) }}</td>
-          </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  {% else %}
-    <table class="data-table">
-      <thead>
-        <tr><th>Split</th><th>Actual start</th><th>Actual end</th><th>Rows</th><th>Role</th></tr>
-      </thead>
-      <tbody>
-        {% for row in coverage.splits_table %}
-          <tr>
-            <td><strong>{{ row.split|title }}</strong></td>
-            <td>{{ row.start_date or "—" }}</td>
-            <td>{{ row.end_date or "—" }}</td>
-            <td>{{ "{:,}".format(row.rows) }}</td>
-            <td>{% if row.split == 'train' %}Fits model weights{% elif row.split == 'validation' %}Selects the best checkpoint{% else %}Held out for final comparison{% endif %}</td>
           </tr>
         {% endfor %}
       </tbody>

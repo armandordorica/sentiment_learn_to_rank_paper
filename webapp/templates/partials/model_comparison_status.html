@@ -11,17 +11,29 @@
 {% else %}
   <div class="comparison-result">
     <div class="alert alert-success">
-      Compared {{ "{:,}".format(job.result.models[0].n_rows) }} identical test rows.
-      Macro-F1 change: <strong>{{ "%+.1f"|format(job.result.f1_delta * 100) }} points</strong> ·
-      accuracy change: <strong>{{ "%+.1f"|format(job.result.accuracy_delta * 100) }} points</strong>.
+      Completed three independent OOD baskets.
+      Best average macro-F1: <strong>{{ job.result.best.title }} ({{ "%.1f%%"|format(job.result.best.macro_f1 * 100) }})</strong>.
     </div>
+    <div class="chart-cell">{{ job.result.charts.macro_f1|safe }}</div>
+    <div class="chart-cell">{{ job.result.charts.accuracy|safe }}</div>
+    <div class="chart-cell">{{ job.result.charts.ticker_heatmap|safe }}</div>
+    <h4>Three-basket average</h4>
     <table class="data-table">
-      <thead><tr><th>Checkpoint</th><th>Checkpoint SHA</th><th>Test rows</th><th>Macro-F1</th><th>Accuracy</th></tr></thead>
-      <tbody>{% for model in job.result.models %}<tr>
+      <thead><tr><th>Checkpoint</th><th>SHA</th><th>Total rows</th><th>Average macro-F1</th><th>Average accuracy</th><th>Δ F1 vs PhraseBank</th></tr></thead>
+      <tbody>{% for model in job.result.averages %}<tr>
         <td><strong>{{ model.title }}</strong><br><span class="muted">{{ model.description }}</span></td>
-        <td><code>{{ model.sha }}</code></td><td>{{ "{:,}".format(model.n_rows) }}</td>
+        <td><code>{{ model.sha }}</code></td><td>{{ "{:,}".format(model.total_rows) }}</td>
         <td>{{ "%.1f%%"|format(model.macro_f1 * 100) }}</td><td>{{ "%.1f%%"|format(model.accuracy * 100) }}</td>
+        <td>{{ "%+.1f"|format((model.macro_f1 - job.result.baseline.macro_f1) * 100) }} pts</td>
       </tr>{% endfor %}</tbody>
+    </table>
+    <h4>Basket-level audit table</h4>
+    <table class="data-table">
+      <thead><tr><th>Basket</th><th>Stocks</th><th>Checkpoint</th><th>Rows</th><th>Macro-F1</th><th>Accuracy</th></tr></thead>
+      <tbody>{% for basket in job.result.baskets %}{% for model in basket.models %}<tr>
+        <td><strong>{{ basket.name }}</strong></td><td>{{ basket.tickers|join(', ') }}</td><td>{{ model.title }}</td>
+        <td>{{ "{:,}".format(model.n_rows) }}</td><td>{{ "%.1f%%"|format(model.macro_f1 * 100) }}</td><td>{{ "%.1f%%"|format(model.accuracy * 100) }}</td>
+      </tr>{% endfor %}{% endfor %}</tbody>
     </table>
   </div>
 {% endif %}

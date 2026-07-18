@@ -166,13 +166,24 @@ def load_ravenpack_labeled_frame(
         if "ticker" not in df.columns:
             df = df.copy()
             df["ticker"] = ticker
+        # Historical rich exports use ``story_id`` while fresh WRDS pulls use
+        # ``rp_story_id``. Normalize before concatenating; otherwise pandas
+        # creates two sparse columns and de-duplicating on ``story_id`` drops
+        # virtually every row from the fresh exports as a repeated null ID.
+        if "story_id" not in df.columns and "rp_story_id" in df.columns:
+            df = df.copy()
+            df["story_id"] = df["rp_story_id"]
         frames.append(df)
 
     combined = pd.concat(frames, ignore_index=True)
 
-    if "article_date" not in combined.columns and "article_time" in combined.columns:
-        combined["article_date"] = pd.to_datetime(combined["article_time"], errors="coerce").dt.normalize()
-    combined["article_date"] = pd.to_datetime(combined["article_date"], errors="coerce")
+    if "article_date" in combined.columns:
+        combined["article_date"] = pd.to_datetime(combined["article_date"], errors="coerce")
+    else:
+        combined["article_date"] = pd.NaT
+    if "article_time" in combined.columns:
+        derived_dates = pd.to_datetime(combined["article_time"], errors="coerce").dt.tz_localize(None).dt.normalize()
+        combined["article_date"] = combined["article_date"].fillna(derived_dates)
 
     combined["headline"] = combined["headline"].map(
         lambda v: re.sub(r"\s+", " ", str(v or "").strip())
@@ -1092,7 +1103,7 @@ def evaluate_phrasebank_baseline_on_ravenpack(
     preds = pd.concat(pred_chunks, ignore_index=True)
 
     results = eval_df[
-        ["split", "article_date", "headline", "event_sentiment_score", "label_name"]
+        ["ticker", "split", "article_date", "headline", "event_sentiment_score", "label_name"]
     ].join(preds.drop(columns=["sentence"]))
     results = results.rename(columns={"label_name": "actual"})
     results["match"] = results["actual"] == results["pred"]
@@ -1111,6 +1122,17 @@ def evaluate_phrasebank_baseline_on_ravenpack(
     tickers_used = sorted(eval_df["ticker"].astype(str).str.upper().unique().tolist())
     mismatches = results.loc[~results["match"]]
     sample_n = min(mismatch_sample, len(mismatches))
+    per_ticker = []
+    for ticker, ticker_rows in results.groupby("ticker", sort=True):
+        per_ticker.append({
+            "ticker": str(ticker).upper(),
+            "n_rows": int(len(ticker_rows)),
+            "macro_f1": float(f1_score(
+                ticker_rows["actual"], ticker_rows["pred"], labels=label_order,
+                average="macro", zero_division=0,
+            )),
+            "accuracy": float(accuracy_score(ticker_rows["actual"], ticker_rows["pred"])),
+        })
 
     return {
         "model_dir": str(model_dir),
@@ -1121,6 +1143,7 @@ def evaluate_phrasebank_baseline_on_ravenpack(
         "macro_f1": float(
             f1_score(y_true, y_pred, labels=label_order, average="macro", zero_division=0)
         ),
+        "per_ticker": per_ticker,
         "classification_report": classification_report(
             y_true,
             y_pred,

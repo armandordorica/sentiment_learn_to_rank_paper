@@ -27,14 +27,13 @@ MODEL_DIR = PROJECT_ROOT / "data" / "models"
 
 @lru_cache(maxsize=12)
 def _checkpoint_fingerprint(model_id: str, weights_mtime_ns: int) -> str:
-    """Return the full weights SHA-256, preferring the saved provenance record."""
+    """Return the SHA-256 of the weights that are actually on disk.
+
+    A fine-tuned directory can inherit its initialization checkpoint's
+    ``provenance.json``. That record is useful lineage, but it is not proof of
+    the current output weights and may contain the parent's hash.
+    """
     path = MODEL_DIR / model_id
-    provenance_path = path / "provenance.json"
-    if provenance_path.exists():
-        provenance = json.loads(provenance_path.read_text())
-        for item in provenance.get("weights", []):
-            if item.get("file") == "model.safetensors" and item.get("sha256"):
-                return str(item["sha256"])
     digest = hashlib.sha256()
     with (path / "model.safetensors").open("rb") as weights:
         for chunk in iter(lambda: weights.read(1024 * 1024), b""):

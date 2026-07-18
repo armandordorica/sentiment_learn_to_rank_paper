@@ -187,8 +187,8 @@ def test_coverage_summary_reports_actual_split_date_ranges(monkeypatch):
 
 def test_compare_checkpoints_uses_same_test_split(monkeypatch):
     models = [
-        {"id": "phrasebank_distilbert_best", "title": "Before", "sha": "aaa", "description": "before"},
-        {"id": "ravenpack_distilbert_best", "title": "After", "sha": "bbb", "description": "after"},
+        {"id": "phrasebank_distilbert_best", "title": "Before", "sha": "aaa", "description": "before", "trained_tickers": []},
+        {"id": "ravenpack_distilbert_best", "title": "After", "sha": "bbb", "description": "after", "trained_tickers": ["AAPL"]},
     ]
     monkeypatch.setattr(rp, "comparison_models", lambda: models)
     calls = []
@@ -200,11 +200,40 @@ def test_compare_checkpoints_uses_same_test_split(monkeypatch):
 
     monkeypatch.setattr(rp._ravenpack_sentiment, "evaluate_phrasebank_baseline_on_ravenpack", fake_eval)
     result = rp.compare_checkpoints(
-        ["AAPL"], "phrasebank_distilbert_best", "ravenpack_distilbert_best"
+        ["AAPL"], ["phrasebank_distilbert_best", "ravenpack_distilbert_best"]
     )
     assert calls == [
         (["AAPL"], "phrasebank_distilbert_best", "test"),
         (["AAPL"], "ravenpack_distilbert_best", "test"),
     ]
     assert result["same_test_rows"] is True
-    assert result["f1_delta"] == pytest.approx(0.2)
+    assert result["best"]["macro_f1"] == pytest.approx(0.6)
+    assert result["models"][0]["domain_label"] == "Dataset OOD: no RavenPack training"
+    assert result["models"][1]["domain_label"] == "Held-out, in-universe tickers"
+
+
+def test_three_basket_ood_benchmark_averages_baskets_and_builds_graphs(monkeypatch):
+    monkeypatch.setattr(rp, "DEFAULT_OOD_BASKETS", {
+        "Basket 1": ["AAA"], "Basket 2": ["BBB"], "Basket 3": ["CCC"],
+    })
+
+    def fake_compare(tickers, model_ids, job=None):
+        score = {"AAA": 0.3, "BBB": 0.6, "CCC": 0.9}[tickers[0]]
+        models = []
+        for model_id, bump in (("base", 0.0), ("adapted", 0.1)):
+            models.append({
+                "id": model_id, "title": model_id.title(), "sha": model_id,
+                "description": model_id, "n_rows": 10,
+                "macro_f1": score + bump, "accuracy": score + bump,
+                "per_ticker": [{"ticker": tickers[0], "n_rows": 10,
+                                "macro_f1": score + bump, "accuracy": score + bump}],
+            })
+        return {"models": models, "tickers": tickers}
+
+    monkeypatch.setattr(rp, "compare_checkpoints", fake_compare)
+    result = rp.compare_ood_baskets(["base", "adapted"])
+    assert result["averages"][0]["macro_f1"] == pytest.approx(0.6)
+    assert result["averages"][1]["macro_f1"] == pytest.approx(0.7)
+    assert result["best"]["id"] == "adapted"
+    assert "Plotly.newPlot" in result["charts"]["macro_f1"]
+    assert "Plotly.newPlot" in result["charts"]["ticker_heatmap"]

@@ -229,6 +229,12 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .source-path { display: grid; gap: .35rem; margin: .8rem 0 1rem; padding: .75rem .9rem; border: 1px solid var(--border); border-radius: .45rem; background: #f8fafc; }
 .source-path code { overflow-wrap: anywhere; color: #0f172a; }
 .source-path .muted { overflow-wrap: anywhere; font-size: .78rem; }
+.benchmark-model-list { display: grid; gap: .6rem; margin: .8rem 0 1rem; }
+.benchmark-model-list > div { display: grid; grid-template-columns: minmax(16rem, 1fr) auto; gap: .25rem 1rem; padding: .7rem .8rem; border: 1px solid var(--border); border-radius: .45rem; background: #f8fafc; }
+.benchmark-model-list .muted { grid-column: 1 / -1; }
+.ood-basket-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .7rem; margin: .8rem 0 1rem; }
+.ood-basket-grid > div { display: grid; gap: .3rem; padding: .75rem; border: 1px solid var(--border); border-radius: .45rem; background: #fff; }
+@media (max-width: 850px) { .ood-basket-grid { grid-template-columns: 1fr; } }
 
 /* Batch pipeline (Tab 2) */
 .progress-track {

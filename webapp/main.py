@@ -295,6 +295,7 @@ def finetune_page(request: Request) -> HTMLResponse:
         "default_epochs": rp.DEFAULT_RAVENPACK_TRAIN_EPOCHS,
         "coverage": rp.coverage_summary(default_tickers) if default_tickers else None,
         "comparison_models": rp.comparison_models(),
+        "ood_baskets": rp.DEFAULT_OOD_BASKETS,
         "five_stock_tickers": rp.DEFAULT_FIVE_STOCK_TICKERS,
         "five_stock_readiness": rp.five_stock_readiness(),
         "ready_tickers": rp.rich_export_tickers(),
@@ -405,20 +406,11 @@ def finetune_resume(request: Request, job_id: str) -> HTMLResponse:
 @app.post("/finetune/compare", response_class=HTMLResponse)
 def finetune_compare(
     request: Request,
-    tickers: list[str] = Form(default=[]),
-    before_model_id: str = Form(default="phrasebank_distilbert_best"),
-    after_model_id: str = Form(default="ravenpack_distilbert_best"),
+    model_ids: list[str] = Form(default=[]),
 ) -> HTMLResponse:
-    if not tickers:
-        return templates.TemplateResponse(
-            request, "partials/model_comparison_status.html",
-            {"job": None, "error": "Select at least one ticker."},
-        )
     job_id = job_manager.start(
         kind="ravenpack_model_comparison",
-        fn=lambda job: rp.compare_checkpoints(
-            tickers, before_model_id, after_model_id, job=job,
-        ),
+        fn=lambda job: rp.compare_ood_baskets(model_ids or None, job=job),
     )
     return templates.TemplateResponse(
         request, "partials/model_comparison_status.html",

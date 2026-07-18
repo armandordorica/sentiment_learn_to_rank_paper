@@ -11,8 +11,11 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from statistics import mean
 from types import SimpleNamespace
 from typing import Any
+
+import plotly.graph_objects as go
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SRC_PATH = PROJECT_ROOT / "src"
@@ -22,6 +25,7 @@ if str(SRC_PATH) not in sys.path:
 from sentiment_ltr.models import phrasebank_sentiment as _phrasebank_sentiment  # noqa: E402
 from sentiment_ltr.models import ravenpack_sentiment as _ravenpack_sentiment  # noqa: E402
 from sentiment_ltr.wandb_logging import checkpoint_wandb_links  # noqa: E402
+from webapp.api import sentiment_lab as _sentiment_lab  # noqa: E402
 from webapp.api.sentiment_lab import available_models as _available_models  # noqa: E402
 
 model_is_saved = _phrasebank_sentiment.model_is_saved
@@ -40,6 +44,12 @@ train_ravenpack = _ravenpack_sentiment.train_ravenpack
 assign_time_split = _ravenpack_sentiment.assign_time_split
 split_leakage_audit = _ravenpack_sentiment.split_leakage_audit
 DEFAULT_FIVE_STOCK_TICKERS = _ravenpack_sentiment.DEFAULT_FIVE_STOCK_TICKERS
+DEFAULT_OOD_BASKETS = {
+    "Basket 1": ["BAC", "INTC", "GE", "F", "PFE"],
+    "Basket 2": ["CSCO", "WFC", "GM", "VZ", "CMCSA"],
+    "Basket 3": ["BMY", "TSN", "CSX", "EBAY", "MS"],
+}
+DEFAULT_OOD_TICKERS = [ticker for basket in DEFAULT_OOD_BASKETS.values() for ticker in basket]
 
 # The pooled pilot set is the single source of truth in ravenpack_sentiment
 # (DEFAULT_FIVE_STOCK_TICKERS = AAPL, MSFT, JPM, XOM, JNJ).
@@ -178,43 +188,148 @@ def coverage_summary(tickers: list[str]) -> dict[str, Any]:
 
 
 def comparison_models() -> list[dict[str, Any]]:
-    """Saved checkpoints that can be evaluated on the shared RavenPack test set."""
-    return [
-        {"id": model["id"], "title": model["title"],
-         "sha": model["weights_sha_short"], "description": model["description"]}
-        for model in _available_models()
-        if model["id"] in {"phrasebank_distilbert_best", "ravenpack_distilbert_best"}
+    """The three research checkpoints evaluated on one shared test universe."""
+    candidates = [
+        ("phrasebank_distilbert_best", "PhraseBank — out-of-the-box", [],
+         "Financial PhraseBank checkpoint with no RavenPack adaptation."),
+        ("ravenpack_distilbert_best.bak-20260705-checkpoint", "RavenPack fine-tuned — 1 stock (AAPL)", ["AAPL"],
+         "PhraseBank checkpoint fine-tuned only on AAPL RavenPack headlines."),
+        ("ravenpack_distilbert_best", "RavenPack fine-tuned — 5 stocks", DEFAULT_FIVE_STOCK_TICKERS,
+         "PhraseBank checkpoint jointly fine-tuned on AAPL, MSFT, JPM, XOM, and JNJ."),
     ]
+    discovered = {model["id"]: model for model in _available_models()}
+    models = []
+    for model_id, title, trained_tickers, description in candidates:
+        path = PROJECT_ROOT / "data" / "models" / model_id
+        weights = path / "model.safetensors"
+        if not model_is_saved(path) or not weights.exists():
+            continue
+        known = discovered.get(model_id)
+        sha = known["weights_sha_short"] if known else _sentiment_lab._checkpoint_fingerprint(
+            model_id, weights.stat().st_mtime_ns,
+        )[:12]
+        models.append({
+            "id": model_id, "title": title, "sha": sha,
+            "description": description, "trained_tickers": trained_tickers,
+        })
+    return models
 
 
 def compare_checkpoints(
-    tickers: list[str], before_model_id: str, after_model_id: str, *, job: Any | None = None,
+    tickers: list[str], model_ids: list[str] | None = None, *, job: Any | None = None,
 ) -> dict[str, Any]:
-    """Evaluate two saved checkpoints against identical held-out test rows."""
+    """Evaluate the research checkpoints against identical held-out test rows."""
     allowed = {model["id"]: model for model in comparison_models()}
-    if before_model_id not in allowed or after_model_id not in allowed:
-        raise ValueError("Select two available saved checkpoints.")
+    selected = list(dict.fromkeys(model_ids or list(allowed)))
+    if len(selected) < 2 or any(model_id not in allowed for model_id in selected):
+        raise ValueError("Select at least two available saved checkpoints.")
     results: list[dict[str, Any]] = []
-    for index, model_id in enumerate((before_model_id, after_model_id), start=1):
+    eval_tickers = {str(t).upper() for t in tickers}
+    for index, model_id in enumerate(selected, start=1):
         model = allowed[model_id]
         if job is not None:
-            job.progress_message = f"Evaluating {index}/2: {model['title']} on the test set…"
+            job.progress_message = f"Evaluating {index}/{len(selected)}: {model['title']} on the test set…"
         evaluated = _ravenpack_sentiment.evaluate_phrasebank_baseline_on_ravenpack(
             tickers, model_dir=PROJECT_ROOT / "data" / "models" / model_id,
             eval_split="test",
         )
+        trained = set(model["trained_tickers"])
+        seen = sorted(eval_tickers & trained)
+        unseen = sorted(eval_tickers - trained)
+        if not trained:
+            domain_label = "Dataset OOD: no RavenPack training"
+        elif not seen:
+            domain_label = "Strict cross-stock OOD"
+        elif unseen:
+            domain_label = f"Mixed: {len(seen)} seen, {len(unseen)} unseen tickers"
+        else:
+            domain_label = "Held-out, in-universe tickers"
         results.append({
             **model,
             "n_rows": evaluated["n_rows"],
             "macro_f1": evaluated["macro_f1"],
             "accuracy": evaluated["accuracy"],
+            "per_ticker": evaluated.get("per_ticker", []),
+            "domain_label": domain_label,
+            "seen_tickers": seen,
+            "unseen_tickers": unseen,
         })
+    baseline = results[0]
+    best = max(results, key=lambda row: row["macro_f1"])
     return {
         "models": results,
-        "f1_delta": results[1]["macro_f1"] - results[0]["macro_f1"],
-        "accuracy_delta": results[1]["accuracy"] - results[0]["accuracy"],
-        "same_test_rows": results[0]["n_rows"] == results[1]["n_rows"],
+        "baseline": baseline,
+        "best": best,
+        "same_test_rows": len({row["n_rows"] for row in results}) == 1,
         "tickers": tickers,
+    }
+
+
+def _comparison_chart(baskets: list[dict[str, Any]], averages: list[dict[str, Any]], metric: str) -> str:
+    labels = [basket["name"] for basket in baskets] + ["3-basket average"]
+    fig = go.Figure()
+    for model_index, average in enumerate(averages):
+        values = [basket["models"][model_index][metric] * 100 for basket in baskets]
+        values.append(average[metric] * 100)
+        fig.add_bar(name=average["title"], x=labels, y=values, text=[f"{v:.1f}%" for v in values], textposition="auto")
+    label = "Macro-F1" if metric == "macro_f1" else "Accuracy"
+    fig.update_layout(
+        barmode="group", height=460, title=f"Strict OOD {label} by basket",
+        yaxis={"title": label, "ticksuffix": "%", "range": [0, 100], "gridcolor": "#d8dee8"},
+        plot_bgcolor="#fff", paper_bgcolor="#fff", legend={"orientation": "h", "y": -0.2},
+        margin={"t": 60, "b": 120},
+    )
+    return fig.to_html(full_html=False, include_plotlyjs=False)
+
+
+def _ticker_heatmap(baskets: list[dict[str, Any]], models: list[dict[str, Any]]) -> str:
+    tickers = [ticker for basket in baskets for ticker in basket["tickers"]]
+    by_model: dict[str, dict[str, float]] = {model["id"]: {} for model in models}
+    for basket in baskets:
+        for model in basket["models"]:
+            by_model[model["id"]].update({row["ticker"]: row["macro_f1"] * 100 for row in model["per_ticker"]})
+    z = [[by_model[model["id"]].get(ticker) for ticker in tickers] for model in models]
+    fig = go.Figure(go.Heatmap(
+        z=z, x=tickers, y=[model["title"] for model in models],
+        colorscale="RdYlGn", zmin=0, zmax=100,
+        text=[[f"{value:.1f}%" if value is not None else "—" for value in row] for row in z],
+        texttemplate="%{text}", hovertemplate="%{y}<br>%{x}: %{z:.1f}% macro-F1<extra></extra>",
+        colorbar={"title": "Macro-F1"},
+    ))
+    fig.update_layout(height=390, title="Per-stock OOD macro-F1", margin={"t": 60, "l": 230})
+    return fig.to_html(full_html=False, include_plotlyjs=False)
+
+
+def compare_ood_baskets(model_ids: list[str] | None = None, *, job: Any | None = None) -> dict[str, Any]:
+    """Evaluate all checkpoints on three disjoint, never-trained stock baskets."""
+    basket_results = []
+    total = len(DEFAULT_OOD_BASKETS)
+    for index, (name, tickers) in enumerate(DEFAULT_OOD_BASKETS.items(), start=1):
+        if job is not None:
+            job.progress_message = f"Evaluating OOD basket {index}/{total}: {', '.join(tickers)}…"
+        result = compare_checkpoints(tickers, model_ids, job=None)
+        basket_results.append({"name": name, "tickers": tickers, **result})
+
+    averages = []
+    for model_index, model in enumerate(basket_results[0]["models"]):
+        averages.append({
+            **{key: model[key] for key in ("id", "title", "sha", "description")},
+            "macro_f1": mean(basket["models"][model_index]["macro_f1"] for basket in basket_results),
+            "accuracy": mean(basket["models"][model_index]["accuracy"] for basket in basket_results),
+            "total_rows": sum(basket["models"][model_index]["n_rows"] for basket in basket_results),
+        })
+    baseline = averages[0]
+    best = max(averages, key=lambda row: row["macro_f1"])
+    return {
+        "baskets": basket_results,
+        "averages": averages,
+        "baseline": baseline,
+        "best": best,
+        "charts": {
+            "macro_f1": _comparison_chart(basket_results, averages, "macro_f1"),
+            "accuracy": _comparison_chart(basket_results, averages, "accuracy"),
+            "ticker_heatmap": _ticker_heatmap(basket_results, averages),
+        },
     }
 
 

@@ -4,6 +4,7 @@ import pandas as pd
 
 from sentiment_ltr.models.ravenpack_sentiment import (
     deduplicate_pooled_headlines,
+    load_ravenpack_labeled_frame,
     split_leakage_audit,
 )
 
@@ -38,3 +39,25 @@ def test_audit_detects_story_and_content_crossing_splits():
     assert audit["passed"] is False
     assert audit["story_ids_crossing_splits"] == 1
     assert audit["headlines_crossing_splits"] == 1
+
+
+def test_loader_pools_historical_and_fresh_story_id_columns(tmp_path):
+    common = {
+        "article_time": pd.to_datetime(["2011-01-01"], utc=True),
+        "headline": ["Distinct headline"],
+        "event_sentiment_score": [0.8],
+    }
+    pd.DataFrame({
+        **common, "article_date": pd.to_datetime(["2011-01-01"]), "story_id": ["old-1"]
+    }).to_parquet(
+        tmp_path / "aaa_articles_2003_2014.parquet", index=False
+    )
+    pd.DataFrame({
+        **{**common, "headline": ["Another distinct headline"]},
+        "rp_story_id": ["new-1"],
+    }).to_parquet(tmp_path / "bbb_articles_2003_2014.parquet", index=False)
+
+    pooled = load_ravenpack_labeled_frame(["AAA", "BBB"], news_dir=tmp_path)
+    assert set(pooled["ticker"]) == {"AAA", "BBB"}
+    assert set(pooled["story_id"]) == {"old-1", "new-1"}
+    assert pooled["article_date"].notna().all()
