@@ -38,28 +38,70 @@ ravenpack_model_is_saved = _ravenpack_sentiment.ravenpack_model_is_saved
 resolve_ravenpack_model_dir = _ravenpack_sentiment.resolve_ravenpack_model_dir
 train_ravenpack = _ravenpack_sentiment.train_ravenpack
 assign_time_split = _ravenpack_sentiment.assign_time_split
+split_leakage_audit = _ravenpack_sentiment.split_leakage_audit
+DEFAULT_FIVE_STOCK_TICKERS = _ravenpack_sentiment.DEFAULT_FIVE_STOCK_TICKERS
 
-PILOT_TICKERS = ["AAPL", "MSFT", "JPM", "XOM", "JNJ", "WMT"]
+# The pooled pilot set is the single source of truth in ravenpack_sentiment
+# (DEFAULT_FIVE_STOCK_TICKERS = AAPL, MSFT, JPM, XOM, JNJ).
+PILOT_TICKERS = DEFAULT_FIVE_STOCK_TICKERS
 
-# Only AAPL currently has a "rich" RavenPack export (data/raw/news/ravenpack/)
-# with a `headline` column; the data_explorer_top1k batch-pipeline exports for
-# other tickers lack `headline` and will raise in load_ravenpack_labeled_frame.
-# Mirrors the same caveat called out in app.py's render_ravenpack_finetuning_tab.
-RICH_EXPORT_TICKERS = ["AAPL"]
+# "Rich" RavenPack exports live in data/raw/news/ravenpack/ as
+# `{ticker}_articles_*.parquet` and carry the `headline` column the model
+# classifies. The data_explorer_top1k batch exports only have sentiment scores
+# (no headline) and would train on zero rows, so only rich exports are
+# trainable. This set is discovered from disk, so dropping a new
+# `{ticker}_articles_*.parquet` there makes that ticker selectable/trainable
+# with no code change — that's how the 5-ticker pilot scales past AAPL.
+RAVENPACK_NEWS_DIR = _ravenpack_sentiment.RAVENPACK_NEWS_DIR
+
+
+def rich_export_tickers() -> list[str]:
+    """Tickers with a headline-bearing rich RavenPack export on disk (trainable)."""
+    if not RAVENPACK_NEWS_DIR.exists():
+        return []
+    return sorted({
+        p.name.split("_articles_")[0].upper()
+        for p in RAVENPACK_NEWS_DIR.glob("*_articles_*.parquet")
+    })
 
 
 def available_tickers() -> list[str]:
-    """All tickers with a discoverable RavenPack export (mirrors Streamlit's picker)."""
-    paths = discover_ravenpack_article_files()
-    return sorted({_ticker_from_article_path(p) for p in paths})
+    """Offer the five-stock targets even before all rich exports are prepared.
+
+    Keeping targets visible lets the preset select all five and makes readiness
+    explicit in the UI. The loader still blocks training on metadata-only files.
+    """
+    return sorted(set(rich_export_tickers()) | set(DEFAULT_FIVE_STOCK_TICKERS))
 
 
 def pilot_default_tickers(available: list[str]) -> list[str]:
-    """Default ticker selection — restricted to tickers with a full headline export."""
-    rich = [t for t in RICH_EXPORT_TICKERS if t in available]
-    if rich:
-        return rich
-    return [t for t in PILOT_TICKERS if t in available]
+    """Default selection: the pilot set, restricted to trainable tickers present.
+
+    AAPL alone until the other pilot exports (MSFT/JPM/XOM/JNJ) are added, then
+    the full pooled five-stock pilot preselects automatically.
+    """
+    ready = set(rich_export_tickers())
+    return [t for t in PILOT_TICKERS if t in available and t in ready]
+
+
+def five_stock_readiness() -> list[dict[str, Any]]:
+    """Whether each pooled-pilot stock has a headline-bearing rich export."""
+    import pyarrow.parquet as pq
+
+    rows = []
+    for ticker in DEFAULT_FIVE_STOCK_TICKERS:
+        candidates = discover_ravenpack_article_files([ticker])
+        rich_path = None
+        for path in candidates:
+            try:
+                if "headline" in pq.read_schema(path).names:
+                    rich_path = path
+                    break
+            except Exception:
+                continue
+        rows.append({"ticker": ticker, "ready": rich_path is not None,
+                     "path": str(rich_path.relative_to(PROJECT_ROOT)) if rich_path else None})
+    return rows
 
 
 def deps_status() -> dict[str, Any]:
@@ -92,6 +134,7 @@ def coverage_summary(tickers: list[str]) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         return {"error": f"Could not load training data: {exc}"}
     splits = ravenpack_split_summary(labeled)
+    leakage = split_leakage_audit(labeled)
     assigned = assign_time_split(labeled["article_date"])
     date_ranges: dict[str, dict[str, str | None]] = {}
     for split_name in ("train", "validation", "test"):
@@ -130,6 +173,7 @@ def coverage_summary(tickers: list[str]) -> dict[str, Any]:
             for row in splits.to_dict(orient="records")
         ],
         "per_ticker": per_ticker,
+        "leakage": leakage,
     }
 
 
@@ -282,11 +326,33 @@ def run_training(
         "metrics": metrics,
         "test_f1": metrics.get("test", {}).get("eval_f1"),
         "test_acc": metrics.get("test", {}).get("eval_accuracy"),
+        "per_ticker_test": _per_ticker_rows(metrics.get("per_ticker_test")),
         "device": metrics.get("device"),
         "checkpoint_dir": str(DEFAULT_RAVENPACK_MODEL_DIR.relative_to(PROJECT_ROOT)),
         "wandb_run_url": metrics.get("wandb_run_url"),
         "wandb_project_url": metrics.get("wandb_project_url"),
     }
+
+
+def _per_ticker_rows(per_ticker_test: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Flatten metrics.json's ``per_ticker_test`` map into template-friendly rows.
+
+    Sorted worst-F1 first so a ticker suffering negative transfer surfaces at the
+    top of the breakdown table. Empty for single-ticker runs (never computed).
+    """
+    if not per_ticker_test:
+        return []
+    rows = [
+        {
+            "ticker": ticker,
+            "test_rows": stats.get("test_rows"),
+            "macro_f1": stats.get("macro_f1"),
+            "accuracy": stats.get("accuracy"),
+        }
+        for ticker, stats in per_ticker_test.items()
+    ]
+    rows.sort(key=lambda r: (r["macro_f1"] is None, r["macro_f1"] if r["macro_f1"] is not None else 0.0))
+    return rows
 
 
 # ── Refresh-safe run recovery ─────────────────────────────────────────────────
@@ -361,9 +427,14 @@ def run_view(job_id: str) -> SimpleNamespace | None:
     result = None
     if disk_status == "done":
         wandb = wandb_context()
+        # The status file doesn't carry the per-ticker breakdown; read it back
+        # from the persisted metrics.json (authoritative for the saved checkpoint)
+        # so it survives a browser refresh / webapp restart.
+        saved_metrics = _ravenpack_sentiment.load_ravenpack_metrics() or {}
         result = {
             "test_f1": state.get("test_f1"),
             "test_acc": state.get("test_acc"),
+            "per_ticker_test": _per_ticker_rows(saved_metrics.get("per_ticker_test")),
             "device": state.get("device"),
             "checkpoint_dir": str(DEFAULT_RAVENPACK_MODEL_DIR.relative_to(PROJECT_ROOT)),
             "wandb_run_url": state.get("wandb_run_url") or wandb.get("run_url"),

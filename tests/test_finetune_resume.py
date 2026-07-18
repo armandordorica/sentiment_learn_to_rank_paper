@@ -31,6 +31,11 @@ def test_latest_run_id_none_when_empty(run_dir):
     assert rp.latest_run_id() is None
 
 
+def test_five_stock_targets_remain_selectable_before_exports_are_ready(monkeypatch):
+    monkeypatch.setattr(rp, "rich_export_tickers", lambda: ["AAPL"])
+    assert set(rp.DEFAULT_FIVE_STOCK_TICKERS).issubset(rp.available_tickers())
+
+
 def test_latest_run_id_picks_newest(run_dir):
     _write_status(run_dir, "old", {"status": "done"})
     newest = run_dir / "new_status.json"
@@ -169,6 +174,7 @@ def test_coverage_summary_reports_actual_split_date_ranges(monkeypatch):
         "ticker": ["AAPL"] * 4,
         "article_date": pd.to_datetime(["2010-02-03", "2011-11-30", "2012-06-15", "2013-04-09"]),
         "label_name": ["positive", "neutral", "negative", "positive"],
+        "headline": ["one", "two", "three", "four"],
     })
     monkeypatch.setattr(rp, "load_ravenpack_labeled_frame", lambda tickers: frame)
     coverage = rp.coverage_summary(["AAPL"])

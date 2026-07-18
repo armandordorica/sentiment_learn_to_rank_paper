@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import hashlib
 from pathlib import Path
 from typing import Any, Callable
 
@@ -58,6 +59,7 @@ SPLIT_SOURCE = (
 )
 
 DEFAULT_RAVENPACK_TRAIN_EPOCHS = 2
+DEFAULT_FIVE_STOCK_TICKERS = ["AAPL", "MSFT", "JPM", "XOM", "JNJ"]
 
 
 def score_to_label(score: object) -> str | None:
@@ -156,6 +158,11 @@ def load_ravenpack_labeled_frame(
     for path in paths:
         df = pd.read_parquet(path)
         ticker = _ticker_from_article_path(path)
+        if "headline" not in df.columns:
+            raise ValueError(
+                f"{ticker} has RavenPack sentiment metadata but no headline text in {path}. "
+                "Prepare rich exports first with: python scripts/prepare_five_stock_ravenpack.py"
+            )
         if "ticker" not in df.columns:
             df = df.copy()
             df["ticker"] = ticker
@@ -167,7 +174,7 @@ def load_ravenpack_labeled_frame(
         combined["article_date"] = pd.to_datetime(combined["article_time"], errors="coerce").dt.normalize()
     combined["article_date"] = pd.to_datetime(combined["article_date"], errors="coerce")
 
-    combined["headline"] = combined.get("headline", "").map(
+    combined["headline"] = combined["headline"].map(
         lambda v: re.sub(r"\s+", " ", str(v or "").strip())
     )
     combined["label_name"] = combined["event_sentiment_score"].map(score_to_label)
@@ -182,8 +189,51 @@ def load_ravenpack_labeled_frame(
     if dedupe_col in labeled.columns:
         labeled = labeled.drop_duplicates(subset=[dedupe_col], keep="first")
 
+    # A syndicated headline may have different story IDs or mention multiple
+    # selected companies. Deduplicate it across the entire pooled universe
+    # *before* splitting so identical text can never occur in train and test.
+    labeled = deduplicate_pooled_headlines(labeled)
+
     labeled["label"] = labeled["label_name"].map(LABEL2ID).astype(int)
     return labeled.reset_index(drop=True)
+
+
+def normalized_headline_key(value: object) -> str:
+    """Stable content key used to detect duplicate text across stocks/splits."""
+    text = re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def deduplicate_pooled_headlines(frame: pd.DataFrame) -> pd.DataFrame:
+    """Keep one chronological copy of each normalized headline globally."""
+    if frame.empty:
+        return frame.copy()
+    working = frame.copy()
+    working["headline_key"] = working["headline"].map(normalized_headline_key)
+    working = working.sort_values(["article_date", "ticker"], kind="stable")
+    return working.drop_duplicates(subset=["headline_key"], keep="first").reset_index(drop=True)
+
+
+def split_leakage_audit(frame: pd.DataFrame) -> dict[str, Any]:
+    """Prove story IDs and normalized headline content do not cross time splits."""
+    working = frame.copy()
+    working["split"] = assign_time_split(working["article_date"])
+    if "headline_key" not in working:
+        working["headline_key"] = working["headline"].map(normalized_headline_key)
+    id_col = "story_id" if "story_id" in working else "rp_story_id" if "rp_story_id" in working else None
+
+    def _cross_split_count(column: str) -> int:
+        return int((working.groupby(column, dropna=True)["split"].nunique() > 1).sum())
+
+    story_overlap = _cross_split_count(id_col) if id_col else 0
+    headline_overlap = _cross_split_count("headline_key")
+    return {
+        "passed": story_overlap == 0 and headline_overlap == 0,
+        "story_ids_crossing_splits": story_overlap,
+        "headlines_crossing_splits": headline_overlap,
+        "rows": int(len(working)),
+        "tickers": sorted(working["ticker"].astype(str).str.upper().unique().tolist()),
+    }
 
 
 def ravenpack_class_balance(frame: pd.DataFrame) -> pd.DataFrame:
@@ -229,6 +279,9 @@ def ravenpack_to_hf_dataset(frame: pd.DataFrame):
     working = frame.copy()
     working["sentence"] = working["headline"]
     working["split"] = assign_time_split(working["article_date"])
+    audit = split_leakage_audit(working)
+    if not audit["passed"]:
+        raise ValueError(f"Blocked training because pooled split leakage was detected: {audit}")
 
     feature_label = ClassLabel(names=LABEL_NAMES)
     datasets: dict[str, Dataset] = {}
@@ -240,6 +293,41 @@ def ravenpack_to_hf_dataset(frame: pd.DataFrame):
             "label", feature_label
         )
     return DatasetDict(datasets)
+
+
+def evaluate_test_per_ticker(trainer, tokenizer, frame: pd.DataFrame) -> dict[str, Any]:
+    """Per-ticker macro-F1 / accuracy on each ticker's held-out **test** split.
+
+    Reuses the already-trained in-memory ``trainer`` (no checkpoint reload) — for
+    each ticker it tokenizes just that ticker's test rows and runs one eval pass.
+    In a pooled multi-ticker run this is how negative transfer is caught: if one
+    ticker's F1 collapses while the pooled number looks healthy, the pooled
+    checkpoint is sacrificing that stock (see ``news_sentiment_finetuning_plan.md``
+    Iteration 4.1.5, Step 3). Returned dict is keyed by upper-case ticker.
+    """
+    from datasets import ClassLabel, Dataset
+
+    split = assign_time_split(frame["article_date"])
+    test_frame = frame[split == "test"]
+    feature_label = ClassLabel(names=LABEL_NAMES)
+    per_ticker: dict[str, Any] = {}
+    for ticker in sorted(test_frame["ticker"].astype(str).str.upper().unique()):
+        sub = test_frame[test_frame["ticker"].astype(str).str.upper() == ticker]
+        part = pd.DataFrame({
+            "sentence": sub["headline"].astype(str).tolist(),
+            "label": sub["label"].astype(int).tolist(),
+        })
+        if part.empty:
+            continue
+        ds = Dataset.from_pandas(part, preserve_index=False).cast_column("label", feature_label)
+        ds = tokenize_dataset(ds, tokenizer)
+        eval_metrics = trainer.evaluate(ds, metric_key_prefix="test")
+        per_ticker[ticker] = {
+            "test_rows": int(len(part)),
+            "macro_f1": float(eval_metrics.get("test_f1")) if eval_metrics.get("test_f1") is not None else None,
+            "accuracy": float(eval_metrics.get("test_accuracy")) if eval_metrics.get("test_accuracy") is not None else None,
+        }
+    return per_ticker
 
 
 def resolve_ravenpack_model_dir() -> Path:
@@ -555,6 +643,14 @@ def train_ravenpack(
     tokenizer.save_pretrained(str(output_dir))
 
     tickers_used = sorted(frame["ticker"].astype(str).str.upper().unique().tolist())
+    # Per-ticker test breakdown — only meaningful for a pooled multi-ticker run,
+    # where it flags negative transfer. For a single ticker it would just repeat
+    # the pooled test number, so skip it and keep single-ticker runs unchanged.
+    per_ticker_test = (
+        evaluate_test_per_ticker(trainer, tokenizer, frame)
+        if len(tickers_used) > 1
+        else {}
+    )
     metrics = {
         "model_name": MODEL_NAME,
         "dataset": "ravenpack_headlines",
@@ -573,6 +669,7 @@ def train_ravenpack(
         "train_runtime_s": float(train_result.metrics.get("train_runtime", 0)),
         "validation": {k: float(v) if isinstance(v, (int, float, np.floating)) else v for k, v in val_metrics.items()},
         "test": {k: float(v) if isinstance(v, (int, float, np.floating)) else v for k, v in test_metrics.items()},
+        "per_ticker_test": per_ticker_test,
         "device": device,
         "saved_at": pd.Timestamp.utcnow().isoformat(),
         "wandb_entity": wandb_meta["entity"],

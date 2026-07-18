@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -18,11 +20,13 @@ if str(SRC_PATH) not in sys.path:
 load_dotenv(PROJECT_ROOT / ".env")
 
 from sentiment_ltr.data import live_data  # noqa: E402
+from sentiment_ltr.data.refinitiv_queries import fetch_refinitiv_story  # noqa: E402
 
 DEFAULT_START = "2003-01-01"
 DEFAULT_END = "2014-12-31"
 QUICK_TICKERS = ["AAPL", "MSFT", "SPY", "GOOGL", "TSLA"]
 TOP1K_BY_TICKER_DIR = PROJECT_ROOT / "data" / "raw" / "data_explorer_top1k" / "by_ticker"
+FULL_STORY_DIR = PROJECT_ROOT / "data" / "raw" / "data_explorer_full_stories"
 
 
 def _refinitiv_ready() -> bool:
@@ -125,6 +129,10 @@ def load_cached(ticker: str, start: str, end: str) -> dict[str, Any] | None:
     return {
         "ticker": ticker.upper(), "start_date": start, "end_date": end, "source": "cache",
         "cache_created_at": info.get("created_at"),
+        "cache_dir": str(directory.resolve()),
+        "data_paths": {
+            "refinitiv_news": str((directory / "refinitiv_news.parquet").resolve()),
+        },
         "providers": {
             "refinitiv": provider(frames["refinitiv_prices"], news=frames["refinitiv_news"], news_daily_counts=frames["refinitiv_daily"]),
             "wrds": provider(frames["wrds_prices"], names=frames["wrds_names"]),
@@ -157,7 +165,9 @@ def query(ticker: str, start: str, end: str, *, force_live: bool, refinitiv: boo
 
 
 def _html(fig: Any) -> str:
-    return fig.to_html(full_html=False, include_plotlyjs="cdn")
+    # Plotly is loaded once by base.html. Loading it inside an HTMX fragment can
+    # race the inline newPlot call and leave an otherwise valid chart blank.
+    return fig.to_html(full_html=False, include_plotlyjs=False)
 
 
 def _records(df: pd.DataFrame, limit: int = 250) -> dict[str, Any] | None:
@@ -169,6 +179,49 @@ def _records(df: pd.DataFrame, limit: int = 250) -> dict[str, Any] | None:
             display[col] = display[col].astype(str)
     display = display.where(pd.notna(display), None)
     return {"columns": list(display.columns), "rows": display.to_dict(orient="records"), "total": len(df)}
+
+
+def refinitiv_headline_list(news: pd.DataFrame, limit: int = 500) -> dict[str, Any] | None:
+    """Presentation rows for the selectable Refinitiv full-story list."""
+    if not isinstance(news, pd.DataFrame) or news.empty:
+        return None
+    columns = [c for c in ("date", "headline", "sourceCode", "storyId") if c in news]
+    display = news[columns].copy()
+    if "date" in display:
+        display["date"] = pd.to_datetime(display["date"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
+    display = display.sort_values("date", ascending=False).head(limit)
+    display = display.where(pd.notna(display), None)
+    return {"rows": display.to_dict(orient="records"), "total": int(len(news)), "shown": int(len(display))}
+
+
+def _story_path(story_id: str, headline: str, ticker: str) -> Path:
+    slug = re.sub(r"[^a-z0-9]+", "-", headline.lower()).strip("-")[:80] or "refinitiv-story"
+    digest = hashlib.sha256(story_id.encode("utf-8")).hexdigest()[:12]
+    clean_ticker = live_data.clean_ticker(ticker) or "UNKNOWN"
+    return FULL_STORY_DIR / clean_ticker / f"{slug}--{digest}.txt"
+
+
+def load_story(story_id: str, headline: str | None = None, ticker: str = "UNKNOWN") -> dict[str, str]:
+    """Fetch and persist one Refinitiv story using the shared loader."""
+    story_id = str(story_id or "").strip()
+    if not story_id:
+        raise ValueError("Select a Refinitiv headline with a story ID.")
+    headline = str(headline or "Selected headline")
+    text = fetch_refinitiv_story(PROJECT_ROOT, story_id)
+    path = _story_path(story_id, headline, ticker)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"Headline: {headline}\nStory ID: {story_id}\nTicker: {ticker}\n\n{text}\n",
+        encoding="utf-8",
+    )
+    relative_path = str(path.relative_to(PROJECT_ROOT)) if path.is_relative_to(PROJECT_ROOT) else str(path)
+    return {
+        "story_id": story_id,
+        "headline": headline,
+        "text": text,
+        "path": str(path.resolve()),
+        "relative_path": relative_path,
+    }
 
 
 def present(result: dict[str, Any]) -> dict[str, Any]:
@@ -195,10 +248,41 @@ def present(result: dict[str, Any]) -> dict[str, Any]:
         charts["prices"] = _html(fig)
 
     news = providers.get("refinitiv", {}).get("news", pd.DataFrame())
+    news_path = result.get("data_paths", {}).get("refinitiv_news")
+    news_storage = {
+        "saved": bool(news_path),
+        "path": news_path,
+        "relative_path": (
+            str(Path(news_path).relative_to(PROJECT_ROOT))
+            if news_path and Path(news_path).is_relative_to(PROJECT_ROOT)
+            else news_path
+        ),
+    }
     daily = providers.get("refinitiv", {}).get("news_daily_counts", pd.DataFrame())
     if isinstance(daily, pd.DataFrame) and not daily.empty and "article_count" in daily:
-        fig = px.bar(daily[daily["article_count"] > 0], x="date", y="article_count",
-                     title=f"{ticker} Refinitiv articles per day")
+        daily_nonzero = daily[daily["article_count"] > 0]
+        fig = px.bar(
+            daily_nonzero,
+            x="date",
+            y="article_count",
+            title=f"{ticker} Refinitiv articles per day",
+            color_discrete_sequence=["#dc4f52"],
+            labels={"article_count": "Articles", "date": "Publication date"},
+        )
+        fig.update_traces(
+            opacity=1,
+            marker_line_color="#9f2528",
+            marker_line_width=0.35,
+            hovertemplate="%{x|%b %d, %Y}<br><b>%{y} articles</b><extra></extra>",
+        )
+        fig.update_layout(
+            height=440,
+            bargap=0.08,
+            plot_bgcolor="#ffffff",
+            paper_bgcolor="#ffffff",
+            yaxis={"rangemode": "tozero", "gridcolor": "#d8dee8"},
+            xaxis={"gridcolor": "#eef1f5"},
+        )
         charts["news"] = _html(fig)
 
     articles = providers.get("ravenpack", {}).get("articles", pd.DataFrame())
@@ -225,6 +309,8 @@ def present(result: dict[str, Any]) -> dict[str, Any]:
     return {
         "ticker": ticker, "start_date": result["start_date"], "end_date": result["end_date"],
         "source": result.get("source", "live"), "cache_created_at": result.get("cache_created_at"),
-        "statuses": statuses, "charts": charts, "news": _records(news),
+        "statuses": statuses, "charts": charts,
+        "news": _records(news), "refinitiv_headlines": refinitiv_headline_list(news),
+        "news_storage": news_storage,
         "sentiment": sentiment_table, "raw": raw,
     }

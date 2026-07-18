@@ -61,6 +61,26 @@
     Checkpoint saved to <code>{{ job.result.checkpoint_dir }}</code>.
     <br><a href="{{ job.result.wandb_run_url or job.result.wandb_project_url or wandb_project_url }}" target="_blank" rel="noopener">↗ View {{ 'training run' if job.result.wandb_run_url else 'project' }} in W&amp;B</a>
   </div>
+  {% if job.result.per_ticker_test %}
+    <h4>Per-ticker held-out test performance</h4>
+    <p class="muted">
+      Each pooled-checkpoint score on that ticker's own test split (worst F1 first).
+      A ticker collapsing well below the others signals negative transfer.
+    </p>
+    <table class="data-table">
+      <thead><tr><th>Ticker</th><th>Test rows</th><th>Macro-F1</th><th>Accuracy</th></tr></thead>
+      <tbody>
+        {% for row in job.result.per_ticker_test %}
+          <tr>
+            <td><strong>{{ row.ticker }}</strong></td>
+            <td>{{ "{:,}".format(row.test_rows) if row.test_rows is not none else "—" }}</td>
+            <td>{{ "%.1f%%"|format(row.macro_f1 * 100) if row.macro_f1 is not none else "—" }}</td>
+            <td>{{ "%.1f%%"|format(row.accuracy * 100) if row.accuracy is not none else "—" }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
   {% set chart = loss_chart(job.progress) %}
   {% include "partials/loss_chart.html" %}
 {% elif job.status == "error" %}

@@ -58,6 +58,16 @@
             hx-swap="innerHTML">
 
         <label for="tickers"><strong>Tickers to train on</strong></label>
+        <div class="alert alert-info">
+          <strong>Recommended pooled five-stock pilot:</strong> {{ five_stock_tickers|join(', ') }}.
+          These stocks are combined into one dataset and trained jointly—never sequentially.
+          <br>
+          {% for item in five_stock_readiness %}<code>{{ item.ticker }}</code> {{ '✓' if item.ready else 'needs headline export' }}{% if not loop.last %} · {% endif %}{% endfor %}
+          {% if five_stock_readiness|selectattr('ready', 'equalto', false)|list %}
+            <br><span class="muted">Prepare missing text with <code>python scripts/prepare_five_stock_ravenpack.py</code> before training.</span>
+          {% endif %}
+        </div>
+        <button type="button" class="btn btn-secondary" onclick="selectFiveStockPilot()">Select pooled five-stock pilot</button>
         <select id="tickers" name="tickers" multiple size="10"
                 hx-post="/finetune/coverage"
                 hx-trigger="change"
@@ -70,7 +80,7 @@
         </select>
         <p class="muted">
           Single ticker → single-stock baseline. Multiple tickers → pooled joint training
-          in one pass. {{ tickers|length }} tickers available.
+          in one pass. {{ tickers|length }} pilot targets shown; {{ ready_tickers|length }} currently ready for training.
         </p>
 
         <div class="field-row">
@@ -131,4 +141,14 @@
       </section>
     {% endif %}
   </div>
+{% endblock %}
+{% block scripts %}
+<script>
+  function selectFiveStockPilot() {
+    const wanted = new Set({{ five_stock_tickers|tojson }});
+    const picker = document.getElementById('tickers');
+    for (const option of picker.options) option.selected = wanted.has(option.value);
+    picker.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+</script>
 {% endblock %}

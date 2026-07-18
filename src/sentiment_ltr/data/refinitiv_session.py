@@ -62,6 +62,36 @@ def _close_ld_session(ld_module: Any) -> None:
         pass
 
 
+def patch_lseg_httpx_proxy_compat() -> None:
+    """Bridge lseg-data 2.1.1's proxy-map call to modern httpx.
+
+    LSEG passes a dict to ``httpx.Client(proxy=...)`` on httpx >=0.26, but the
+    singular ``proxy`` argument accepts one URL (and httpx 0.28 removed the old
+    ``proxies`` argument). With the usual empty map this raises
+    ``AttributeError: 'dict' object has no attribute 'url'`` before a session
+    can open. Normalize empty maps to no proxy and one-proxy maps to that URL.
+    """
+    import httpx
+    from lseg.data._core.session import http_service
+
+    current = http_service.get_httpx_client
+    if getattr(current, "_sentiment_ltr_proxy_compat", False):
+        return
+
+    def _compatible_client(proxies, **kwargs):
+        if isinstance(proxies, dict):
+            configured = [value for value in proxies.values() if value]
+            proxy = configured[0] if configured else None
+        else:
+            proxy = proxies or None
+        if proxy is not None:
+            kwargs["proxy"] = proxy
+        return httpx.Client(**kwargs)
+
+    _compatible_client._sentiment_ltr_proxy_compat = True
+    http_service.get_httpx_client = _compatible_client
+
+
 def is_huggingface_space() -> bool:
     """Return whether the app is running on a Hugging Face Space."""
     return bool(os.environ.get("SPACE_ID")) or os.environ.get("SYSTEM") == "spaces"
@@ -228,6 +258,7 @@ def open_refinitiv_session(
     allow_platform_fallback: bool | None = None,
 ):
     """Open the best available Refinitiv session for the current runtime."""
+    patch_lseg_httpx_proxy_compat()
     if allow_platform_fallback is None:
         allow_platform_fallback = _platform_fallback_enabled()
 

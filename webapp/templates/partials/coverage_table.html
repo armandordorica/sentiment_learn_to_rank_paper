@@ -9,6 +9,15 @@
     <div class="metric"><span class="metric-label">Test rows</span><span class="metric-value">{{ "{:,}".format(coverage.test_rows) }}</span></div>
   </div>
 
+  {% if coverage.leakage %}
+    <div class="alert {{ 'alert-success' if coverage.leakage.passed else 'alert-error' }}">
+      <strong>Split leakage audit:</strong>
+      {% if coverage.leakage.passed %}passed — zero story IDs and zero normalized headlines cross train, validation, or test.
+      {% else %}failed — training is blocked until overlaps are removed.{% endif %}
+      Joint pool: {{ coverage.leakage.tickers|join(', ') }}.
+    </div>
+  {% endif %}
+
   {% if coverage.per_ticker %}
     <table class="data-table">
       <thead>

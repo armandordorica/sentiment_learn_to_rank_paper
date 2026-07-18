@@ -7,7 +7,52 @@
     {% if result.charts.price_overview %}<div class="chart-cell">{{ result.charts.price_overview|safe }}</div>{% else %}<div class="alert alert-info">No provider returned price data for this window.</div>{% endif %}
   </section>
   <section id="de-1c"><h3>1C · Prices</h3>{% if result.charts.prices %}<div class="chart-cell">{{ result.charts.prices|safe }}</div>{% else %}<p class="muted">No price rows returned.</p>{% endif %}</section>
-  <section id="de-1d"><h3>1D · News</h3>{% if result.charts.news %}<div class="chart-cell">{{ result.charts.news|safe }}</div>{% endif %}{% with table=result.news %}{% include "partials/data_table.html" %}{% endwith %}</section>
+  <section id="de-1d">
+    <h3>1D · Refinitiv News</h3>
+    <p class="muted">These are Refinitiv/LSEG headlines and full wire stories; they are separate from RavenPack sentiment records.</p>
+    {% if result.news_storage.saved %}
+      <div class="source-path"><strong>Saved article data</strong><code title="{{ result.news_storage.path }}">{{ result.news_storage.relative_path }}</code><span class="muted">Absolute path: {{ result.news_storage.path }}</span></div>
+    {% else %}
+      <div class="alert alert-info">This live response is in memory only and has not been saved to disk.</div>
+    {% endif %}
+    {% if result.charts.news %}<div class="chart-cell">{{ result.charts.news|safe }}</div>{% endif %}
+    {% if result.refinitiv_headlines %}
+      <h4>Full Refinitiv Headline List</h4>
+      <p class="muted">
+        Select a headline to retrieve its full Refinitiv story text.
+        Showing {{ "{:,}".format(result.refinitiv_headlines.shown) }} of {{ "{:,}".format(result.refinitiv_headlines.total) }} returned headlines.
+      </p>
+      <div class="headline-table-wrap">
+        <table class="data-table headline-table">
+          <thead><tr><th>Date</th><th>Headline</th><th>Source</th><th>Story ID</th><th></th></tr></thead>
+          <tbody>
+            {% for row in result.refinitiv_headlines.rows %}
+              <tr>
+                <td class="headline-date">{{ row.date or "—" }}</td>
+                <td>{{ row.headline or "—" }}</td>
+                <td>{{ row.sourceCode or "—" }}</td>
+                <td><code class="story-id">{{ row.storyId or "—" }}</code></td>
+                <td>
+                  {% if row.storyId %}
+                    <form hx-post="/data-explorer/story" hx-target="#refinitiv-story-panel" hx-swap="innerHTML" hx-indicator="#story-spinner">
+                      <input type="hidden" name="story_id" value="{{ row.storyId }}">
+                      <input type="hidden" name="headline" value="{{ row.headline or 'Selected headline' }}">
+                      <input type="hidden" name="ticker" value="{{ result.ticker }}">
+                      <button type="submit" class="btn btn-secondary btn-small">Read full story</button>
+                    </form>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <span id="story-spinner" class="htmx-indicator muted"> Loading full Refinitiv story…</span>
+      <div id="refinitiv-story-panel"><p class="muted">Select a headline above to read its full story.</p></div>
+    {% else %}
+      <div class="alert alert-info">No Refinitiv headline rows were returned for this ticker and date range.</div>
+    {% endif %}
+  </section>
   <section id="de-1e"><h3>1E · Sentiment</h3>{% if result.charts.sentiment %}<div class="chart-cell">{{ result.charts.sentiment|safe }}</div>{% endif %}{% with table=result.sentiment %}{% include "partials/data_table.html" %}{% endwith %}</section>
   <section id="de-1f"><h3>1F · Raw data</h3>{% for item in result.raw %}<details><summary>{{ item.label }}</summary>{% with table=item.table %}{% include "partials/data_table.html" %}{% endwith %}</details>{% endfor %}</section>
 </div>
