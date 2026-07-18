@@ -21,6 +21,22 @@ Before any `git commit` / `git push`, run this checklist:
 - [ ] Only after all checks pass: stage, commit, push
 ```
 
+### Always update the Journal before you push
+
+**Every `git push` must be preceded by a README Journal update** covering the
+work being pushed — this is not optional and applies even when pushing commits
+made earlier or in another session. Before running `git push`:
+
+1. Check whether the Journal's newest entries already cover every commit being
+   pushed (`git log <upstream>..HEAD --oneline`).
+2. If not, add the missing entries (what / decision / why, full `YYYY-MM-DD`
+   date), then stage and commit that README change.
+3. Only then push, so the Journal and the pushed history never drift apart.
+
+If some pushed commits came from another contributor/session and you can't fully
+verify them, still log them at the commit level and say so explicitly (mark them
+as not-yet-verified) rather than omitting them.
+
 ## Keep a Journal in the README
 
 The `README.md` has a **Journal (what we did, decisions, and why)** section. Treat it

@@ -37,6 +37,7 @@
         <strong>macro-F1</strong> is the primary metric (equal weight per class).
         {% if training.train_loss is not none %}Train loss: {{ "%.3f"|format(training.train_loss) }}{% endif %}
       </p>
+      <p><a class="btn btn-secondary wandb-link" href="{{ training.wandb.url }}" target="_blank" rel="noopener">↗ Open checkpoint in Weights &amp; Biases</a></p>
 
       <h4>Performance on the training set</h4>
       <p class="muted">

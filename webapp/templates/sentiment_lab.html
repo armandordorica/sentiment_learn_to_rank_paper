@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}6 — News Sentiment Lab{% endblock %}
+{% block content %}
+<div class="card lab">
+  <h1>News Sentiment Lab</h1>
+  <nav class="section-nav">
+    <a href="#coverage">6A News coverage</a><a href="#compute">6B Compute</a>
+    <a href="#dataset">6C PhraseBank</a><a href="#articles">6D RavenPack articles</a>
+    <a href="#inference">6E Live inference</a>
+  </nav>
+  <p class="muted">Interactive companion to <code>notebooks/liquidAI_prep.ipynb</code>: inspect the data, training results, and the DistilBERT three-way financial sentiment model.</p>
+
+  <section id="coverage"><h2>6A News data coverage</h2>
+    <div class="metric-row"><div class="metric"><span class="metric-label">Replication window</span><span class="metric-value compact">{{ coverage.window }}</span></div>
+      <div class="metric"><span class="metric-label">Rich RavenPack exports</span><span class="metric-value">{{ coverage.ravenpack_files }}</span></div>
+      <div class="metric"><span class="metric-label">Refinitiv caches</span><span class="metric-value">{{ coverage.refinitiv_files }}</span></div></div>
+    <p class="muted">Rich ticker coverage: {{ coverage.ravenpack_tickers|join(', ') or 'none' }}.</p>
+  </section>
+
+  <section id="compute"><h2>6B Compute device</h2>
+  {% if not deps_available %}<div class="alert alert-error">Fine-tuning dependencies are unavailable. Install <code>requirements-finetuning.txt</code>.</div>
+  {% else %}<div class="metric-row"><div class="metric"><span class="metric-label">CUDA</span><span class="metric-value">{{ '✓' if device.cuda_available else '—' }}</span></div>
+    <div class="metric"><span class="metric-label">Apple MPS</span><span class="metric-value">{{ '✓' if device.mps_available else '—' }}</span></div>
+    <div class="metric"><span class="metric-label">Active device</span><span class="metric-value">{{ device.selected|upper }}</span></div></div>
+    <p class="muted">{{ device.device_name }} · torch {{ device.torch_version }}</p>{% endif %}
+  </section>
+
+  <section><h2>Latest training run</h2>
+    <div class="metric-row"><div class="metric"><span class="metric-label">Test macro-F1</span><span class="metric-value">{{ '%.1f%%'|format(metrics.test.eval_f1 * 100) if metrics.test and metrics.test.eval_f1 is defined else '—' }}</span></div>
+      <div class="metric"><span class="metric-label">Test accuracy</span><span class="metric-value">{{ '%.1f%%'|format(metrics.test.eval_accuracy * 100) if metrics.test and metrics.test.eval_accuracy is defined else '—' }}</span></div>
+      <div class="metric"><span class="metric-label">Validation macro-F1</span><span class="metric-value">{{ '%.1f%%'|format(metrics.validation.eval_f1 * 100) if metrics.validation and metrics.validation.eval_f1 is defined else '—' }}</span></div></div>
+    <p class="muted">{{ metrics.epochs or '—' }} epoch(s) · {{ metrics.model_name or 'DistilBERT' }} · {{ metrics.device|upper }}</p>
+  </section>
+
+  <section id="dataset"><h2>6C Dataset — Financial PhraseBank</h2>
+    <p class="muted">Finance-specific sentences labeled negative, neutral, or positive from an investor's viewpoint.</p>
+    {% if dataset_error %}<div class="alert alert-error">{{ dataset_error }}</div>{% elif dataset %}
+    <div class="metric-row">{% for name, count in dataset.splits.items() %}<div class="metric"><span class="metric-label">{{ name|title }}</span><span class="metric-value">{{ '{:,}'.format(count) }}</span></div>{% endfor %}</div>
+    <table class="data-table"><thead><tr><th>Class</th><th>Train rows</th></tr></thead><tbody>{% for row in dataset.balance %}<tr><td>{{ row.label }}</td><td>{{ row['count'] }}</td></tr>{% endfor %}</tbody></table>{% endif %}
+  </section>
+
+  <section id="articles"><h2>6D RavenPack articles</h2>
+    <form class="form-grid" hx-post="/sentiment-lab/articles" hx-target="#article-results"><label>Ticker<input name="ticker" value="AAPL"></label><label>Start<input type="date" name="start" value="2003-01-01"></label><label>End<input type="date" name="end" value="2014-12-31"></label><label>Max articles<input type="number" name="max_rows" value="50" min="1" max="500"></label><button class="btn btn-primary" type="submit">Load cached</button></form>
+    <div id="article-results"></div>
+  </section>
+
+  <section id="inference"><h2>6E Compare model versions</h2>
+    <p class="muted">Use the same headlines across saved checkpoints to compare labels and class probabilities side by side.</p>
+    <form hx-post="/sentiment-lab/score" hx-target="#score-results">
+      <label>One sentence per line<textarea name="text" rows="6">The company reported record quarterly profit and raised its dividend.
+Shares plunged after the firm warned of widening losses and layoffs.
+The board will meet on Thursday to review the quarterly filing.</textarea></label>
+      <fieldset class="model-picker"><legend>Model versions</legend>
+        <div class="model-options">{% for model in models %}<label class="model-option">
+          <span><input type="checkbox" name="model_ids" value="{{ model.id }}" {% if model.id in default_model_ids %}checked{% endif %}> <strong>{{ model.title }}</strong></span>
+          <span class="muted">{{ model.description }}</span>
+          <span class="model-meta">{{ model.epochs }} epoch(s) · {{ model.dataset }}{% if model.test_f1 is not none %} · test F1 {{ '%.1f%%'|format(model.test_f1 * 100) }}{% endif %}{% if model.test_accuracy is not none %} · accuracy {{ '%.1f%%'|format(model.test_accuracy * 100) }}{% endif %}</span>
+          <span class="checkpoint-meta">Checkpoint <code>{{ model.checkpoint_id }}</code> · weights SHA-256 <code title="{{ model.weights_sha256 }}">{{ model.weights_sha_short }}</code></span>
+          <a class="wandb-inline" href="{{ model.wandb.url }}" target="_blank" rel="noopener" onclick="event.stopPropagation()">↗ {{ 'W&B run' if model.wandb.run_url else 'W&B project' }}</a>
+        </label>{% endfor %}</div>
+      </fieldset>
+      <button class="btn btn-primary" {% if not models %}disabled{% endif %}>Compare selected models</button>
+    </form><div id="score-results"></div>
+  </section>
+
+  <section><details {% if not has_model %}open{% endif %}><summary><strong>Train / refresh PhraseBank model</strong></summary><p class="muted">Runs the shared training workflow in the background and saves the best validation-F1 checkpoint. Metrics sync to <a href="{{ wandb_project.project_url }}" target="_blank" rel="noopener">Weights &amp; Biases</a>.</p><button class="btn btn-primary" hx-post="/sentiment-lab/train" hx-target="#lab-train-status">Train PhraseBank baseline now</button><div id="lab-train-status"></div></details></section>
+</div>
+{% endblock %}

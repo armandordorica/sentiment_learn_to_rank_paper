@@ -397,10 +397,13 @@ def train_baseline(
     seed: int = 42,
 ) -> dict[str, Any]:
     """Fine-tune DistilBERT on PhraseBank and persist the best val-F1 checkpoint."""
+    from sentiment_ltr.wandb_logging import configure_wandb_environment, current_wandb_run_metadata
+    configure_wandb_environment()
     from transformers import (
         AutoModelForSequenceClassification,
         AutoTokenizer,
         Trainer,
+        TrainerCallback,
         TrainingArguments,
     )
 
@@ -455,9 +458,16 @@ def train_baseline(
         compute_metrics=build_compute_metrics(),
     )
 
+    wandb_identity: dict[str, Any] = {}
+    class _WandbIdentity(TrainerCallback):
+        def on_log(self, args, state, control, logs=None, **kwargs):
+            wandb_identity.update(current_wandb_run_metadata())
+    trainer.add_callback(_WandbIdentity())
+
     train_result = trainer.train()
     val_metrics = trainer.evaluate(tokenized["validation"])
     test_metrics = trainer.evaluate(tokenized["test"])
+    wandb_meta = wandb_identity or current_wandb_run_metadata()
 
     trainer.save_model(str(output_dir))
     tokenizer.save_pretrained(str(output_dir))
@@ -477,6 +487,11 @@ def train_baseline(
         "test": {k: float(v) if isinstance(v, (int, float)) else v for k, v in test_metrics.items()},
         "device": device,
         "saved_at": pd.Timestamp.utcnow().isoformat(),
+        "wandb_entity": wandb_meta["entity"],
+        "wandb_project": wandb_meta["project"],
+        "wandb_project_url": wandb_meta["project_url"],
+        "wandb_run_id": wandb_meta["run_id"],
+        "wandb_run_url": wandb_meta["run_url"],
     }
     metrics_path(output_dir).write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")
     return metrics

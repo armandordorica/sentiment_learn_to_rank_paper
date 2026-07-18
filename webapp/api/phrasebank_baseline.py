@@ -18,6 +18,7 @@ if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
 from sentiment_ltr.models import phrasebank_sentiment as _phrasebank_sentiment  # noqa: E402
+from sentiment_ltr.wandb_logging import checkpoint_wandb_links  # noqa: E402
 from sentiment_ltr.viz import (  # noqa: E402
     horizontal_bar_figure,
     split_series_distribution_figures,
@@ -77,6 +78,7 @@ def training_summary() -> dict[str, Any]:
         "test_acc": metrics.get("test", {}).get("eval_accuracy"),
         "train_loss": metrics.get("train_loss"),
         "raw_metrics": metrics,
+        "wandb": checkpoint_wandb_links("phrasebank_distilbert_best", metrics),
     }
 
 

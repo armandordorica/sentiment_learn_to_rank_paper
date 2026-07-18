@@ -126,6 +126,17 @@ code does. Keep it updated as part of every commit (see
 | 2026-07-04 | **Offline PhraseBank metrics backfilled to W&B + app links** — created `scripts/import_phrasebank_metrics_to_wandb.py`, imported the saved 3-epoch and 1-epoch PhraseBank snapshots into the `sentiment-ltr-transformers` W&B project, ignored local `wandb/` logs, and added W&B project/run buttons to the PhraseBank HF Baseline and Sentiment Lab tabs. *Decision:* historical runs are logged as `offline-metrics` imports rather than retrained, with `metrics.json` / `provenance.json` uploaded as lightweight W&B artifacts. *Why:* the dashboard now reflects both past baselines and future Trainer runs in one place, and the Streamlit app links readers directly to the experiment record. |
 | 2026-07-04 | **Pushed W&B tracking work to GitHub** — committed and pushed `a6a5f0f` (`Add wandb tracking for sentiment models`) to `origin/main`, including W&B Trainer reporting, the metrics import script, dashboard links in `app.py`, `.gitignore` updates, and current notebook/app provenance changes. *Decision:* pushed directly to `main` after scanning the staged diff for private key/API-token patterns and confirming `.env`, `lseg-data.config.json`, `data/`, and local `wandb/` output remained ignored. *Why:* the public repo should capture today's experiment-tracking setup without leaking local credentials or generated model/data artifacts. |
 | 2026-07-05 | **RavenPack baseline diagnostic charts** — extended `notebooks/finetune_on_ravenpack.ipynb` and the RavenPack Baseline Eval tab with static Plotly diagnostics for PhraseBank train/validation/test vs RavenPack out-of-domain: class-level F1, precision vs recall, observed-vs-predicted label prevalence, and prediction-prevalence gaps. *Decision:* compute the app dashboard automatically from the cached baseline evaluation and confusion matrix, so readers do not need to click **Run evaluation** to see the domain-shift diagnosis. *Why:* the baseline failure mode is not just lower macro-F1; it is visible in label prevalence shift and in whether precision or recall is driving each class-level F1 drop. |
+| 2026-07-14 | **FastAPI migration kickoff (strangler-fig)** — new `webapp/` (FastAPI + Jinja2 + HTMX) built side by side with the Streamlit `app.py`, both reusing `src/sentiment_ltr/` so numbers match; scaffold, base layout/nav, `webapp/jobs.py` `JobManager` (thread + polling), and `docs/fastapi_migration_plan.md` as the single source of migration truth. First ports: **5·8 RavenPack fine-tuning** (background job, HTMX-polled status) and **Tab 3 PhraseBank HF Baseline** (3A/3C/3D), plus `evaluate_checkpoint_on_split()` to score the train split (previously never persisted). *Decision:* port one tab/section at a time; keep `app.py` untouched as the fallback until FastAPI reaches parity. *Why:* migrate off Streamlit's full-script-rerun model incrementally without a risky big-bang rewrite. |
+| 2026-07-15 | **FastAPI Tabs 1, 2, 4 ported + first test suite** — **Tab 1 Data Explorer** (`/data-explorer`: cache-first query, provider status, price/news/sentiment charts, raw tables); **Tab 2 Batch Pipeline** (`/batch`: same detached `run_batch_pipeline.py` subprocess via `batch.pid`/`batch_status.json`/log files, 5s HTMX status polling, emoji manifest table, delisting + cash-merger WRDS fetch, CSV export, combined parquets); **Tab 4 RavenPack Baseline Eval** (`/raven-eval`: 4C/4D/4E, lazy-loaded scoring, provenance). Added the repo's **first automated tests** — `tests/test_ravenpack_eval.py` (15 tests: metric math hand-computed + cross-checked vs scikit-learn, presentation contexts with the model mocked, FastAPI `TestClient` route/template/error-path coverage) with `pytest`+`httpx` in `requirements-webapp.txt`. Verified each tab in-browser against Streamlit for output parity (e.g. batch 437 complete / 563 partial; RavenPack test macro-F1 27.5% out-of-domain vs PhraseBank test 82.1% in-domain) and recorded a full-app interactive pass with no defects. *Decision:* keep confusion-matrix → metric transforms as pure functions so they're unit-testable without loading DistilBERT. *Why:* parity with Streamlit must be provable, not assumed, before `app.py` can be retired. |
+| 2026-07-15 | **FastAPI Sentiment Lab + Paper Validation + checkpoint comparison** — commits `e7ff525` (Migrate Sentiment Lab to FastAPI), `2da8021` (Add checkpoint model comparison), `b4cbd5e` (Migrate Paper Validation to FastAPI) on branch `codex/migrate-sentiment-lab`. *Note:* these landed via a separate tool/session; documented here at the commit level and **not yet independently verified in-browser** — validate against the Streamlit tabs before marking them ✅ in the migration plan. *Why:* keeps the journal a complete record of what's on the branch even when work came from more than one contributor. |
+| 2026-07-17 | **Live training progress in the fine-tune UI** — added an optional `progress_callback` to `train_ravenpack()` (an HF `TrainerCallback` emitting step/total/epoch/loss and per-epoch eval metrics), threaded it through `webapp/jobs.py` `Job.progress` and `run_training(job=…)`, and rendered a real progress bar (step count, %, rate, ETA, epoch, loss, last-epoch eval) in the polled `train_status.html`. Backed up the existing `data/models/ravenpack_distilbert_best/` before running an end-to-end verification train from the UI. *Decision:* callback defaults to `None` so `app.py`/notebook callers are unchanged. *Why:* "running" alone gave no sense of remaining time; a ~17-minute run needs visible progress. |
+| 2026-07-17 | **Persistent local deployment docs** — README section on running both webapps (FastAPI :8001, Streamlit :8501) as a durable local deployment via tmux sessions wrapped in `caffeinate`, with management commands and the lid-close/sleep caveats. *Decision:* invoke the conda env's `python` by absolute path inside tmux instead of `conda activate` so it works regardless of shell PATH. *Why:* `uvicorn --reload` dies with its terminal; tmux + caffeinate keeps the apps up across closed terminals (though not across machine sleep). |
+| 2026-07-17 | **Journal-on-push made mandatory** — backfilled the Journal with the full FastAPI migration history (Tabs 1–5·8, first test suite, verification passes) and strengthened `.cursor/skills/validate-before-commit/SKILL.md` with an explicit "Always update the Journal before you push" step (check `git log <upstream>..HEAD`, add missing entries, commit, then push; log unverified other-session commits at commit level). *Decision:* enforce the update at push time, not just commit time, and require coverage of commits made in other sessions. *Why:* several migration commits had landed without Journal entries; tying the update to every push keeps the running log and the pushed history from drifting apart. |
+| 2026-07-17 | **Fine-tune training moved to a subprocess + device panel** — 5·8 fine-tuning now runs via `scripts/finetune_worker.py` (a detached, `start_new_session` subprocess writing a per-job status JSON to `data/models/_finetune_runs/`) instead of the FastAPI background thread. Added a **Compute device** panel to Section 5 (static: MPS/CPU/CUDA + unified-memory note; live during a run: device shown alongside step/%/rate/ETA/loss). *Decision:* subprocess over thread. *Why:* HF `Trainer`+`accelerate`'s process-global `AcceleratorState` crashes (`… has no attribute distributed_type`) in a background thread — it had killed a UI-launched run at ~step 691; a fresh main-thread process reproduces the notebook conditions that work, isolates a crash from the web server, and the user needs to *see* the run is on the GPU to trust it. Verified: a UI-launched AAPL run trained past step 691 on `mps` to completion. |
+| 2026-07-17 | **Refresh-safe fine-tune status** — Section 5 now re-attaches to a running (or finished) training job after a browser refresh or a webapp restart: `latest_run_id()` / `read_run_state()` / `run_view()` rebuild a job-like view from the worker's on-disk status file, `GET /finetune` resumes the latest run, and `/finetune/train/{id}/status` falls back to disk when the in-memory job is gone. Covered by `tests/test_finetune_resume.py` (7 tests). *Decision:* the on-disk status file is the source of truth for rendering, not just in-memory `JobManager` state. *Why:* a ~17-minute run was effectively invisible after a page refresh — reloading showed "No training job started yet" while training continued unseen. |
+| 2026-07-17 | **Fine-tune convergence-chart groundwork** — `scripts/finetune_worker.py` now persists compact `loss_history` and `eval_history` series in each run's status JSON; `ravenpack_finetune.loss_chart()` converts that history to inline-SVG geometry and is registered with Jinja. *Decision:* keep progress capture in the detached worker and chart geometry server-side so HTMX polling can redraw without Plotly or client state; adding the SVG markup to the status partial remains a follow-up. *Why:* scalar "latest loss" status cannot show whether training is converging or when validation quality peaks, and reconstructing the series after the run would lose intermediate events. |
+| 2026-07-17 | **Live convergence chart rendered** — added `partials/loss_chart.html` to the running and completed fine-tune status views, showing the training-loss curve, epoch boundaries, latest loss, and per-epoch validation macro-F1/accuracy. *Decision:* render a responsive inline SVG from the server-computed geometry on every HTMX poll. *Why:* completes the convergence-history pipeline without adding browser-side chart state or another JavaScript dependency. |
+| 2026-07-17 | **W&B links across the model lifecycle** — centralized the W&B entity/project and checkpoint-run mapping in `wandb_logging.py`; new PhraseBank/RavenPack training runs persist W&B project/run IDs and URLs in `metrics.json`, live fine-tune status exposes the active run, and FastAPI training, evaluation, model-selection, and inference results link to the exact checkpoint run when known (project fallback otherwise). *Decision:* checkpoint metadata is the link source of truth, with explicit project defaults before Hugging Face initializes W&B. *Why:* every model use should remain traceable from UI output back to its experiment record, and detached workers must not silently log to W&B's generic `huggingface` project. |
 
 ### Immediate Next Steps
 
@@ -327,7 +338,7 @@ See `docs/fastapi_migration_plan.md` for the tab-by-tab migration status.
 - **Tab 5·8 — RavenPack Fine-Tuning** → `/finetune` (ticker multi-select, coverage
   table, background training job with live HTMX status polling).
 
-Not yet ported: Sentiment Lab, Paper Validation.
+All seven top-level Streamlit tabs now have FastAPI routes; some deeper subsections remain in progress as tracked in the migration plan.
 
 The webapp has a small test suite under `tests/` (adapter metric math +
 route/template rendering with the model layer mocked):
@@ -356,6 +367,51 @@ uvicorn webapp.main:app --reload --port 8001
 Then open <http://localhost:8001> (or <http://localhost:8001/phrasebank> /
 `/finetune` directly). You can keep the Streamlit app running at the same time on its
 own port (`8501`) to compare the two side by side.
+
+### Deploy locally (persistent — survives closed terminals)
+
+`uvicorn … --reload` in a terminal dies with that terminal. To keep both webapps
+running as a lightweight local deployment, run each inside a **tmux** session and
+wrap it in **caffeinate** so macOS doesn't idle-sleep while they're up:
+
+```bash
+DIR="$(pwd)"                                             # project root
+ENVBIN="$HOME/miniconda/envs/sentiment-ltr-paper/bin"    # adjust to your conda path
+
+# FastAPI app on :8001
+tmux new-session -d -s fastapi -c "$DIR" \
+  "caffeinate -is $ENVBIN/python -m uvicorn webapp.main:app --host 0.0.0.0 --port 8001 --reload"
+
+# Streamlit app on :8501
+tmux new-session -d -s streamlit -c "$DIR" \
+  "caffeinate -is $ENVBIN/python -m streamlit run app.py --server.port 8501 --server.headless true"
+```
+
+Managing the sessions:
+
+```bash
+tmux ls                      # list running sessions
+tmux attach -t fastapi       # watch the FastAPI logs (Ctrl-b d to detach)
+tmux attach -t streamlit     # watch the Streamlit logs
+tmux kill-session -t fastapi # stop one app
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8001   # health check → 200
+```
+
+Notes and caveats:
+
+- **Closing the terminal window (or an SSH session) is safe** — tmux keeps the
+  processes alive in the background.
+- **Sleep still pauses everything.** tmux cannot survive the Mac itself going to
+  sleep; `caffeinate -is` prevents *idle* sleep, but physically closing the lid on
+  battery power still sleeps the machine. To keep the apps reachable with the lid
+  closed, keep the Mac plugged into power. Processes resume automatically on wake,
+  so for your own use a sleep is a harmless pause.
+- `--host 0.0.0.0` makes the FastAPI app reachable from other devices on your
+  network; drop it to keep the app localhost-only.
+- Using `$ENVBIN/python` directly (instead of `conda activate`) means the commands
+  work from any shell regardless of PATH — handy inside tmux.
+- Both apps read the same `.env` (WRDS credentials etc.) and the same on-disk
+  caches, so they can run side by side and will show identical numbers.
 
 ### Expose a public link
 

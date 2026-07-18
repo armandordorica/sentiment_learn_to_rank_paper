@@ -9,6 +9,7 @@
       baseline, five for a multi-stock pilot, or more for a pooled run — all selected tickers
       are concatenated into one shuffled dataset, not trained sequentially.
     </p>
+    <p><a class="btn btn-secondary wandb-link" href="{{ wandb.url }}" target="_blank" rel="noopener">↗ Open {{ 'checkpoint run' if wandb.run_url else 'project' }} in Weights &amp; Biases</a></p>
 
     {% if not deps.finetuning_deps_available %}
       <div class="alert alert-error">
@@ -26,6 +27,31 @@
         <code>data/raw/data_explorer_top1k/by_ticker/</code>.
       </div>
     {% else %}
+      {% if device %}
+        <div class="alert {% if device.selected in ['cuda', 'mps'] %}alert-success{% else %}alert-info{% endif %}">
+          <strong>Compute device:</strong>
+          {% if device.selected == 'cuda' %}🟢 {{ device.device_name }} (CUDA)
+          {% elif device.selected == 'mps' %}🟢 {{ device.device_name }}
+          {% else %}🟡 CPU only{% if device.mps_available %} (MPS available but not selected){% endif %}
+          {% endif %}
+          · torch {{ device.torch_version }}
+          <br>
+          <span class="muted">
+            {% if device.selected == 'mps' %}
+              Training runs on the Apple GPU. On Apple Silicon the GPU shares your system
+              RAM (unified memory) — there's no separate VRAM, so model weights and the
+              tokenized dataset live in normal RAM while the GPU cores do the math.
+            {% elif device.selected == 'cuda' %}
+              Training runs on the CUDA GPU using its dedicated VRAM.
+            {% else %}
+              No GPU backend detected — training will run on CPU and be substantially slower.
+            {% endif %}
+            The live status below reports the device the running job is actually on, plus
+            step count, throughput, and ETA so you can confirm it's training effectively.
+          </span>
+        </div>
+      {% endif %}
+
       <form id="finetune-form"
             hx-post="/finetune/train"
             hx-target="#train-status"

@@ -25,6 +25,8 @@ from webapp.api import phrasebank_baseline as pb
 from webapp.api import ravenpack_eval as re_
 from webapp.api import ravenpack_finetune as rp
 from webapp.api import data_explorer as de
+from webapp.api import sentiment_lab as sl
+from webapp.api import paper_validation as pv
 from webapp.jobs import job_manager
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +35,9 @@ WEBAPP_DIR = Path(__file__).resolve().parent
 app = FastAPI(title="Sentiment LTR — FastAPI (migration POC)")
 app.mount("/static", StaticFiles(directory=str(WEBAPP_DIR / "static")), name="static")
 templates = Jinja2Templates(directory=str(WEBAPP_DIR / "templates"))
+# Expose the loss-chart geometry builder so the training-status partial can draw
+# the live convergence chart directly from job.progress, wherever it renders.
+templates.env.globals["loss_chart"] = rp.loss_chart
 
 NAV_ITEMS = [
     {"num": "1", "label": "Data Explorer", "href": "/data-explorer", "enabled": True},
@@ -40,8 +45,8 @@ NAV_ITEMS = [
     {"num": "3", "label": "PhraseBank Baseline", "href": "/phrasebank", "enabled": True},
     {"num": "4", "label": "RavenPack Baseline Eval", "href": "/raven-eval", "enabled": True},
     {"num": "5", "label": "RavenPack Fine-Tuning", "href": "/finetune", "enabled": True},
-    {"num": "6", "label": "Sentiment Lab", "href": "#", "enabled": False},
-    {"num": "7", "label": "Paper Validation", "href": "#", "enabled": False},
+    {"num": "6", "label": "Sentiment Lab", "href": "/sentiment-lab", "enabled": True},
+    {"num": "7", "label": "Paper Validation", "href": "/paper-validation", "enabled": True},
 ]
 
 
@@ -260,15 +265,21 @@ def finetune_page(request: Request) -> HTMLResponse:
     """Tab 5·8 — mirrors ``render_ravenpack_finetuning_tab`` section 5·8 in app.py."""
     tickers = rp.available_tickers()
     default_tickers = rp.pilot_default_tickers(tickers)
+    # Resume the most recent run so a browser refresh (or webapp restart)
+    # re-attaches to an in-flight training job instead of showing a blank status.
+    latest_id = rp.latest_run_id()
+    resumed_job = (job_manager.get(latest_id) or rp.run_view(latest_id)) if latest_id else None
     ctx = _base_context(active_href="/finetune")
     ctx.update({
         "deps": rp.deps_status(),
+        "device": rp.device_report(),
         "tickers": tickers,
         "default_tickers": default_tickers,
         "default_epochs": rp.DEFAULT_RAVENPACK_TRAIN_EPOCHS,
         "coverage": rp.coverage_summary(default_tickers) if default_tickers else None,
-        "job": None,
+        "job": resumed_job,
         "error": None,
+        "wandb": rp.wandb_context(),
     })
     return templates.TemplateResponse(request, "finetune.html", ctx)
 
@@ -305,6 +316,7 @@ def finetune_train(
             tickers,
             init_from_phrasebank=init_from_phrasebank,
             num_train_epochs=num_train_epochs,
+            job=job,
         ),
     )
     job = job_manager.get(job_id)
@@ -317,8 +329,13 @@ def finetune_train(
 
 @app.get("/finetune/train/{job_id}/status", response_class=HTMLResponse)
 def finetune_train_status(request: Request, job_id: str) -> HTMLResponse:
-    """Polled by HTMX every couple seconds while a training job is running."""
-    job = job_manager.get(job_id)
+    """Polled by HTMX every couple seconds while a training job is running.
+
+    Falls back to the on-disk status file (``rp.run_view``) when the in-memory
+    job is gone — e.g. after a webapp restart — so polling keeps working and the
+    run's progress is never lost.
+    """
+    job = job_manager.get(job_id) or rp.run_view(job_id)
     return templates.TemplateResponse(
         request,
         "partials/train_status.html",
@@ -353,6 +370,7 @@ def raven_eval_page(request: Request) -> HTMLResponse:
         "dataset_error": dataset_error,
         "eval_splits": re_.EVAL_SPLITS,
         "provenance": re_.provenance_context(),
+        "wandb": pb.checkpoint_wandb_links("phrasebank_distilbert_best", pb.load_metrics()),
     })
     return templates.TemplateResponse(request, "ravenpack_eval.html", ctx)
 
@@ -448,3 +466,71 @@ def phrasebank_train_eval(request: Request) -> HTMLResponse:
         {"train_eval": train_eval, "error": error},
     )
 
+
+@app.get("/sentiment-lab", response_class=HTMLResponse)
+def sentiment_lab_page(request: Request) -> HTMLResponse:
+    ctx = _base_context(active_href="/sentiment-lab")
+    ctx.update(sl.page_context())
+    try:
+        ctx["dataset"], ctx["dataset_error"] = sl.phrasebank_dataset(), None
+    except Exception as exc:  # noqa: BLE001
+        ctx["dataset"], ctx["dataset_error"] = None, str(exc)
+    return templates.TemplateResponse(request, "sentiment_lab.html", ctx)
+
+
+@app.post("/sentiment-lab/articles", response_class=HTMLResponse)
+def sentiment_lab_articles(request: Request, ticker: str = Form("AAPL"),
+                           start: str = Form(sl.DEFAULT_START), end: str = Form(sl.DEFAULT_END),
+                           max_rows: int = Form(50)) -> HTMLResponse:
+    try:
+        result, error = sl.cached_articles(ticker, start, end, max_rows), None
+    except Exception as exc:  # noqa: BLE001
+        result, error = None, str(exc)
+    return templates.TemplateResponse(request, "partials/sentiment_articles.html",
+                                      {"result": result, "error": error})
+
+
+@app.post("/sentiment-lab/score", response_class=HTMLResponse)
+def sentiment_lab_score(request: Request, text: str = Form(""),
+                        model_ids: list[str] = Form(default=[])) -> HTMLResponse:
+    try:
+        results, error = sl.score(text, model_ids), None
+    except Exception as exc:  # noqa: BLE001
+        results, error = None, str(exc)
+    return templates.TemplateResponse(request, "partials/sentiment_scores.html",
+                                      {"results": results, "error": error})
+
+
+@app.post("/sentiment-lab/train", response_class=HTMLResponse)
+def sentiment_lab_train(request: Request) -> HTMLResponse:
+    job_id = job_manager.start(kind="phrasebank_train", fn=sl.train)
+    return templates.TemplateResponse(request, "partials/sentiment_train_status.html",
+                                      {"job": job_manager.get(job_id), "error": None})
+
+
+@app.get("/sentiment-lab/train/{job_id}/status", response_class=HTMLResponse)
+def sentiment_lab_train_status(request: Request, job_id: str) -> HTMLResponse:
+    job = job_manager.get(job_id)
+    return templates.TemplateResponse(request, "partials/sentiment_train_status.html",
+                                      {"job": job, "error": None if job else "Job not found."})
+
+
+@app.get("/paper-validation", response_class=HTMLResponse)
+def paper_validation_page(request: Request) -> HTMLResponse:
+    ctx = _base_context(active_href="/paper-validation")
+    try:
+        ctx.update(pv.page_context())
+        ctx["error"] = None
+    except Exception as exc:  # noqa: BLE001
+        ctx["error"] = str(exc)
+    return templates.TemplateResponse(request, "paper_validation.html", ctx)
+
+
+@app.get("/paper-validation/prices", response_class=HTMLResponse)
+def paper_validation_prices(request: Request, ticker: str = "") -> HTMLResponse:
+    try:
+        result, error = pv.price_chart(ticker), None
+    except Exception as exc:  # noqa: BLE001
+        result, error = None, str(exc)
+    return templates.TemplateResponse(request, "partials/paper_validation_prices.html",
+                                      {"result": result, "error": error})
