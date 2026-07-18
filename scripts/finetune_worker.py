@@ -145,6 +145,9 @@ def main() -> int:
             "test_f1": metrics.get("test", {}).get("eval_f1"),
             "test_acc": metrics.get("test", {}).get("eval_accuracy"),
             "device": metrics.get("device", state["device"]),
+            "wandb_project_url": metrics.get("wandb_project_url"),
+            "wandb_run_id": metrics.get("wandb_run_id"),
+            "wandb_run_url": metrics.get("wandb_run_url"),
         })
         _write()
         return 0

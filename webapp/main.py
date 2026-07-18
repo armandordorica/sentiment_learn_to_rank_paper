@@ -279,6 +279,7 @@ def finetune_page(request: Request) -> HTMLResponse:
         "coverage": rp.coverage_summary(default_tickers) if default_tickers else None,
         "job": resumed_job,
         "error": None,
+        "wandb": rp.wandb_context(),
     })
     return templates.TemplateResponse(request, "finetune.html", ctx)
 
@@ -369,6 +370,7 @@ def raven_eval_page(request: Request) -> HTMLResponse:
         "dataset_error": dataset_error,
         "eval_splits": re_.EVAL_SPLITS,
         "provenance": re_.provenance_context(),
+        "wandb": pb.checkpoint_wandb_links("phrasebank_distilbert_best", pb.load_metrics()),
     })
     return templates.TemplateResponse(request, "ravenpack_eval.html", ctx)
 

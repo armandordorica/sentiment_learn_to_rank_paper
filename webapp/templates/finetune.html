@@ -9,6 +9,7 @@
       baseline, five for a multi-stock pilot, or more for a pooled run — all selected tickers
       are concatenated into one shuffled dataset, not trained sequentially.
     </p>
+    <p><a class="btn btn-secondary wandb-link" href="{{ wandb.url }}" target="_blank" rel="noopener">↗ Open {{ 'checkpoint run' if wandb.run_url else 'project' }} in Weights &amp; Biases</a></p>
 
     {% if not deps.finetuning_deps_available %}
       <div class="alert alert-error">

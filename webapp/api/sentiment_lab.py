@@ -17,6 +17,7 @@ if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
 from sentiment_ltr.models import phrasebank_sentiment as ps  # noqa: E402
+from sentiment_ltr.wandb_logging import checkpoint_wandb_links, configure_wandb_environment  # noqa: E402
 
 RAVENPACK_DIR = PROJECT_ROOT / "data" / "raw" / "news" / "ravenpack"
 DEFAULT_START = "2003-01-01"
@@ -49,7 +50,8 @@ def page_context() -> dict[str, Any]:
     models = available_models()
     return {"deps_available": deps, "has_model": has_model, "metrics": metrics,
             "device": device, "coverage": coverage_context(), "models": models,
-            "default_model_ids": [m["id"] for m in models if m["recommended"]]}
+            "default_model_ids": [m["id"] for m in models if m["recommended"]],
+            "wandb_project": configure_wandb_environment()}
 
 
 def available_models() -> list[dict[str, Any]]:
@@ -100,6 +102,7 @@ def available_models() -> list[dict[str, Any]]:
             "checkpoint_id": model_id,
             "weights_sha256": weights_sha,
             "weights_sha_short": weights_sha[:12],
+            "wandb": checkpoint_wandb_links(model_id, metrics),
         })
     return models
 
@@ -185,4 +188,4 @@ def train(job: Any) -> dict[str, Any]:
     job.progress_message = "Preparing Financial PhraseBank and DistilBERT…"
     result = ps.train_baseline()
     job.progress_message = "Saving best checkpoint and metrics…"
-    return {"metrics": result}
+    return {"metrics": result, "wandb": checkpoint_wandb_links("phrasebank_distilbert_best", result)}

@@ -9,6 +9,7 @@
     <div class="alert alert-info">
       ⏳ Training job <code>{{ job.id }}</code> — status: <strong>{{ job.status }}</strong>.<br>
       {{ job.progress_message }}
+      {% if job.progress.run_url or job.progress.project_url %}<br><a href="{{ job.progress.run_url or job.progress.project_url }}" target="_blank" rel="noopener">↗ View live run in W&amp;B</a>{% endif %}
       {% if job.progress.device_name %}
         <br><strong>Device:</strong>
         {% if job.progress.device in ['cuda', 'mps'] %}🟢{% else %}🟡{% endif %}
@@ -46,6 +47,7 @@
     accuracy <strong>{{ "%.1f%%"|format(job.result.test_acc * 100) if job.result.test_acc is not none else "—" }}</strong>.
     {% if job.result.device %}Trained on <strong>{{ job.result.device }}</strong>. {% endif %}
     Checkpoint saved to <code>{{ job.result.checkpoint_dir }}</code>.
+    {% if job.result.wandb_run_url or job.result.wandb_project_url %}<br><a href="{{ job.result.wandb_run_url or job.result.wandb_project_url }}" target="_blank" rel="noopener">↗ View training run in W&amp;B</a>{% endif %}
   </div>
   {% set chart = loss_chart(job.progress) %}
   {% include "partials/loss_chart.html" %}

@@ -21,6 +21,7 @@ if str(SRC_PATH) not in sys.path:
 
 from sentiment_ltr.models import phrasebank_sentiment as _phrasebank_sentiment  # noqa: E402
 from sentiment_ltr.models import ravenpack_sentiment as _ravenpack_sentiment  # noqa: E402
+from sentiment_ltr.wandb_logging import checkpoint_wandb_links  # noqa: E402
 
 model_is_saved = _phrasebank_sentiment.model_is_saved
 resolve_model_dir = _phrasebank_sentiment.resolve_model_dir
@@ -66,6 +67,17 @@ def deps_status() -> dict[str, Any]:
         "has_phrasebank_checkpoint": model_is_saved(resolve_model_dir()),
         "has_ravenpack_checkpoint": ravenpack_model_is_saved(),
     }
+
+
+def wandb_context() -> dict[str, Any]:
+    metrics = {}
+    metrics_path = resolve_ravenpack_model_dir() / "metrics.json"
+    if metrics_path.exists():
+        try:
+            metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return checkpoint_wandb_links("ravenpack_distilbert_best", metrics)
 
 
 def coverage_summary(tickers: list[str]) -> dict[str, Any]:
@@ -190,6 +202,8 @@ def run_training(
         "test_acc": metrics.get("test", {}).get("eval_accuracy"),
         "device": metrics.get("device"),
         "checkpoint_dir": str(DEFAULT_RAVENPACK_MODEL_DIR.relative_to(PROJECT_ROOT)),
+        "wandb_run_url": metrics.get("wandb_run_url"),
+        "wandb_project_url": metrics.get("wandb_project_url"),
     }
 
 
@@ -238,6 +252,8 @@ def run_view(job_id: str) -> SimpleNamespace | None:
             "test_acc": state.get("test_acc"),
             "device": state.get("device"),
             "checkpoint_dir": str(DEFAULT_RAVENPACK_MODEL_DIR.relative_to(PROJECT_ROOT)),
+            "wandb_run_url": state.get("wandb_run_url"),
+            "wandb_project_url": state.get("wandb_project_url"),
         }
     return SimpleNamespace(
         id=job_id,
