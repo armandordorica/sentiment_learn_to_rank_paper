@@ -1,0 +1,13 @@
+{% if error %}
+  <div class="alert alert-error"><strong>Could not load story:</strong> {{ error }}</div>
+{% elif story %}
+  <article class="refinitiv-story">
+    <div class="story-heading">
+      <div><span class="provider-badge">Refinitiv full story</span><h4>{{ story.headline }}</h4></div>
+      <button type="button" class="btn btn-secondary btn-small" onclick="document.getElementById('refinitiv-story-panel').innerHTML='<p class=&quot;muted&quot;>Select a headline above to read its full story.</p>'">Close</button>
+    </div>
+    <p class="story-body">{{ story.text }}</p>
+    <div class="source-path"><strong>Saved full article</strong><code>{{ story.relative_path }}</code><span class="muted">Absolute path: {{ story.path }}</span></div>
+    <p class="muted">Story ID: <code>{{ story.story_id }}</code></p>
+  </article>
+{% endif %}

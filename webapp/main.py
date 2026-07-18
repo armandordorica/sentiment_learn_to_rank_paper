@@ -99,6 +99,22 @@ def data_explorer_query(
     )
 
 
+@app.post("/data-explorer/story", response_class=HTMLResponse)
+def data_explorer_story(
+    request: Request,
+    story_id: str = Form(default=""),
+    headline: str = Form(default="Selected headline"),
+    ticker: str = Form(default="UNKNOWN"),
+) -> HTMLResponse:
+    try:
+        story, error = de.load_story(story_id, headline, ticker), None
+    except Exception as exc:  # noqa: BLE001
+        story, error = None, str(exc)
+    return templates.TemplateResponse(
+        request, "partials/refinitiv_story.html", {"story": story, "error": error}
+    )
+
+
 @app.get("/batch", response_class=HTMLResponse)
 def batch_page(request: Request) -> HTMLResponse:
     """Tab 2 — mirrors ``render_batch_pipeline_tab()`` in app.py."""
@@ -279,6 +295,9 @@ def finetune_page(request: Request) -> HTMLResponse:
         "default_epochs": rp.DEFAULT_RAVENPACK_TRAIN_EPOCHS,
         "coverage": rp.coverage_summary(default_tickers) if default_tickers else None,
         "comparison_models": rp.comparison_models(),
+        "five_stock_tickers": rp.DEFAULT_FIVE_STOCK_TICKERS,
+        "five_stock_readiness": rp.five_stock_readiness(),
+        "ready_tickers": rp.rich_export_tickers(),
         "job": resumed_job,
         "error": None,
         "wandb": rp.wandb_context(),

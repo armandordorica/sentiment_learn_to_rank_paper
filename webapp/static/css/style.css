@@ -214,6 +214,21 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .check-item span { display: inline-block; width: 1.4rem; font-weight: 700; }
 .check-pass { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
 .check-fail { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+.headline-table-wrap { max-height: 34rem; overflow: auto; border: 1px solid var(--border); border-radius: .45rem; }
+.headline-table { margin: 0; min-width: 980px; }
+.headline-table thead { position: sticky; top: 0; z-index: 1; }
+.headline-table form { margin: 0; }
+.headline-date { white-space: nowrap; }
+.story-id { display: inline-block; max-width: 18rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.btn-small { padding: .35rem .6rem; font-size: .8rem; white-space: nowrap; }
+.refinitiv-story { margin-top: 1rem; border: 1px solid var(--border); border-radius: .55rem; padding: 1rem 1.1rem; background: #fff; }
+.story-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+.story-heading h4 { margin: .45rem 0 .8rem; }
+.provider-badge { display: inline-block; background: #e0f2fe; color: #075985; border-radius: 999px; padding: .18rem .55rem; font-size: .75rem; font-weight: 700; }
+.story-body { white-space: pre-wrap; line-height: 1.65; }
+.source-path { display: grid; gap: .35rem; margin: .8rem 0 1rem; padding: .75rem .9rem; border: 1px solid var(--border); border-radius: .45rem; background: #f8fafc; }
+.source-path code { overflow-wrap: anywhere; color: #0f172a; }
+.source-path .muted { overflow-wrap: anywhere; font-size: .78rem; }
 
 /* Batch pipeline (Tab 2) */
 .progress-track {
