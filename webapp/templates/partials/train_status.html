@@ -9,13 +9,16 @@
     <div class="alert alert-info">
       ⏳ Training job <code>{{ job.id }}</code> — status: <strong>{{ job.status }}</strong>.<br>
       {{ job.progress_message }}
-      {% if job.progress.run_url or job.progress.project_url %}<br><a href="{{ job.progress.run_url or job.progress.project_url }}" target="_blank" rel="noopener">↗ View live run in W&amp;B</a>{% endif %}
+      <br><a href="{{ job.progress.run_url or job.progress.project_url or wandb_project_url }}" target="_blank" rel="noopener">↗ View {{ 'live run' if job.progress.run_url else 'project' }} in W&amp;B</a>
       {% if job.progress.device_name %}
         <br><strong>Device:</strong>
         {% if job.progress.device in ['cuda', 'mps'] %}🟢{% else %}🟡{% endif %}
         {{ job.progress.device_name }}
         {% if job.progress.device == 'cpu' %}(CPU — no GPU backend){% endif %}
       {% endif %}
+      <form hx-post="/finetune/train/{{ job.id }}/pause" hx-target="#train-status" hx-swap="innerHTML" style="margin-top:.75rem">
+        <button type="submit" class="btn btn-secondary">⏸ Pause and save progress</button>
+      </form>
     </div>
     {% if job.progress.total_steps %}
       <div class="progress-track">
@@ -41,13 +44,22 @@
     {% set chart = loss_chart(job.progress) %}
     {% include "partials/loss_chart.html" %}
   </div>
+{% elif job.status == "paused" or (job.status == "done" and job.result and job.result.paused) %}
+  {% set paused = job.result if job.result and job.result.paused else job.progress %}
+  <div class="alert alert-info">
+    ⏸ Training paused safely at step {{ "{:,}".format(paused.step or 0) }} / {{ "{:,}".format(paused.total_steps or 0) }}.
+    Optimizer, scheduler, model weights, and Trainer state are saved at <code>{{ paused.checkpoint_path }}</code>.
+    <form hx-post="/finetune/train/{{ job.id }}/resume" hx-target="#train-status" hx-swap="innerHTML" style="margin-top:.75rem">
+      <button type="submit" class="btn btn-primary">▶ Resume from saved checkpoint</button>
+    </form>
+  </div>
 {% elif job.status == "done" %}
   <div class="alert alert-success">
     ✅ Done — test macro-F1 <strong>{{ "%.1f%%"|format(job.result.test_f1 * 100) if job.result.test_f1 is not none else "—" }}</strong>,
     accuracy <strong>{{ "%.1f%%"|format(job.result.test_acc * 100) if job.result.test_acc is not none else "—" }}</strong>.
     {% if job.result.device %}Trained on <strong>{{ job.result.device }}</strong>. {% endif %}
     Checkpoint saved to <code>{{ job.result.checkpoint_dir }}</code>.
-    {% if job.result.wandb_run_url or job.result.wandb_project_url %}<br><a href="{{ job.result.wandb_run_url or job.result.wandb_project_url }}" target="_blank" rel="noopener">↗ View training run in W&amp;B</a>{% endif %}
+    <br><a href="{{ job.result.wandb_run_url or job.result.wandb_project_url or wandb_project_url }}" target="_blank" rel="noopener">↗ View {{ 'training run' if job.result.wandb_run_url else 'project' }} in W&amp;B</a>
   </div>
   {% set chart = loss_chart(job.progress) %}
   {% include "partials/loss_chart.html" %}

@@ -44,6 +44,24 @@ def test_latest_run_id_picks_newest(run_dir):
     assert rp.latest_run_id() == "new"
 
 
+def test_latest_run_id_skips_stale_running_status(run_dir):
+    import os
+    import time
+
+    _write_status(run_dir, "finished", {"status": "done"})
+    stale = run_dir / "stale_status.json"
+    _write_status(run_dir, "stale", {"status": "running", "step": 3900})
+    os.utime(stale, (time.time() - 600, time.time() - 600))
+    assert rp.latest_run_id() == "finished"
+
+
+def test_latest_run_id_accepts_live_worker_pid(run_dir):
+    import os
+
+    _write_status(run_dir, "live", {"status": "running", "worker_pid": os.getpid()})
+    assert rp.latest_run_id() == "live"
+
+
 def test_read_run_state_missing_and_corrupt(run_dir):
     assert rp.read_run_state("nope") is None
     (run_dir / "bad_status.json").write_text("{not json", encoding="utf-8")
@@ -89,8 +107,38 @@ def test_run_view_error_surfaces_traceback(run_dir):
     assert "boom" in view.error
 
 
+def test_run_view_marks_stale_running_record_as_error(run_dir):
+    import os
+    import time
+
+    path = run_dir / "stale_status.json"
+    _write_status(run_dir, "stale", {"status": "running", "message": "Training"})
+    os.utime(path, (time.time() - 600, time.time() - 600))
+    view = rp.run_view("stale")
+    assert view.status == "error"
+    assert "no active training worker" in view.error
+
+
 def test_run_view_missing_returns_none(run_dir):
     assert rp.run_view("ghost") is None
+
+
+def test_run_view_paused_exposes_resume_checkpoint(run_dir):
+    _write_status(run_dir, "paused", {
+        "status": "paused", "message": "Paused safely.", "step": 321,
+        "total_steps": 1000, "checkpoint_path": "/tmp/checkpoint-321",
+    })
+    view = rp.run_view("paused")
+    assert view.status == "paused"
+    assert view.progress["checkpoint_path"] == "/tmp/checkpoint-321"
+
+
+def test_request_pause_writes_control_signal(run_dir):
+    _write_status(run_dir, "live", {"status": "running", "worker_pid": 123, "step": 5})
+    view = rp.request_pause("live")
+    control = json.loads((run_dir / "live_control.json").read_text())
+    assert control == {"action": "pause"}
+    assert "Pause requested" in view.progress_message
 
 
 def test_loss_chart_requires_two_history_points():
@@ -112,3 +160,45 @@ def test_loss_chart_builds_svg_geometry_and_keeps_eval_history():
     assert len(chart["polyline"].split()) == 2
     assert chart["epoch_marks"][0]["label"] == "end e1"
     assert chart["eval_history"][0]["eval_f1"] == 0.6
+
+
+def test_coverage_summary_reports_actual_split_date_ranges(monkeypatch):
+    import pandas as pd
+
+    frame = pd.DataFrame({
+        "ticker": ["AAPL"] * 4,
+        "article_date": pd.to_datetime(["2010-02-03", "2011-11-30", "2012-06-15", "2013-04-09"]),
+        "label_name": ["positive", "neutral", "negative", "positive"],
+    })
+    monkeypatch.setattr(rp, "load_ravenpack_labeled_frame", lambda tickers: frame)
+    coverage = rp.coverage_summary(["AAPL"])
+    by_split = {row["split"]: row for row in coverage["splits_table"]}
+    assert by_split["train"]["start_date"] == "2010-02-03"
+    assert by_split["train"]["end_date"] == "2011-11-30"
+    assert by_split["validation"]["start_date"] == "2012-06-15"
+    assert by_split["test"]["end_date"] == "2013-04-09"
+
+
+def test_compare_checkpoints_uses_same_test_split(monkeypatch):
+    models = [
+        {"id": "phrasebank_distilbert_best", "title": "Before", "sha": "aaa", "description": "before"},
+        {"id": "ravenpack_distilbert_best", "title": "After", "sha": "bbb", "description": "after"},
+    ]
+    monkeypatch.setattr(rp, "comparison_models", lambda: models)
+    calls = []
+
+    def fake_eval(tickers, *, model_dir, eval_split):
+        calls.append((tickers, model_dir.name, eval_split))
+        score = 0.4 if model_dir.name.startswith("phrasebank") else 0.6
+        return {"n_rows": 100, "macro_f1": score, "accuracy": score + 0.1}
+
+    monkeypatch.setattr(rp._ravenpack_sentiment, "evaluate_phrasebank_baseline_on_ravenpack", fake_eval)
+    result = rp.compare_checkpoints(
+        ["AAPL"], "phrasebank_distilbert_best", "ravenpack_distilbert_best"
+    )
+    assert calls == [
+        (["AAPL"], "phrasebank_distilbert_best", "test"),
+        (["AAPL"], "ravenpack_distilbert_best", "test"),
+    ]
+    assert result["same_test_rows"] is True
+    assert result["f1_delta"] == pytest.approx(0.2)

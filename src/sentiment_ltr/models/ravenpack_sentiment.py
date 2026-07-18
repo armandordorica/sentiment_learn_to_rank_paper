@@ -399,6 +399,15 @@ def resolve_init_checkpoint(*, from_phrasebank: bool = True) -> str:
     return MODEL_NAME
 
 
+class TrainingPaused(RuntimeError):
+    """Raised after Trainer has safely checkpointed a user-requested pause."""
+
+    def __init__(self, checkpoint_path: str, step: int):
+        super().__init__(f"Training paused at step {step:,}.")
+        self.checkpoint_path = checkpoint_path
+        self.step = step
+
+
 def train_ravenpack(
     *,
     tickers: list[str] | None = None,
@@ -409,6 +418,8 @@ def train_ravenpack(
     per_device_train_batch_size: int = 16,
     seed: int = 42,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    pause_requested: Callable[[], bool] | None = None,
+    resume_from_checkpoint: str | None = None,
 ) -> dict[str, Any]:
     """Continue fine-tuning DistilBERT on RavenPack headline labels.
 
@@ -461,6 +472,7 @@ def train_ravenpack(
         greater_is_better=True,
         save_total_limit=1,
         logging_steps=100,
+        disable_tqdm=True,
         report_to="wandb",
         run_name=(
             "ravenpack-distilbert"
@@ -489,6 +501,8 @@ def train_ravenpack(
     trainer.add_callback(_WandbIdentity())
 
     if progress_callback is not None:
+        pause_state = {"requested": False, "step": 0}
+
         class _ProgressReporter(TrainerCallback):
             def on_step_end(self, args, state, control, **kwargs):
                 progress_callback({
@@ -497,6 +511,11 @@ def train_ravenpack(
                     "epoch": float(state.epoch or 0),
                     **current_wandb_run_metadata(),
                 })
+                if pause_requested is not None and pause_requested():
+                    pause_state.update({"requested": True, "step": state.global_step})
+                    control.should_save = True
+                    control.should_training_stop = True
+                return control
 
             def on_log(self, args, state, control, logs=None, **kwargs):
                 if logs and "loss" in logs:
@@ -520,7 +539,14 @@ def train_ravenpack(
 
         trainer.add_callback(_ProgressReporter())
 
-    train_result = trainer.train()
+    train_result = trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+    if progress_callback is not None and pause_state["requested"]:
+        from transformers.trainer_utils import get_last_checkpoint
+
+        checkpoint_path = get_last_checkpoint(str(output_dir))
+        if not checkpoint_path:
+            raise RuntimeError("Pause was requested, but Trainer did not save a checkpoint.")
+        raise TrainingPaused(checkpoint_path, int(pause_state["step"]))
     val_metrics = trainer.evaluate(tokenized["validation"])
     test_metrics = trainer.evaluate(tokenized["test"])
     wandb_meta = wandb_identity or current_wandb_run_metadata()
