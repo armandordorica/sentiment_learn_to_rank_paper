@@ -235,6 +235,30 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .ood-basket-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .7rem; margin: .8rem 0 1rem; }
 .ood-basket-grid > div { display: grid; gap: .3rem; padding: .75rem; border: 1px solid var(--border); border-radius: .45rem; background: #fff; }
 @media (max-width: 850px) { .ood-basket-grid { grid-template-columns: 1fr; } }
+.expansion-panel { margin-bottom: 1.2rem; padding: 1rem; border: 2px solid #c7d2fe; border-radius: .6rem; background: #f8faff; }
+.expansion-panel h2 { margin-top: 0; }
+.ticker-chip-list { display: flex; flex-wrap: wrap; gap: .35rem; margin: .7rem 0 1rem; }
+.ticker-chip-list code { padding: .22rem .45rem; border-radius: .3rem; background: #e0e7ff; color: #312e81; font-weight: 700; }
+.methodology-panel { margin: .85rem 0 1.1rem; border: 1px solid #cfd8e6; border-radius: .55rem; background: #f8fafc; }
+.methodology-panel summary { cursor: pointer; margin: 0; padding: .8rem 1rem; color: #334155; font-weight: 700; }
+.methodology-panel[open] summary { border-bottom: 1px solid #dbe3ee; }
+.methodology-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: .9rem; padding: 1rem; }
+.methodology-grid > div { border-left: 3px solid var(--red); padding-left: .75rem; }
+.methodology-grid p { margin: .3rem 0 0; color: #52647d; line-height: 1.5; }
+.section-overview { margin: 1.1rem 0; border-color: #aebdd1; background: #f5f8fc; }
+.section-overview summary { padding: 1rem 1.1rem; color: #1e293b; }
+.overview-stack { display: grid; gap: .8rem; padding: 1rem; }
+.overview-stack > div { padding: .85rem 1rem; border: 1px solid #dbe3ee; border-radius: .45rem; background: #fff; }
+.overview-stack p { margin: .35rem 0 0; color: #52647d; line-height: 1.55; }
+.overview-stack code, .methodology-grid code { overflow-wrap: anywhere; color: #27364c; }
+.overview-stack .risk-block { border-color: #f1c6c6; background: #fff8f8; }
+.overview-stack .risk-block strong { color: #991b1b; }
+.table-score { display: grid; grid-template-columns: minmax(5.5rem, 1fr) 3.4rem; align-items: center; gap: .55rem; min-width: 9rem; }
+.table-score-track { height: .65rem; overflow: hidden; border-radius: 999px; background: #e8edf4; box-shadow: inset 0 0 0 1px #d7dee9; }
+.table-score-fill { display: block; height: 100%; min-width: 2px; border-radius: inherit; }
+.table-score-f1 { background: linear-gradient(90deg, #6366f1, #4338ca); }
+.table-score-accuracy { background: linear-gradient(90deg, #14b8a6, #0f766e); }
+.table-score strong { text-align: right; font-variant-numeric: tabular-nums; font-size: .86rem; }
 
 /* Batch pipeline (Tab 2) */
 .progress-track {
