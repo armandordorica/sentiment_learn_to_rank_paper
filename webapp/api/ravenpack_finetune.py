@@ -9,7 +9,10 @@ FastAPI/Jinja2 presentation layer (mirrors Streamlit's ``app.py``
 from __future__ import annotations
 
 import json
+import hashlib
 import sys
+from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from statistics import mean
 from types import SimpleNamespace
@@ -44,12 +47,17 @@ train_ravenpack = _ravenpack_sentiment.train_ravenpack
 assign_time_split = _ravenpack_sentiment.assign_time_split
 split_leakage_audit = _ravenpack_sentiment.split_leakage_audit
 DEFAULT_FIVE_STOCK_TICKERS = _ravenpack_sentiment.DEFAULT_FIVE_STOCK_TICKERS
+DEFAULT_TWENTY_STOCK_TICKERS = DEFAULT_FIVE_STOCK_TICKERS + [
+    "C", "GS", "AIG", "ORCL", "QCOM", "HPQ", "IBM", "T", "WMT", "KO",
+    "MCD", "AMZN", "CAT", "BA", "CVX",
+]
 DEFAULT_OOD_BASKETS = {
     "Basket 1": ["BAC", "INTC", "GE", "F", "PFE"],
     "Basket 2": ["CSCO", "WFC", "GM", "VZ", "CMCSA"],
     "Basket 3": ["BMY", "TSN", "CSX", "EBAY", "MS"],
 }
 DEFAULT_OOD_TICKERS = [ticker for basket in DEFAULT_OOD_BASKETS.values() for ticker in basket]
+OOD_BENCHMARK_CACHE_VERSION = 1
 
 # The pooled pilot set is the single source of truth in ravenpack_sentiment
 # (DEFAULT_FIVE_STOCK_TICKERS = AAPL, MSFT, JPM, XOM, JNJ).
@@ -187,15 +195,23 @@ def coverage_summary(tickers: list[str]) -> dict[str, Any]:
     }
 
 
+@lru_cache(maxsize=1)
+def twenty_stock_coverage() -> dict[str, Any]:
+    """Cached audited coverage for the explicit 20-stock expansion universe."""
+    return coverage_summary(DEFAULT_TWENTY_STOCK_TICKERS)
+
+
 def comparison_models() -> list[dict[str, Any]]:
-    """The three research checkpoints evaluated on one shared test universe."""
+    """The research checkpoints evaluated on one shared test universe."""
     candidates = [
         ("phrasebank_distilbert_best", "PhraseBank — out-of-the-box", [],
          "Financial PhraseBank checkpoint with no RavenPack adaptation."),
         ("ravenpack_distilbert_best.bak-20260705-checkpoint", "RavenPack fine-tuned — 1 stock (AAPL)", ["AAPL"],
          "PhraseBank checkpoint fine-tuned only on AAPL RavenPack headlines."),
-        ("ravenpack_distilbert_best", "RavenPack fine-tuned — 5 stocks", DEFAULT_FIVE_STOCK_TICKERS,
+        ("ravenpack_distilbert_5stock", "RavenPack fine-tuned — 5 stocks", DEFAULT_FIVE_STOCK_TICKERS,
          "PhraseBank checkpoint jointly fine-tuned on AAPL, MSFT, JPM, XOM, and JNJ."),
+        ("ravenpack_distilbert_best", "RavenPack fine-tuned — 20 stocks", DEFAULT_TWENTY_STOCK_TICKERS,
+         "PhraseBank checkpoint jointly fine-tuned on the pooled 20-stock expansion universe."),
     ]
     discovered = {model["id"]: model for model in _available_models()}
     models = []
@@ -300,8 +316,64 @@ def _ticker_heatmap(baskets: list[dict[str, Any]], models: list[dict[str, Any]])
     return fig.to_html(full_html=False, include_plotlyjs=False)
 
 
-def compare_ood_baskets(model_ids: list[str] | None = None, *, job: Any | None = None) -> dict[str, Any]:
+def _ood_cache_path(model_ids: list[str] | None) -> Path:
+    """Return a content-addressed cache path for one benchmark definition.
+
+    Checkpoint SHAs invalidate stale scores after retraining. Source file size and
+    modification time invalidate them when any OOD dataset is refreshed.
+    """
+    available = {model["id"]: model for model in comparison_models()}
+    selected_ids = list(dict.fromkeys(model_ids or list(available)))
+    model_fingerprints = [
+        {"id": model_id, "sha": available.get(model_id, {}).get("sha")}
+        for model_id in selected_ids
+    ]
+    source_fingerprints = []
+    for path in discover_ravenpack_article_files(DEFAULT_OOD_TICKERS):
+        stat = path.stat()
+        source_fingerprints.append({
+            "path": str(path.relative_to(PROJECT_ROOT)),
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+        })
+    payload = {
+        "version": OOD_BENCHMARK_CACHE_VERSION,
+        "models": model_fingerprints,
+        "baskets": DEFAULT_OOD_BASKETS,
+        "sources": source_fingerprints,
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:20]
+    return PROJECT_ROOT / "data" / "models" / "_benchmark_cache" / f"ood_{digest}.json"
+
+
+def _read_ood_cache(path: Path) -> dict[str, Any] | None:
+    try:
+        result = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    result["cache_hit"] = True
+    return result
+
+
+def _write_ood_cache(path: Path, result: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(result), encoding="utf-8")
+    temporary.replace(path)
+
+
+def compare_ood_baskets(
+    model_ids: list[str] | None = None, *, job: Any | None = None, use_cache: bool = True,
+) -> dict[str, Any]:
     """Evaluate all checkpoints on three disjoint, never-trained stock baskets."""
+    cache_path = _ood_cache_path(model_ids) if use_cache else None
+    if cache_path is not None and (cached := _read_ood_cache(cache_path)) is not None:
+        if job is not None:
+            job.progress_message = "Loaded the matching benchmark from cache."
+        return cached
+
     basket_results = []
     total = len(DEFAULT_OOD_BASKETS)
     for index, (name, tickers) in enumerate(DEFAULT_OOD_BASKETS.items(), start=1):
@@ -320,7 +392,7 @@ def compare_ood_baskets(model_ids: list[str] | None = None, *, job: Any | None =
         })
     baseline = averages[0]
     best = max(averages, key=lambda row: row["macro_f1"])
-    return {
+    result = {
         "baskets": basket_results,
         "averages": averages,
         "baseline": baseline,
@@ -330,7 +402,12 @@ def compare_ood_baskets(model_ids: list[str] | None = None, *, job: Any | None =
             "accuracy": _comparison_chart(basket_results, averages, "accuracy"),
             "ticker_heatmap": _ticker_heatmap(basket_results, averages),
         },
+        "cache_hit": False,
+        "cached_at": datetime.now(timezone.utc).isoformat(),
     }
+    if cache_path is not None:
+        _write_ood_cache(cache_path, result)
+    return result
 
 
 device_report = _phrasebank_sentiment.device_report

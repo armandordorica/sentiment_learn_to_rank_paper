@@ -297,6 +297,8 @@ def finetune_page(request: Request) -> HTMLResponse:
         "comparison_models": rp.comparison_models(),
         "ood_baskets": rp.DEFAULT_OOD_BASKETS,
         "five_stock_tickers": rp.DEFAULT_FIVE_STOCK_TICKERS,
+        "twenty_stock_tickers": rp.DEFAULT_TWENTY_STOCK_TICKERS,
+        "twenty_stock_coverage": rp.twenty_stock_coverage(),
         "five_stock_readiness": rp.five_stock_readiness(),
         "ready_tickers": rp.rich_export_tickers(),
         "job": resumed_job,

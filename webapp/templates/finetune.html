@@ -1,4 +1,16 @@
 {% extends "base.html" %}
+{% macro methodology(goal, inputs, outputs, procedure, assumptions) -%}
+  <details class="methodology-panel">
+    <summary>Methodology and interpretation</summary>
+    <div class="methodology-grid">
+      <div><strong>Goal</strong><p>{{ goal }}</p></div>
+      <div><strong>Inputs</strong><p>{{ inputs|safe }}</p></div>
+      <div><strong>Outputs</strong><p>{{ outputs|safe }}</p></div>
+      <div><strong>What it does</strong><p>{{ procedure }}</p></div>
+      <div><strong>Assumptions</strong><p>{{ assumptions }}</p></div>
+    </div>
+  </details>
+{%- endmacro %}
 {% block title %}5·8 — RavenPack Fine-Tuning{% endblock %}
 {% block content %}
   <div class="card">
@@ -9,6 +21,18 @@
       baseline, five for a multi-stock pilot, or more for a pooled run — all selected tickers
       are concatenated into one shuffled dataset, not trained sequentially.
     </p>
+    <details class="methodology-panel section-overview">
+      <summary>Section 5 research summary: data contract, workflow, assumptions, and risks</summary>
+      <div class="overview-stack">
+        <div><strong>Goal</strong><p>Adapt a PhraseBank DistilBERT sentiment classifier to RavenPack financial headlines, select checkpoints without test-set tuning, and measure temporal and cross-stock generalization.</p></div>
+        <div><strong>Primary inputs and schema</strong><p><code>data/raw/news/ravenpack/{ticker}_articles_2003_2014.parquet</code>. Fields consumed: <code>ticker: string</code>, <code>headline: string</code>, <code>article_date: timestamp</code> (or fallback <code>article_time: timestamp</code>), <code>event_sentiment_score: float64</code>, and <code>story_id: string</code> (or <code>rp_story_id: string</code>). Additional market and topic columns may be present but are not model features.</p></div>
+        <div><strong>Initialization source</strong><p><code>data/models/phrasebank_distilbert_best/</code>: <code>model.safetensors</code>, <code>config.json</code>, tokenizer files, and <code>metrics.json</code>. The classifier consumes headline text only; RavenPack metadata supplies labels and split/audit keys.</p></div>
+        <div><strong>Outputs and schema</strong><p><code>data/models/ravenpack_distilbert_best/</code> contains weights and tokenizer artifacts plus <code>metrics.json</code> with <code>tickers: list[string]</code>, <code>dataset_paths: list[string]</code>, hyperparameters, <code>validation/test: {eval_loss, eval_accuracy, eval_f1, ...}</code>, <code>per_ticker_test: map[ticker, metrics]</code>, device, timestamps, and W&amp;B identifiers. <code>provenance.json</code> records reproducibility metadata.</p></div>
+        <div><strong>What the notebook does</strong><p><code>notebooks/finetune_on_ravenpack.ipynb</code> calls the same shared pipeline as this page: discovers local exports, normalizes and deduplicates headlines, converts RavenPack scores to negative/neutral/positive labels, creates temporal splits, tokenizes text, fine-tunes DistilBERT, selects by validation macro-F1, evaluates once on test data, and saves artifacts. The web app adds background execution, pause/resume, caching, and live W&amp;B links.</p></div>
+        <div><strong>Core assumptions</strong><p>RavenPack event sentiment is a valid three-class target; a headline is sufficient input; train ≤2011, validation=2012, and test ≥2013 represent deployment order; global story/headline deduplication prevents leakage; PhraseBank and RavenPack label IDs are aligned.</p></div>
+        <div class="risk-block"><strong>Risks</strong><p>Vendor-label noise and threshold choice can bias results; repeated or syndicated stories may evade normalization; company/time coverage is uneven; temporal drift can lower future performance; pooled training can hide weak stocks; hyperparameter iteration against reported test scores would contaminate the holdout; cached benchmarks are valid only for unchanged hashes and source files.</p></div>
+      </div>
+    </details>
     <p><a class="btn btn-secondary wandb-link" href="{{ wandb.url }}" target="_blank" rel="noopener">↗ Open {{ 'checkpoint run' if wandb.run_url else 'project' }} in Weights &amp; Biases</a></p>
 
     {% if not deps.finetuning_deps_available %}
@@ -57,6 +81,42 @@
             hx-target="#train-status"
             hx-swap="innerHTML">
 
+        <section class="expansion-panel">
+          <h2>20-stock expansion run</h2>
+          <p>
+            A wider pooled model is trained jointly on the original five stocks plus fifteen
+            additional companies. The preserved five-stock checkpoint remains at
+            <code>data/models/ravenpack_distilbert_5stock</code> for reproducible comparisons.
+          </p>
+          {{ methodology(
+            'Train a broader sentiment classifier while preserving the earlier five-stock model as a fixed comparison point.',
+            '<code>data/raw/news/ravenpack/{ticker}_articles_2003_2014.parquet</code> for the displayed stocks. Consumed schema: <code>{ticker:string, headline:string, article_date|article_time:timestamp, event_sentiment_score:float64, story_id|rp_story_id:string}</code>. Initialization: <code>data/models/phrasebank_distilbert_best/</code>.',
+            '<code>data/models/ravenpack_distilbert_best/</code>: <code>model.safetensors</code>, model/tokenizer JSON, <code>training_args.bin</code>, <code>provenance.json</code>, and <code>metrics.json</code> schema <code>{tickers:list[string], dataset_paths:list[string], validation/test:metric-map, per_ticker_test:map, wandb_*:string}</code>.',
+            'Pools all 20 stocks into one dataset, applies the common temporal split, shuffles within training, and fine-tunes jointly rather than sequentially.',
+            'RavenPack labels are valid targets; the temporal cutoff represents future generalization; duplicate stories/headlines must not cross splits; the 20-stock universe represents the intended adaptation domain.'
+          ) }}
+          <div class="ticker-chip-list">{% for ticker in twenty_stock_tickers %}<code>{{ ticker }}</code>{% endfor %}</div>
+          {% if not twenty_stock_coverage.error %}
+            <div class="metric-row">
+              <div class="metric"><span class="metric-label">Training</span><span class="metric-value">{{ "{:,}".format(twenty_stock_coverage.train_rows) }}</span></div>
+              <div class="metric"><span class="metric-label">Validation</span><span class="metric-value">{{ "{:,}".format(twenty_stock_coverage.val_rows) }}</span></div>
+              <div class="metric"><span class="metric-label">Test</span><span class="metric-value">{{ "{:,}".format(twenty_stock_coverage.test_rows) }}</span></div>
+            </div>
+            <div class="alert {{ 'alert-success' if twenty_stock_coverage.leakage.passed else 'alert-error' }}">
+              <strong>Leakage audit:</strong> {{ 'passed — zero story/headline overlap across temporal splits.' if twenty_stock_coverage.leakage.passed else 'failed — do not train.' }}
+            </div>
+          {% endif %}
+          <button type="button" class="btn btn-secondary" onclick="selectTwentyStockPool()">Select 20-stock expansion</button>
+        </section>
+
+        <h2>Configure a fine-tuning run</h2>
+        {{ methodology(
+          'Define a reproducible single-stock or pooled multi-stock training experiment.',
+          'Files: <code>data/raw/news/ravenpack/{ticker}_articles_*.parquet</code> plus optional <code>data/models/phrasebank_distilbert_best/</code>. Form schema: <code>{tickers:list[string], init_from_phrasebank:boolean, num_train_epochs:int[1..20]}</code>.',
+          'Job request and state files under <code>data/models/_finetune_runs/{job_id}_*.json</code>. Request schema: <code>{tickers:list[string], epochs:int, init_from_phrasebank:boolean, resume_from_checkpoint?:string}</code>.',
+          'Combines selected tickers before training, initializes from PhraseBank when selected, then sends the fixed configuration to the background trainer.',
+          'Every selected ticker has headline-bearing data; labels use the same three-class mapping; pooled training is desired instead of sequential adaptation.'
+        ) }}
         <label for="tickers"><strong>Tickers to train on</strong></label>
         <div class="alert alert-info">
           <strong>Recommended pooled five-stock pilot:</strong> {{ five_stock_tickers|join(', ') }}.
@@ -99,6 +159,13 @@
         </div>
 
         <h3>Dataset coverage</h3>
+        {{ methodology(
+          'Audit the proposed experiment data before training.',
+          '<code>data/raw/news/ravenpack/{ticker}_articles_*.parquet</code>; consumed schema <code>{ticker:string, headline:string, article_date|article_time:timestamp, event_sentiment_score:float64, story_id|rp_story_id:string}</code>. Derived in memory: <code>{label_name:string, label:int8, headline_key:string, split:string}</code>.',
+          'No new dataset file is written. The rendered coverage schema is <code>{total_labeled:int, splits:[{split:string, rows,negative,neutral,positive:int, start_date,end_date:date}], per_ticker:[{ticker:string,labeled,train,val,test:int}], leakage:{passed:boolean, story_ids_crossing_splits,headlines_crossing_splits,rows:int,tickers:list[string]}}</code>.',
+          'Assigns train through 2011, validation in 2012, and test from 2013 onward, then checks for duplicate identifiers or normalized headlines across splits.',
+          'Article timestamps are accurate; temporal splitting is appropriate; normalized duplicate headlines represent leakage; missing dates cannot be safely assigned.'
+        ) }}
         <div id="coverage-table">
           {% include "partials/coverage_table.html" %}
         </div>
@@ -107,6 +174,13 @@
       </form>
 
       <h3>Training status</h3>
+      {{ methodology(
+        'Monitor execution, preserve recoverability, and identify the saved checkpoint.',
+        '<code>data/models/_finetune_runs/{job_id}_status.json</code> and control JSON. Status schema: <code>{status, phase, message:string, step,total_steps:int, epoch,pct,loss:float, loss_history, eval_history:list[object], checkpoint_path?:string, run_url?:string}</code>.',
+        'Final files: <code>data/models/ravenpack_distilbert_best/{model.safetensors,config.json,tokenizer.json,tokenizer_config.json,training_args.bin,metrics.json,provenance.json}</code>; run copy: <code>data/models/_finetune_runs/{job_id}_metrics.json</code>. Metrics schema includes validation/test and per-ticker metric maps.',
+        'Reads disk-backed worker state while training proceeds; pausing requests a safe checkpoint, and completion exposes the best validation-macro-F1 model.',
+        'Worker status is current; validation macro-F1 is the model-selection criterion; test metrics are inspected only after selection; ETA can vary.'
+      ) }}
       <div id="train-status">
         {% include "partials/train_status.html" with context %}
       </div>
@@ -116,16 +190,23 @@
         <h2>Out-of-domain and cross-stock benchmark</h2>
         <p class="muted">
           Compare the out-of-the-box PhraseBank model, the AAPL-only model, and the pooled five-stock
-          model on the exact same 2013–2014 headlines from five stocks excluded from all fine-tuning.
+          and twenty-stock models on the exact same 2013–2014 headlines excluded from all fine-tuning.
           The OOD test set is never used for training or checkpoint selection.
         </p>
+        {{ methodology(
+          'Measure whether broader RavenPack fine-tuning improves sentiment classification on companies never seen during adaptation.',
+          'Checkpoints: <code>data/models/{phrasebank_distilbert_best,ravenpack_distilbert_best.bak-20260705-checkpoint,ravenpack_distilbert_5stock,ravenpack_distilbert_best}/</code>. OOD files: <code>data/raw/news/ravenpack/{ood_ticker}_articles_*.parquet</code> with the same headline/label/date/story schema.',
+          'Persistent file: <code>data/models/_benchmark_cache/ood_{content_hash}.json</code>. Schema: <code>{baskets:list[{name,tickers,models}], averages:list[{id,title,sha,macro_f1,accuracy,total_rows}], best, baseline, charts:{macro_f1,accuracy,ticker_heatmap}:html, cache_hit:boolean, cached_at:datetime}</code>.',
+          'Runs inference for every checkpoint on every basket without refitting, computes metrics against RavenPack labels, averages basket scores equally, and persistently caches charts and tables by checkpoint SHA plus source-file state.',
+          'None of the 15 companies appears in the 20-stock training universe; labels are comparable across stocks; equal basket weighting is intended; unchanged model/data fingerprints make cached results reusable.'
+        ) }}
         <div class="alert alert-success">
           <strong>Three strict stock-domain OOD baskets:</strong> all 15 stocks are unique and none
-          appears in the training universe (AAPL, MSFT, JPM, XOM, JNJ). Results use 2013–2014 only,
+          appears in the full 20-stock training universe. Results use 2013–2014 only,
           and the headline reports the unweighted average of the three basket-level scores.
         </div>
         <div class="ood-basket-grid">{% for name, tickers in ood_baskets.items() %}<div><strong>{{ name }}</strong><span>{{ tickers|join(', ') }}</span></div>{% endfor %}</div>
-        {% if comparison_models|length >= 3 %}
+        {% if comparison_models|length >= 4 %}
           <form hx-post="/finetune/compare" hx-target="#model-comparison-status" hx-swap="innerHTML">
             {% for model in comparison_models %}<input type="hidden" name="model_ids" value="{{ model.id }}">{% endfor %}
             <div class="benchmark-model-list">
@@ -135,7 +216,7 @@
           </form>
           <div id="model-comparison-status"><p class="muted">No comparison run yet.</p></div>
         {% else %}
-          <div class="alert alert-info">All three checkpoints are required: PhraseBank, AAPL-only, and five-stock.</div>
+          <div class="alert alert-info">All four checkpoints are required: PhraseBank, AAPL-only, five-stock, and twenty-stock.</div>
         {% endif %}
       </section>
     {% endif %}
@@ -145,6 +226,12 @@
 <script>
   function selectFiveStockPilot() {
     const wanted = new Set({{ five_stock_tickers|tojson }});
+    const picker = document.getElementById('tickers');
+    for (const option of picker.options) option.selected = wanted.has(option.value);
+    picker.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  function selectTwentyStockPool() {
+    const wanted = new Set({{ twenty_stock_tickers|tojson }});
     const picker = document.getElementById('tickers');
     for (const option of picker.options) option.selected = wanted.has(option.value);
     picker.dispatchEvent(new Event('change', { bubbles: true }));

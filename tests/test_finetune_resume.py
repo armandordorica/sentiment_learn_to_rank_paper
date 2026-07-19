@@ -212,6 +212,41 @@ def test_compare_checkpoints_uses_same_test_split(monkeypatch):
     assert result["models"][1]["domain_label"] == "Held-out, in-universe tickers"
 
 
+def test_ood_baskets_exclude_full_twenty_stock_training_universe():
+    ood_tickers = {
+        ticker
+        for basket in rp.DEFAULT_OOD_BASKETS.values()
+        for ticker in basket
+    }
+    assert len(ood_tickers) == 15
+    assert ood_tickers.isdisjoint(rp.DEFAULT_TWENTY_STOCK_TICKERS)
+
+
+def test_comparison_models_keep_five_and_twenty_stock_checkpoints_distinct(tmp_path, monkeypatch):
+    model_ids = [
+        "phrasebank_distilbert_best",
+        "ravenpack_distilbert_best.bak-20260705-checkpoint",
+        "ravenpack_distilbert_5stock",
+        "ravenpack_distilbert_best",
+    ]
+    models_root = tmp_path / "data" / "models"
+    for model_id in model_ids:
+        path = models_root / model_id
+        path.mkdir(parents=True)
+        (path / "model.safetensors").write_bytes(b"weights")
+    monkeypatch.setattr(rp, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(rp, "model_is_saved", lambda path: True)
+    monkeypatch.setattr(
+        rp, "_available_models",
+        lambda: [{"id": model_id, "weights_sha_short": model_id[:12]} for model_id in model_ids],
+    )
+
+    models = rp.comparison_models()
+    assert [model["id"] for model in models] == model_ids
+    assert models[2]["trained_tickers"] == rp.DEFAULT_FIVE_STOCK_TICKERS
+    assert models[3]["trained_tickers"] == rp.DEFAULT_TWENTY_STOCK_TICKERS
+
+
 def test_three_basket_ood_benchmark_averages_baskets_and_builds_graphs(monkeypatch):
     monkeypatch.setattr(rp, "DEFAULT_OOD_BASKETS", {
         "Basket 1": ["AAA"], "Basket 2": ["BBB"], "Basket 3": ["CCC"],
@@ -231,9 +266,32 @@ def test_three_basket_ood_benchmark_averages_baskets_and_builds_graphs(monkeypat
         return {"models": models, "tickers": tickers}
 
     monkeypatch.setattr(rp, "compare_checkpoints", fake_compare)
-    result = rp.compare_ood_baskets(["base", "adapted"])
+    result = rp.compare_ood_baskets(["base", "adapted"], use_cache=False)
     assert result["averages"][0]["macro_f1"] == pytest.approx(0.6)
     assert result["averages"][1]["macro_f1"] == pytest.approx(0.7)
     assert result["best"]["id"] == "adapted"
     assert "Plotly.newPlot" in result["charts"]["macro_f1"]
     assert "Plotly.newPlot" in result["charts"]["ticker_heatmap"]
+
+
+def test_ood_benchmark_reuses_persistent_cache(tmp_path, monkeypatch):
+    cache_path = tmp_path / "benchmark.json"
+    monkeypatch.setattr(rp, "_ood_cache_path", lambda model_ids: cache_path)
+    calls = []
+
+    def fake_compare(tickers, model_ids, job=None):
+        calls.append(tickers)
+        model = {
+            "id": "base", "title": "Base", "sha": "abc", "description": "baseline",
+            "n_rows": 10, "macro_f1": 0.5, "accuracy": 0.6,
+            "per_ticker": [{"ticker": ticker, "macro_f1": 0.5} for ticker in tickers],
+        }
+        return {"models": [model], "tickers": tickers}
+
+    monkeypatch.setattr(rp, "compare_checkpoints", fake_compare)
+    first = rp.compare_ood_baskets(["base"])
+    second = rp.compare_ood_baskets(["base"])
+    assert len(calls) == 3
+    assert first["cache_hit"] is False
+    assert second["cache_hit"] is True
+    assert second["charts"] == first["charts"]
