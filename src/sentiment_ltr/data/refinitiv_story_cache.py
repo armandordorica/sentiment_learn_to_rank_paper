@@ -1,9 +1,10 @@
 """Cache Refinitiv full story bodies on disk for offline inspection.
 
 Headlines live in parquet with ``storyId``; full wire text is only available via
-``ld.news.get_story``. This module saves each body under
-``data/raw/data_explorer_full_stories/{TICKER}/`` and keeps a per-ticker
-manifest so pulls can resume and coverage stays accurate.
+``ld.news.get_story``. Bodies are saved under
+``data/raw/data_explorer_full_stories/{TICKER}/`` as
+``{YYYY-MM-DD_HHMMSS}_{headline-slug}--{digest}.txt`` so folders sort by article
+time for manual window checks. A per-ticker manifest keeps pulls resumable.
 """
 
 from __future__ import annotations
@@ -34,9 +35,32 @@ def story_digest(story_id: str) -> str:
     return hashlib.sha256(str(story_id).encode("utf-8")).hexdigest()[:12]
 
 
-def story_filename(story_id: str, headline: str) -> str:
+def format_story_timestamp(story_time: Any) -> str:
+    """Filesystem-safe stamp for sorting / manual window checks (``YYYY-MM-DD_HHMMSS``)."""
+    if story_time is None:
+        return "undated"
+    try:
+        if isinstance(story_time, float) and pd.isna(story_time):
+            return "undated"
+        ts = pd.Timestamp(story_time)
+    except Exception:
+        return "undated"
+    if pd.isna(ts):
+        return "undated"
+    if getattr(ts, "tzinfo", None) is not None:
+        ts = ts.tz_convert("UTC").tz_localize(None)
+    return ts.strftime("%Y-%m-%d_%H%M%S")
+
+
+def story_filename(
+    story_id: str,
+    headline: str,
+    story_time: Any = None,
+) -> str:
+    """Name on disk: ``{stamp}_{slug}--{digest}.txt`` (stamp sorts by article time)."""
+    stamp = format_story_timestamp(story_time)
     slug = re.sub(r"[^a-z0-9]+", "-", str(headline or "").lower()).strip("-")[:80] or "refinitiv-story"
-    return f"{slug}--{story_digest(story_id)}.txt"
+    return f"{stamp}_{slug}--{story_digest(story_id)}.txt"
 
 
 def story_path(
@@ -44,9 +68,31 @@ def story_path(
     ticker: str,
     story_id: str,
     headline: str = "",
+    story_time: Any = None,
 ) -> Path:
     clean = str(ticker or "UNKNOWN").upper().strip()
-    return full_story_root(project_root) / clean / story_filename(story_id, headline)
+    return full_story_root(project_root) / clean / story_filename(
+        story_id, headline, story_time=story_time
+    )
+
+
+def digest_from_story_filename(name: str) -> str:
+    stem = Path(name).stem
+    return stem.rsplit("--", 1)[-1] if "--" in stem else stem
+
+
+def find_cached_story_path(
+    project_root: Path,
+    ticker: str,
+    story_id: str,
+) -> Path | None:
+    """Locate an existing body by digest (works for legacy and timestamped names)."""
+    digest = story_digest(story_id)
+    directory = full_story_root(project_root) / str(ticker).upper().strip()
+    if not directory.is_dir():
+        return None
+    matches = sorted(directory.glob(f"*--{digest}.txt"))
+    return matches[0] if matches else None
 
 
 def write_story_file(
@@ -56,10 +102,13 @@ def write_story_file(
     headline: str,
     ticker: str,
     text: str,
+    story_time: Any = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    stamp = format_story_timestamp(story_time)
     path.write_text(
-        f"Headline: {headline}\nStory ID: {story_id}\nTicker: {ticker}\n\n{text}\n",
+        f"Headline: {headline}\nStory ID: {story_id}\nTicker: {ticker}\n"
+        f"Date: {stamp}\n\n{text}\n",
         encoding="utf-8",
     )
 
@@ -70,8 +119,7 @@ def digests_on_disk(project_root: Path, ticker: str) -> set[str]:
     if not directory.is_dir():
         return found
     for path in directory.glob("*.txt"):
-        stem = path.stem
-        found.add(stem.rsplit("--", 1)[-1] if "--" in stem else stem)
+        found.add(digest_from_story_filename(path.name))
     return found
 
 
@@ -205,13 +253,18 @@ def cache_refinitiv_stories(
         for idx, row in pending.iterrows():
             story_id = str(row.get("storyId") or "").strip()
             headline = str(row.get("headline") or "")
-            path = story_path(project_root, ticker, story_id, headline)
+            story_time = row.get("date") if "date" in pending.columns else None
+            existing = None if force else find_cached_story_path(project_root, ticker, story_id)
+            path = existing or story_path(
+                project_root, ticker, story_id, headline, story_time=story_time
+            )
             item_t0 = time.monotonic()
             try:
-                if path.exists() and not force:
-                    text = path.read_text(encoding="utf-8")
+                if existing is not None and existing.exists() and not force:
+                    text = existing.read_text(encoding="utf-8")
                     status = "cached"
                     cached_hits += 1
+                    path = existing
                 else:
                     text = fetch_refinitiv_story(project_root, story_id, ld_module=ld)
                     write_story_file(
@@ -220,6 +273,7 @@ def cache_refinitiv_stories(
                         headline=headline,
                         ticker=ticker,
                         text=text,
+                        story_time=story_time,
                     )
                     status = "fetched"
                     fetched += 1
@@ -282,3 +336,58 @@ def cache_refinitiv_stories(
     if progress_callback:
         progress_callback(summary)
     return summary
+
+
+_TIMESTAMPED_NAME = re.compile(r"^\d{4}-\d{2}-\d{2}(?:_\d{6})?_")
+
+
+def rename_legacy_story_files(
+    project_root: Path,
+    ticker: str,
+    news: pd.DataFrame,
+) -> dict[str, int]:
+    """Rename ``slug--digest.txt`` files to ``{stamp}_{slug}--digest.txt`` using news dates.
+
+    Already-timestamped names are left alone. Returns counts renamed / skipped / missing.
+    """
+    ticker = str(ticker).upper().strip()
+    directory = full_story_root(project_root) / ticker
+    renamed = 0
+    skipped = 0
+    missing_meta = 0
+    if not directory.is_dir() or news is None or news.empty or "storyId" not in news.columns:
+        return {"renamed": 0, "skipped": 0, "missing_meta": 0}
+
+    meta: dict[str, tuple[str, Any, str]] = {}
+    for _, row in news.iterrows():
+        sid = str(row.get("storyId") or "").strip()
+        if not sid or sid == "nan":
+            continue
+        digest = story_digest(sid)
+        if digest in meta:
+            continue
+        meta[digest] = (
+            sid,
+            row.get("date") if "date" in news.columns else None,
+            str(row.get("headline") or ""),
+        )
+
+    for path in sorted(directory.glob("*.txt")):
+        if _TIMESTAMPED_NAME.match(path.name):
+            skipped += 1
+            continue
+        digest = digest_from_story_filename(path.name)
+        info = meta.get(digest)
+        if info is None:
+            missing_meta += 1
+            continue
+        story_id, story_time, headline = info
+        if not headline and "--" in path.stem:
+            headline = path.stem.rsplit("--", 1)[0].replace("-", " ")
+        target = directory / story_filename(story_id, headline, story_time=story_time)
+        if target == path or target.exists():
+            skipped += 1
+            continue
+        path.rename(target)
+        renamed += 1
+    return {"renamed": renamed, "skipped": skipped, "missing_meta": missing_meta}

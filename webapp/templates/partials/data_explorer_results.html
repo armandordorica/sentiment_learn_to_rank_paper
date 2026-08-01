@@ -2,14 +2,16 @@
 {% elif check_only %}
 <div class="card result-card">
   <h3>Cache check</h3>
-  {% include "partials/pull_report.html" %}
+  {% with messages=messages, story_cache_status=story_cache_status if story_cache_status is defined else none %}
+    {% include "partials/pull_report.html" %}
+  {% endwith %}
   {% if inventory %}{% include "partials/cache_inventory.html" %}{% endif %}
   <p class="muted">No charts loaded — click <strong>Load selected</strong> when ready.</p>
 </div>
 {% elif result %}
 <div class="card result-card">
   {% if result.pull_report %}
-    {% with messages=result.pull_report.messages %}
+    {% with messages=result.pull_report.messages, story_cache_status=result.pull_report.story_cache_status %}
       {% include "partials/pull_report.html" %}
     {% endwith %}
     {% if result.pull_report.inventory %}

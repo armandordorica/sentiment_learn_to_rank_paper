@@ -79,14 +79,12 @@
       <strong>Refinitiv · Full story bodies</strong> in <strong>1A</strong> and click
       <strong>Load selected</strong>.
     </p>
-    <div id="story-cache-status">
-      {% with story_cache_status=none, coverage=c %}
-        {% include "partials/story_cache_status.html" %}
-      {% endwith %}
-    </div>
+    {% with story_cache_status=none, coverage=c, status_dom_id="story-cache-status-1b" %}
+      {% include "partials/story_cache_status.html" %}
+    {% endwith %}
     <button type="button" class="btn btn-secondary btn-small"
-            hx-get="/data-explorer/cache-stories/status?ticker={{ c.ticker }}"
-            hx-target="#story-cache-status"
-            hx-swap="innerHTML">Refresh pull status</button>
+            hx-get="/data-explorer/cache-stories/status?ticker={{ c.ticker }}&dom_id=story-cache-status-1b"
+            hx-target="#story-cache-status-1b"
+            hx-swap="outerHTML">Refresh pull status</button>
   </div>
 {% endif %}

@@ -28,7 +28,7 @@ To reproduce the exact paper, you need access to those datasets or archived equi
 
 ## Current State & Development Log
 
-*Last updated: June 2026*
+*Last updated: August 2026*
 
 This section records what has been built so far, what is working end-to-end, and what remains before the paper's learning-to-rank backtest can run.
 
@@ -72,6 +72,28 @@ data/raw/data_explorer_top1k/by_ticker/rank_XXXX_TICKER/
 ```
 
 Runs are resumable: completed tickers are skipped; **smart partial retry** re-fetches only providers that failed while preserving already-ok parquet files.
+
+**Refinitiv full story bodies (one stock)** — headline parquet has `storyId` but **no body**. Wire text is fetched via `ld.news.get_story` into:
+
+```text
+data/raw/data_explorer_full_stories/{TICKER}/
+├── {YYYY-MM-DD_HHMMSS}_{headline-slug}--{12-char-digest}.txt
+├── _pull_progress.json
+├── _pull.log
+└── _manifest.jsonl
+```
+
+Example: `2003-01-07_212758_apple-unveils-widescreen-laptop-new-web-browser--718a77497fac.txt`. Sort the folder by name to verify a date window by eye. Cache identity is the **digest** (hash of `storyId`); renaming or re-pulling does not duplicate bodies.
+
+| Goal | How |
+| --- | --- |
+| Smoke-test a short window | Data Explorer **1A**: ticker + dates → check **Refinitiv · Full story bodies** → **Load selected**. Status auto-refreshes every 2s; then **Check cache only** for 6/6. |
+| Overnight / long window (CLI) | With LSEG Workspace signed in: `PYTHONPATH=src:. python -u scripts/cache_refinitiv_full_stories.py --ticker AAPL --start 2003-01-01 --end 2014-12-31 --sleep 0.25` |
+| Progress / status | `python scripts/cache_refinitiv_full_stories.py --ticker AAPL --status` or read `_pull_progress.json` |
+| Rename legacy files (no stamp) | `python scripts/cache_refinitiv_full_stories.py --ticker AAPL --start 2003-01-01 --end 2014-12-31 --rename-legacy` |
+| Code | `src/sentiment_ltr/data/refinitiv_story_cache.py`, `scripts/cache_refinitiv_full_stories.py`, UI in `webapp/api/data_explorer.py` |
+
+**AAPL reality check (paper window):** ~27k Refinitiv headlines; full bodies are on-demand (~27k LSEG calls if you pull all). RavenPack has ~311k entity rows; only ~69k (~22%) have short `event_text` — that may be enough for headline/`event_text` modeling without pulling every Refinitiv body.
 
 **Identifier handling** — pulls are keyed on **CRSP PERMNO** from the universe file, not just the displayed ticker. Renamed symbols (e.g. FB→META) resolve via CRSP name history; RavenPack entity lookup uses PERMNO where available.
 
@@ -152,17 +174,20 @@ code does. Keep it updated as part of every commit (see
 | 2026-08-01 | **Softer Refinitiv↔RavenPack headline match + FULL-ARTICLE note** — soft-match now takes the max of token Jaccard, content-token overlap (≥2 shared non-stopwords), and `SequenceMatcher` ratio so rewritten same-story titles (Sony *Interview* pay-TV vs cable/satellite) clear the 0.45 threshold; RavenPack 1E inspect explains that `news_type=FULL-ARTICLE` is not a WRDS wire body. *Decision:* keep the threshold, enrich the score. *Why:* desks rewrite headlines; RavenPack still only exposes headline/`event_text`, never the Reuters story. |
 | 2026-08-01 | **RavenPack list search + soft-match comparison view** — Data Explorer **1E** RavenPack article list gained headline filter/sort/top-N (HTMX, same pattern as Refinitiv); added **1F Soft-match comparison** with `date_refinitiv` / `date_ravenpack` / `headline_refinitiv` / `headline_ravenpack` (+ score, relevance) and Full tables moved to **1G**. Soft-match table builds on Apply/filter (not on Load data). *Decision:* Refinitiv-driven matching inside a time window only (no corpus-wide fallback). *Why:* make rewritten same-story pairs inspectable (e.g. filter `sony`) without inventing timestamp-only joins or slowing Load data on dense tickers. |
 | 2026-08-01 | **One-stock field coverage in Data Explorer 1B** — after Load data, **1B** shows per-field filled/missing/% for the selected ticker and date window (Refinitiv headline fields + on-disk full story bodies; RavenPack headline/`event_text`/relevance/taxonomy). *Decision:* coverage is window-scoped to the loaded query, not the whole repo. *Why:* clarify that Refinitiv caches headlines+storyIds (bodies are on-demand) and RavenPack event fields are sparse (~22% tagged). |
-| 2026-08-01 | **Resumable Refinitiv full-story body cache** — added `src/sentiment_ltr/data/refinitiv_story_cache.py` + `scripts/cache_refinitiv_full_stories.py` (and a Data Explorer 1B Start/resume control) to fetch all Refinitiv wire bodies for a ticker/window into `data/raw/data_explorer_full_stories/{TICKER}/`, skipping digests already on disk and writing `_pull_progress.json`. *Decision:* one LSEG session, sequential fetches with sleep, resume by filename digest. *Why:* headline parquet has no body; AAPL alone is ~27k live `get_story` calls, so the pull must be restartable and offline-readable afterward. |
-| 2026-08-01 | **Selective Load: service/field inventory + skip-if-cached** — Data Explorer **1A** now lists pull products (Refinitiv prices/headlines/full bodies, WRDS, Yahoo, RavenPack) with a live inventory table for the chosen ticker/window; **Check cache** / **Load selected** / **Re-pull live** only call APIs for missing bundles and print immediate “already exist for A→B” messages when local data covers the request; full story bodies queue the overnight resumable job. *Decision:* field-bundle checkboxes over coarse provider toggles. *Why:* overnight pulls and repeated loads need an explicit cache contract so ready data is instantaneous and only gaps are fetched. |
-| 2026-08-01 | **RavenPack event_text browse + coverage layout** — 1E list gained **Only with event_text** (AAPL ≈68k/311k) and an `event_text` column; 1B coverage tables stack vertically with wrapping notes so field labels no longer mid-break or overlap. *Decision:* stack over cramped side-by-side. *Why:* event snippets are the usable RavenPack text corpus; coverage must stay readable. |
+| 2026-08-01 | **Resumable Refinitiv full-story body cache** — `src/sentiment_ltr/data/refinitiv_story_cache.py` + `scripts/cache_refinitiv_full_stories.py`; Data Explorer queues the same job when **Full story bodies** is selected. Files land under `data/raw/data_explorer_full_stories/{TICKER}/` with `_pull_progress.json` / `_pull.log` / `_manifest.jsonl`. *Decision:* one LSEG session, sequential `get_story` with sleep, resume by storyId digest (not by filename stem alone). *Why:* headline parquet has no body; AAPL paper window is ~27k live calls — must be restartable and offline-readable. Smoke-tested AAPL `2003-01-01→2003-01-10` (9/9 bodies in ~5.5s). |
+| 2026-08-01 | **Selective Load: service/field inventory + skip-if-cached** — Data Explorer **1A** lists pull products (Refinitiv prices/headlines/full bodies, WRDS, Yahoo, RavenPack) with a live inventory table; **Check cache** / **Load selected** / **Re-pull live** skip ready bundles and print “already exist for A→B”; full bodies queue the background job. *Decision:* field-bundle checkboxes over coarse provider toggles. *Why:* overnight pulls and repeated loads need an explicit cache contract. |
+| 2026-08-01 | **RavenPack event_text browse + coverage layout** — 1E list gained **Only with event_text** (AAPL ≈68k/311k) and an `event_text` column; 1B coverage tables stack vertically with wrapping notes. *Decision:* stack over cramped side-by-side. *Why:* event snippets are the usable RavenPack text corpus; coverage must stay readable. |
+| 2026-08-01 | **Full-story pull status auto-refresh** — after Load starts a story job, the UI polls `_pull_progress.json` every 2s and shows a green **completed** alert (previously only the blue “Started… pid” banner, so short smoke tests looked broken). *Decision:* HTMX poll like fine-tune/batch status. *Why:* jobs often finish in seconds for small windows; users must see success without reading the log by hand. |
+| 2026-08-01 | **Timestamped full-story filenames for manual inspection** — bodies are named `{YYYY-MM-DD_HHMMSS}_{slug}--{digest}.txt` (e.g. `2003-01-07_212758_apple-unveils-…--718a77497fac.txt`); file header includes `Date:`. Legacy `slug--digest.txt` files still count as cached (match by digest); `--rename-legacy` rewrites them using headline parquet dates. *Decision:* put article time first so Finder/ls sorts by window. *Why:* verify “do we have Jan 2003 bodies?” by scanning the folder without opening `_manifest.jsonl`. |
 
 ### Immediate Next Steps
 
-1. **Finish or validate the full 1k batch cache** — confirm WRDS + RavenPack coverage counts; use failure breakdown to separate expected delistings from real errors.
-2. **Apply the paper's news filter** — average ≥1 article/week over 2003–2014 (TRNA in paper; RavenPack or Refinitiv substitute here) to move from 1,000 → ~512 candidates.
-3. **Document corporate-events policy** — static vs point-in-time universe, delisting returns, when `partial` is acceptable for modeling.
-4. **Build the weekly feature panel** — sentiment aggregation, shock/trend, lagged returns, quartile labels.
-5. **Implement RankNet/ListNet and rolling backtest** — target paper Table 3 metrics.
+1. **Optional: overnight AAPL full-body pull** — only if you need Refinitiv wire text at scale; otherwise RavenPack `event_text` (~69k AAPL rows) may suffice. Run the CLI above with Workspace signed in; leave the terminal open overnight.
+2. **Finish or validate the full 1k batch cache** — confirm WRDS + RavenPack coverage counts; use failure breakdown to separate expected delistings from real errors.
+3. **Apply the paper's news filter** — average ≥1 article/week over 2003–2014 (TRNA in paper; RavenPack or Refinitiv substitute here) to move from 1,000 → ~512 candidates.
+4. **Document corporate-events policy** — static vs point-in-time universe, delisting returns, when `partial` is acceptable for modeling.
+5. **Build the weekly feature panel** — sentiment aggregation, shock/trend, lagged returns, quartile labels.
+6. **Implement RankNet/ListNet and rolling backtest** — target paper Table 3 metrics.
 
 ## Target Results From The Paper
 

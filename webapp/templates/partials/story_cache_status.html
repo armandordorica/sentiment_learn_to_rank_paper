@@ -14,17 +14,46 @@
     ) %}
   {% endif %}
 {% endif %}
-{% if status and status.progress %}
-  <p class="muted">
-    Pull status: <strong>{{ status.progress.status or "—" }}</strong>
-    · on disk {{ "{:,}".format(status.files_on_disk) }}
-    · fetched {{ status.progress.fetched or 0 }}
-    · failed {{ status.progress.failed or 0 }}
-    · elapsed {{ status.progress.elapsed_s or 0 }}s
-    {% if status.progress.pending_this_run %}
-      · processed {{ status.progress.processed or 0 }}/{{ status.progress.pending_this_run }}
+{% set prog = status.progress if status and status.progress else none %}
+{% set ticker_q = (status.ticker if status and status.ticker else (coverage.ticker if coverage is defined else "AAPL")) %}
+{% set running = prog and prog.status in ["starting", "running"] %}
+{% set status_dom_id = status_dom_id if status_dom_id is defined else "story-cache-status" %}
+<div id="{{ status_dom_id }}"
+     {% if running %}
+     hx-get="/data-explorer/cache-stories/status?ticker={{ ticker_q }}&dom_id={{ status_dom_id }}"
+     hx-trigger="load delay:2s"
+     hx-swap="outerHTML"
+     {% endif %}>
+  {% if prog %}
+    {% if prog.status == "completed" %}
+      <div class="alert alert-success">
+        Full-story pull <strong>completed</strong>
+        · fetched {{ prog.fetched or 0 }}
+        · failed {{ prog.failed or 0 }}
+        · {{ prog.processed or 0 }}/{{ prog.pending_this_run or 0 }} this run
+        · {{ prog.elapsed_s or 0 }}s
+        · {{ "{:,}".format(status.files_on_disk) }} bodies on disk for {{ ticker_q }}.
+        Click <strong>Check cache only</strong> to refresh the inventory.
+      </div>
+    {% elif prog.status in ["stopped", "error", "failed"] %}
+      <div class="alert alert-error">
+        Full-story pull <strong>{{ prog.status }}</strong>
+        · fetched {{ prog.fetched or 0 }} · failed {{ prog.failed or 0 }}
+        {% if prog.stop_reason %} · {{ prog.stop_reason }}{% endif %}
+        {% if prog.error %} · {{ prog.error }}{% endif %}
+      </div>
+    {% else %}
+      <div class="alert alert-info">
+        Full-story pull <strong>{{ prog.status or "running" }}</strong>
+        · on disk {{ "{:,}".format(status.files_on_disk) }}
+        · fetched {{ prog.fetched or 0 }}
+        · failed {{ prog.failed or 0 }}
+        · processed {{ prog.processed or 0 }}/{{ prog.pending_this_run or 0 }}
+        · {{ prog.elapsed_s or 0 }}s
+        {% if running %}<br><span class="muted">Auto-refreshing every 2s…</span>{% endif %}
+      </div>
     {% endif %}
-  </p>
-{% else %}
-  <p class="muted">No pull has been started yet for this ticker.</p>
-{% endif %}
+  {% else %}
+    <p class="muted">No pull has been started yet for this ticker.</p>
+  {% endif %}
+</div>

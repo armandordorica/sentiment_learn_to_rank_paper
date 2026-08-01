@@ -234,6 +234,7 @@ def data_explorer_query(
                     "check_only": True,
                     "messages": outcome["messages"],
                     "inventory": outcome["inventory"],
+                    "story_cache_status": outcome.get("story_cache_status"),
                 },
             )
         return templates.TemplateResponse(
@@ -372,7 +373,7 @@ def data_explorer_cache_stories(
         return templates.TemplateResponse(
             request,
             "partials/story_cache_status.html",
-            {"story_cache_status": status},
+            {"story_cache_status": status, "status_dom_id": "story-cache-status"},
         )
     except Exception as exc:  # noqa: BLE001
         return HTMLResponse(
@@ -385,12 +386,13 @@ def data_explorer_cache_stories(
 def data_explorer_cache_stories_status(
     request: Request,
     ticker: str = Query(default="AAPL"),
+    dom_id: str = Query(default="story-cache-status"),
 ) -> HTMLResponse:
     status = de.full_story_cache_status(ticker)
     return templates.TemplateResponse(
         request,
         "partials/story_cache_status.html",
-        {"story_cache_status": status},
+        {"story_cache_status": status, "status_dom_id": dom_id},
     )
 
 

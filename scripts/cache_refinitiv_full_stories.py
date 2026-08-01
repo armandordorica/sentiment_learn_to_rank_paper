@@ -32,6 +32,7 @@ from sentiment_ltr.data.refinitiv_story_cache import (  # noqa: E402
     digests_on_disk,
     headlines_needing_bodies,
     read_progress,
+    rename_legacy_story_files,
 )
 from webapp.api import data_explorer as de  # noqa: E402
 
@@ -46,6 +47,11 @@ def main() -> int:
     parser.add_argument("--force", action="store_true", help="Re-fetch even if a body file exists")
     parser.add_argument("--max-failures", type=int, default=50)
     parser.add_argument("--status", action="store_true", help="Print progress JSON and exit")
+    parser.add_argument(
+        "--rename-legacy",
+        action="store_true",
+        help="Rename existing slug--digest.txt files to include article timestamps, then exit",
+    )
     args = parser.parse_args()
 
     ticker = str(args.ticker).upper().strip()
@@ -63,6 +69,15 @@ def main() -> int:
     news = cached["providers"].get("refinitiv", {}).get("news")
     if news is None or news.empty:
         raise SystemExit(f"No Refinitiv headlines in cache for {ticker}.")
+
+    if args.rename_legacy:
+        result = rename_legacy_story_files(PROJECT_ROOT, ticker, news)
+        print(
+            f"Renamed {result['renamed']} · skipped {result['skipped']} · "
+            f"no headline meta {result['missing_meta']}",
+            flush=True,
+        )
+        return 0
 
     have = digests_on_disk(PROJECT_ROOT, ticker)
     pending = headlines_needing_bodies(news, PROJECT_ROOT, ticker, force=args.force)

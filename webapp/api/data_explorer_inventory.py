@@ -175,12 +175,7 @@ def inspect_inventory(
                     f"{start} → {end} (none in cache)."
                 )
             else:
-                digests = set()
-                story_dir = full_story_dir / ticker
-                if story_dir.is_dir():
-                    for path in story_dir.glob("*.txt"):
-                        stem = path.stem
-                        digests.add(stem.rsplit("--", 1)[-1] if "--" in stem else stem)
+                digests = digests_on_disk(project_root, ticker)
                 have = 0
                 if "storyId" in news.columns and digests:
                     for story_id in news["storyId"].astype(str):

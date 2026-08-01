@@ -26,7 +26,9 @@ from sentiment_ltr.data.ravenpack_match import (  # noqa: E402
 )
 from sentiment_ltr.data.refinitiv_queries import fetch_refinitiv_story  # noqa: E402
 from sentiment_ltr.data.refinitiv_story_cache import (  # noqa: E402
+    digest_from_story_filename,
     digests_on_disk,
+    find_cached_story_path,
     read_progress as read_story_pull_progress,
     story_path as cached_story_path,
     write_story_file,
@@ -314,8 +316,15 @@ def headlines_from_cache(
     return headlines
 
 
-def _story_path(story_id: str, headline: str, ticker: str) -> Path:
-    return cached_story_path(PROJECT_ROOT, ticker, story_id, headline)
+def _story_path(
+    story_id: str,
+    headline: str,
+    ticker: str,
+    story_date: str | None = None,
+) -> Path:
+    return cached_story_path(
+        PROJECT_ROOT, ticker, story_id, headline, story_time=story_date
+    )
 
 
 def _query_ravenpack_day(ticker: str, start: str, end: str) -> pd.DataFrame:
@@ -802,8 +811,12 @@ def load_story(
         raise ValueError("Select a Refinitiv headline with a story ID.")
     headline = str(headline or "Selected headline")
     clean_ticker = live_data.clean_ticker(ticker) or "UNKNOWN"
-    path = _story_path(story_id, headline, clean_ticker)
-    if path.exists() and not force_fetch:
+    existing = None if force_fetch else find_cached_story_path(
+        PROJECT_ROOT, clean_ticker, story_id
+    )
+    path = existing or _story_path(story_id, headline, clean_ticker, story_date)
+    if existing is not None and existing.exists() and not force_fetch:
+        path = existing
         raw = path.read_text(encoding="utf-8")
         marker = "\n\n"
         text = raw.split(marker, 1)[1].rstrip("\n") if marker in raw else raw
@@ -815,6 +828,7 @@ def load_story(
             headline=headline,
             ticker=clean_ticker,
             text=text,
+            story_time=story_date,
         )
     relative_path = str(path.relative_to(PROJECT_ROOT)) if path.is_relative_to(PROJECT_ROOT) else str(path)
     ravenpack: dict[str, Any] | None = None
@@ -868,8 +882,7 @@ def _refinitiv_story_body_coverage(news: pd.DataFrame, ticker: str) -> dict[str,
     digests: set[str] = set()
     if story_dir.is_dir():
         for path in story_dir.glob("*.txt"):
-            stem = path.stem
-            digests.add(stem.rsplit("--", 1)[-1] if "--" in stem else stem)
+            digests.add(digest_from_story_filename(path.name))
     with_body = 0
     if "storyId" in news.columns and digests:
         for story_id in news["storyId"].astype(str):
@@ -1161,10 +1174,10 @@ def selective_load(
                 messages.append({
                     "level": "info",
                     "text": (
-                        f"Started overnight Refinitiv full-story pull for {ticker} "
+                        f"Started background Refinitiv full-story pull for {ticker} "
                         f"{start} → {end} (pid {story_job['pid']}). "
                         f"{story.get('detail') or story.get('message') or ''} "
-                        "Existing bodies are skipped."
+                        "Existing bodies are skipped. Status auto-refreshes below."
                     ).strip(),
                 })
 
@@ -1197,6 +1210,7 @@ def selective_load(
             "inventory": inv,
             "messages": messages,
             "story_job": story_job,
+            "story_cache_status": full_story_cache_status(ticker) if flags["full_stories"] else None,
             "result": None,
         }
 
@@ -1297,12 +1311,14 @@ def selective_load(
                 raw["providers"][name] = live_block
 
     presented = present(raw)
+    story_status = full_story_cache_status(ticker) if story_job or flags["full_stories"] else None
     presented["pull_report"] = {
         "action": action,
         "messages": messages,
         "inventory": build_inventory(ticker, start, end),
         "selected_ids": selected_ids,
         "story_job": story_job,
+        "story_cache_status": story_status,
     }
     return {
         "mode": action,
@@ -1322,7 +1338,10 @@ def start_full_story_cache_job(
     sleep_s: float = 0.25,
 ) -> dict[str, Any]:
     """Launch ``scripts/cache_refinitiv_full_stories.py`` as a detached process."""
+    import json
     import subprocess
+    import threading
+    from datetime import datetime, timezone
 
     ticker = live_data.clean_ticker(ticker) or ticker.upper()
     script = PROJECT_ROOT / "scripts" / "cache_refinitiv_full_stories.py"
@@ -1336,8 +1355,31 @@ def start_full_story_cache_job(
     ]
     if limit is not None:
         cmd.extend(["--limit", str(int(limit))])
-    log_path = FULL_STORY_DIR / ticker / "_pull.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
+    story_dir = FULL_STORY_DIR / ticker
+    story_dir.mkdir(parents=True, exist_ok=True)
+    progress_path = story_dir / "_pull_progress.json"
+    # Mark queued immediately so the UI does not show a stale prior "completed".
+    progress_path.write_text(
+        json.dumps(
+            {
+                "ticker": ticker,
+                "status": "starting",
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "window_start": start,
+                "window_end": end,
+                "fetched": 0,
+                "failed": 0,
+                "processed": 0,
+                "pending_this_run": 0,
+                "elapsed_s": 0,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    log_path = story_dir / "_pull.log"
     log_file = log_path.open("a", encoding="utf-8")
     proc = subprocess.Popen(
         cmd,
@@ -1346,12 +1388,14 @@ def start_full_story_cache_job(
         stderr=subprocess.STDOUT,
         start_new_session=True,
     )
+    # Reap the child so short smoke-test jobs do not leave a zombie PID.
+    threading.Thread(target=proc.wait, name=f"story-pull-wait-{ticker}", daemon=True).start()
     return {
         "ticker": ticker,
         "pid": proc.pid,
         "cmd": cmd,
         "log_path": str(log_path),
-        "progress_path": str(FULL_STORY_DIR / ticker / "_pull_progress.json"),
+        "progress_path": str(progress_path),
     }
 
 
