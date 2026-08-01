@@ -1,0 +1,116 @@
+<section id="ft-analysis" class="finetune-analysis">
+  <h2>5·1–5·7 · AAPL before / after analysis</h2>
+  <p class="muted">
+    Domain-adaptation narrative for <strong>{{ analysis.ticker }}</strong> (rich RavenPack export).
+    Heavy scoring for 5·3–5·6 loads on demand so this page stays responsive.
+  </p>
+  <nav class="section-nav" aria-label="Section 5 analysis">
+    <a href="#rp-ft-51">5·1 Split</a>
+    <a href="#rp-ft-52">5·2 Tokenization</a>
+    <a href="#rp-ft-53">5·3–5·6 Before/after</a>
+    <a href="#rp-ft-57">5·7 Provenance</a>
+    <a href="#ft-train">5·8 Train</a>
+  </nav>
+
+  <section id="rp-ft-51">
+    <h3>5·1 · Time-based train / validation / test split</h3>
+    <p class="muted">Splits by calendar year only — no shuffle — matching the backtest direction (past → future).</p>
+    {% if analysis.split_error %}
+      <div class="alert alert-error">{{ analysis.split_error }}</div>
+    {% elif analysis.split %}
+      <div class="metric-row">
+        <div class="metric"><span class="metric-label">Train</span><span class="metric-value">{{ analysis.split.windows.train }}</span></div>
+        <div class="metric"><span class="metric-label">Validation</span><span class="metric-value">{{ analysis.split.windows.validation }}</span></div>
+        <div class="metric"><span class="metric-label">Test</span><span class="metric-value">{{ analysis.split.windows.test }}</span></div>
+      </div>
+      <div class="metric-row">
+        <div class="metric"><span class="metric-label">Train rows</span><span class="metric-value">{{ "{:,}".format(analysis.split.train_rows) }}</span></div>
+        <div class="metric"><span class="metric-label">Val rows</span><span class="metric-value">{{ "{:,}".format(analysis.split.val_rows) }}</span></div>
+        <div class="metric"><span class="metric-label">Test rows</span><span class="metric-value">{{ "{:,}".format(analysis.split.test_rows) }}</span></div>
+      </div>
+      <details>
+        <summary>Full split breakdown (class counts)</summary>
+        <p class="muted">Label rule: <code>event_sentiment_score</code> threshold ±{{ analysis.split.threshold }}.</p>
+        <table class="data-table">
+          <thead><tr>{% for col in analysis.split.splits_table[0].keys() %}<th>{{ col }}</th>{% endfor %}</tr></thead>
+          <tbody>
+            {% for row in analysis.split.splits_table %}
+              <tr>{% for col in row.keys() %}<td>{{ row[col] }}</td>{% endfor %}</tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        <div class="chart-cell">{{ analysis.split.chart_html|safe }}</div>
+      </details>
+    {% endif %}
+  </section>
+
+  <section id="rp-ft-52">
+    <h3>5·2 · Tokenization &amp; padding</h3>
+    <p class="muted">Identical tokenizer settings for PhraseBank and RavenPack checkpoints (warm-start inheritance).</p>
+    <div class="metric-row">
+      <div class="metric"><span class="metric-label">Tokenizer</span><span class="metric-value compact">{{ analysis.tokenization.tokenizer_class }}</span></div>
+      <div class="metric"><span class="metric-label">max_length</span><span class="metric-value">{{ analysis.tokenization.max_length }}</span></div>
+      <div class="metric"><span class="metric-label">Padding</span><span class="metric-value compact">{{ analysis.tokenization.padding }}</span></div>
+      <div class="metric"><span class="metric-label">Truncation</span><span class="metric-value">Yes</span></div>
+    </div>
+    <details>
+      <summary>Tokenization details</summary>
+      <table class="data-table">
+        <thead><tr><th>Setting</th><th>Value</th></tr></thead>
+        <tbody>
+          {% for row in analysis.tokenization.rows %}
+            <tr><td><code>{{ row.setting }}</code></td><td>{{ row.value }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </details>
+  </section>
+
+  <section id="rp-ft-53">
+    <h3>5·3–5·6 · Before &amp; after fine-tuning</h3>
+    <p class="muted">
+      Scores PhraseBank vs RavenPack checkpoints on the same {{ analysis.ticker }} 2013–2014 test rows
+      (macro-F1, per-class F1, prevalence, mismatch samples). First load runs inference and may take a minute.
+    </p>
+    <div id="before-after-panel"
+         hx-get="/finetune/before-after"
+         hx-trigger="load"
+         hx-swap="innerHTML"
+         hx-indicator="#before-after-spinner">
+      <p class="muted">Loading before/after analysis…</p>
+    </div>
+    <span id="before-after-spinner" class="htmx-indicator muted"> Scoring checkpoints…</span>
+  </section>
+
+  <section id="rp-ft-57">
+    <h3>5·7 · Hyperparameters &amp; provenance</h3>
+    {% set hp = analysis.hyperparams %}
+    {% if hp.has_metrics %}
+      <div class="metric-row">
+        <div class="metric"><span class="metric-label">Init</span><span class="metric-value compact">{{ hp.init_checkpoint }}</span></div>
+        <div class="metric"><span class="metric-label">Epochs</span><span class="metric-value">{{ hp.epochs }}</span></div>
+        <div class="metric"><span class="metric-label">Learning rate</span><span class="metric-value">{{ hp.learning_rate }}</span></div>
+        <div class="metric"><span class="metric-label">Batch size</span><span class="metric-value">{{ hp.batch_size }}</span></div>
+      </div>
+      <div class="metric-row">
+        <div class="metric"><span class="metric-label">Train loss</span><span class="metric-value">{% if hp.train_loss is not none %}{{ "%.4f"|format(hp.train_loss) }}{% else %}—{% endif %}</span></div>
+        <div class="metric"><span class="metric-label">Runtime</span><span class="metric-value">{% if hp.runtime_min is not none %}{{ "%.1f"|format(hp.runtime_min) }} min{% else %}—{% endif %}</span></div>
+        <div class="metric"><span class="metric-label">Device</span><span class="metric-value">{{ hp.device }}</span></div>
+        <div class="metric"><span class="metric-label">Tickers</span><span class="metric-value compact">{{ hp.tickers }}</span></div>
+      </div>
+      <details>
+        <summary>Full metrics.json</summary>
+        <pre class="json-block">{{ hp.metrics_json | tojson(indent=2) }}</pre>
+      </details>
+      {% if hp.provenance %}
+        <details>
+          <summary>Provenance snapshot</summary>
+          <p class="muted">Checkpoint <code>{{ hp.provenance.checkpoint_label }}</code> · git {{ hp.provenance.git_commit }} ({{ hp.provenance.git_branch }}){% if hp.provenance.git_dirty %} · dirty{% endif %}</p>
+          <p class="muted">Model dir: <code>{{ hp.provenance.model_dir }}</code> · generated {{ hp.provenance.generated_at }}</p>
+        </details>
+      {% endif %}
+    {% else %}
+      <div class="alert alert-info">RavenPack metrics not found — train a checkpoint in 5·8 first.</div>
+    {% endif %}
+  </section>
+</section>

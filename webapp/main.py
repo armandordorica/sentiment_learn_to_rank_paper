@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Form, Request
+from fastapi import FastAPI, Form, Query, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -198,14 +198,62 @@ def data_explorer_story(
     story_id: str = Form(default=""),
     headline: str = Form(default="Selected headline"),
     ticker: str = Form(default="UNKNOWN"),
+    story_date: str = Form(default=""),
 ) -> HTMLResponse:
     try:
-        story, error = de.load_story(story_id, headline, ticker), None
+        story, error = de.load_story(story_id, headline, ticker, story_date or None), None
     except Exception as exc:  # noqa: BLE001
         story, error = None, str(exc)
     return templates.TemplateResponse(
         request, "partials/refinitiv_story.html", {"story": story, "error": error}
     )
+
+
+@app.get("/data-explorer/headlines", response_class=HTMLResponse)
+def data_explorer_headlines(
+    request: Request,
+    ticker: str = Query(default=""),
+    start_date: str = Query(default=de.DEFAULT_START),
+    end_date: str = Query(default=de.DEFAULT_END),
+    limit: int = Query(default=de.DEFAULT_HEADLINE_LIMIT),
+    q: str = Query(default=""),
+    sort: str = Query(default="date_desc"),
+) -> HTMLResponse:
+    try:
+        headlines = de.headlines_from_cache(
+            ticker, start_date, end_date, limit=limit, query=q, sort=sort
+        )
+        return templates.TemplateResponse(
+            request,
+            "partials/refinitiv_headline_list.html",
+            {"headlines": headlines, "expanded": True},
+        )
+    except Exception as exc:  # noqa: BLE001
+        return HTMLResponse(
+            f'<div class="alert alert-error"><strong>Could not refresh headlines:</strong> {exc}</div>',
+            status_code=200,
+        )
+
+
+@app.post("/data-explorer/ravenpack-article", response_class=HTMLResponse)
+def data_explorer_ravenpack_article(
+    request: Request,
+    ticker: str = Form(default=""),
+    rp_story_id: str = Form(default=""),
+    article_time: str = Form(default=""),
+    headline: str = Form(default=""),
+) -> HTMLResponse:
+    try:
+        article = de.ravenpack_article_detail(
+            ticker, rp_story_id=rp_story_id, article_time=article_time, headline=headline
+        )
+        return templates.TemplateResponse(
+            request, "partials/ravenpack_article_features.html", {"article": article, "error": None}
+        )
+    except Exception as exc:  # noqa: BLE001
+        return templates.TemplateResponse(
+            request, "partials/ravenpack_article_features.html", {"article": None, "error": str(exc)}
+        )
 
 
 @app.get("/batch", response_class=HTMLResponse)
@@ -398,8 +446,37 @@ def finetune_page(request: Request) -> HTMLResponse:
         "job": resumed_job,
         "error": None,
         "wandb": rp.wandb_context(),
+        "analysis": None,
     })
+    deps = ctx["deps"]
+    if deps.get("finetuning_deps_available") and deps.get("has_phrasebank_checkpoint"):
+        from webapp.api import finetune_analysis as fa
+        try:
+            ctx["analysis"] = fa.static_analysis_context()
+        except Exception as exc:  # noqa: BLE001
+            ctx["analysis"] = {
+                "ticker": fa.ANALYSIS_TICKER,
+                "tokenization": fa.tokenization_context(),
+                "hyperparams": fa.hyperparams_context(),
+                "split": None,
+                "split_error": str(exc),
+            }
     return templates.TemplateResponse(request, "finetune.html", ctx)
+
+
+@app.get("/finetune/before-after", response_class=HTMLResponse)
+def finetune_before_after(request: Request) -> HTMLResponse:
+    """HTMX partial: 5·3–5·6 before/after scoring (lazy, memoized)."""
+    from webapp.api import finetune_analysis as fa
+    try:
+        ba = fa.before_after_context()
+        return templates.TemplateResponse(
+            request, "partials/finetune_before_after.html", {"ba": ba, "error": ba.get("error")}
+        )
+    except Exception as exc:  # noqa: BLE001
+        return templates.TemplateResponse(
+            request, "partials/finetune_before_after.html", {"ba": None, "error": str(exc)}
+        )
 
 
 @app.post("/finetune/coverage", response_class=HTMLResponse)

@@ -20,6 +20,7 @@ if str(SRC_PATH) not in sys.path:
 load_dotenv(PROJECT_ROOT / ".env")
 
 from sentiment_ltr.data import live_data  # noqa: E402
+from sentiment_ltr.data.ravenpack_match import resolve_ravenpack_for_story  # noqa: E402
 from sentiment_ltr.data.refinitiv_queries import fetch_refinitiv_story  # noqa: E402
 
 DEFAULT_START = "2003-01-01"
@@ -27,6 +28,7 @@ DEFAULT_END = "2014-12-31"
 QUICK_TICKERS = ["AAPL", "MSFT", "SPY", "GOOGL", "TSLA"]
 TOP1K_BY_TICKER_DIR = PROJECT_ROOT / "data" / "raw" / "data_explorer_top1k" / "by_ticker"
 FULL_STORY_DIR = PROJECT_ROOT / "data" / "raw" / "data_explorer_full_stories"
+RAVENPACK_DAY_DIR = PROJECT_ROOT / "data" / "raw" / "data_explorer_ravenpack_days"
 
 
 def _refinitiv_ready() -> bool:
@@ -181,17 +183,111 @@ def _records(df: pd.DataFrame, limit: int = 250) -> dict[str, Any] | None:
     return {"columns": list(display.columns), "rows": display.to_dict(orient="records"), "total": len(df)}
 
 
-def refinitiv_headline_list(news: pd.DataFrame, limit: int = 500) -> dict[str, Any] | None:
-    """Presentation rows for the selectable Refinitiv full-story list."""
+HEADLINE_LIMIT_CHOICES = (10, 25, 50, 100, 250)
+DEFAULT_HEADLINE_LIMIT = 25
+HEADLINE_SORT_CHOICES = {
+    "date_desc": ("date", False),
+    "date_asc": ("date", True),
+    "headline_asc": ("headline", True),
+    "headline_desc": ("headline", False),
+    "source_asc": ("sourceCode", True),
+    "source_desc": ("sourceCode", False),
+}
+
+
+def refinitiv_headline_list(
+    news: pd.DataFrame,
+    limit: int = DEFAULT_HEADLINE_LIMIT,
+    *,
+    query: str = "",
+    sort: str = "date_desc",
+) -> dict[str, Any] | None:
+    """Presentation rows for the selectable Refinitiv full-story list.
+
+    Filters the full frame first, then sorts, then takes the top ``limit`` rows
+    so search is not limited to the currently displayed page.
+    """
     if not isinstance(news, pd.DataFrame) or news.empty:
         return None
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = DEFAULT_HEADLINE_LIMIT
+    limit = max(1, min(limit, max(HEADLINE_LIMIT_CHOICES)))
+    sort = sort if sort in HEADLINE_SORT_CHOICES else "date_desc"
     columns = [c for c in ("date", "headline", "sourceCode", "storyId") if c in news]
     display = news[columns].copy()
-    if "date" in display:
-        display["date"] = pd.to_datetime(display["date"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
-    display = display.sort_values("date", ascending=False).head(limit)
+    total = int(len(display))
+
+    q = str(query or "").strip().lower()
+    if q:
+        mask = pd.Series(False, index=display.index)
+        for col in ("headline", "sourceCode", "storyId"):
+            if col in display.columns:
+                mask = mask | display[col].astype(str).str.lower().str.contains(
+                    q, na=False, regex=False
+                )
+        display = display.loc[mask]
+    matched = int(len(display))
+
+    sort_col, ascending = HEADLINE_SORT_CHOICES[sort]
+    if sort_col in display.columns:
+        if sort_col == "date":
+            keys = pd.to_datetime(display["date"], errors="coerce")
+            display = display.assign(_sort_key=keys).sort_values(
+                "_sort_key", ascending=ascending, kind="stable"
+            ).drop(columns="_sort_key")
+        else:
+            display = display.sort_values(
+                sort_col, ascending=ascending, kind="stable", na_position="last"
+            )
+    elif "date" in display.columns:
+        keys = pd.to_datetime(display["date"], errors="coerce")
+        display = display.assign(_sort_key=keys).sort_values(
+            "_sort_key", ascending=False, kind="stable"
+        ).drop(columns="_sort_key")
+
+    if "date" in display.columns:
+        display["date"] = pd.to_datetime(display["date"], errors="coerce").dt.strftime(
+            "%Y-%m-%d %H:%M"
+        )
+    display = display.head(limit)
     display = display.where(pd.notna(display), None)
-    return {"rows": display.to_dict(orient="records"), "total": int(len(news)), "shown": int(len(display))}
+    return {
+        "rows": display.to_dict(orient="records"),
+        "total": total,
+        "matched": matched,
+        "shown": int(len(display)),
+        "limit": limit,
+        "query": str(query or "").strip(),
+        "sort": sort,
+        "limit_choices": list(HEADLINE_LIMIT_CHOICES),
+    }
+
+
+def headlines_from_cache(
+    ticker: str,
+    start: str,
+    end: str,
+    *,
+    limit: int = DEFAULT_HEADLINE_LIMIT,
+    query: str = "",
+    sort: str = "date_desc",
+) -> dict[str, Any]:
+    """Reload Refinitiv headlines from the ticker cache for HTMX filter/sort/top-N."""
+    cached = load_cached(ticker, start, end)
+    if cached is None:
+        raise ValueError(
+            "No local cache for this ticker/window. Re-run Load data, or use a cached ticker."
+        )
+    news = cached["providers"].get("refinitiv", {}).get("news", pd.DataFrame())
+    headlines = refinitiv_headline_list(news, limit=limit, query=query, sort=sort)
+    if headlines is None:
+        raise ValueError("No Refinitiv headlines in cache for this ticker/window.")
+    headlines["ticker"] = live_data.clean_ticker(ticker) or ticker.upper()
+    headlines["start_date"] = start
+    headlines["end_date"] = end
+    return headlines
 
 
 def _story_path(story_id: str, headline: str, ticker: str) -> Path:
@@ -201,26 +297,172 @@ def _story_path(story_id: str, headline: str, ticker: str) -> Path:
     return FULL_STORY_DIR / clean_ticker / f"{slug}--{digest}.txt"
 
 
-def load_story(story_id: str, headline: str | None = None, ticker: str = "UNKNOWN") -> dict[str, str]:
-    """Fetch and persist one Refinitiv story using the shared loader."""
+def _query_ravenpack_day(ticker: str, start: str, end: str) -> pd.DataFrame:
+    """WRDS day pull with headlines for story↔relevance matching."""
+    return live_data.query_ravenpack_articles(ticker, start, end, include_text=True)
+
+
+def load_cached_ravenpack(ticker: str) -> pd.DataFrame:
+    """Full cached RavenPack frame for a ticker (may omit headline/event_text)."""
+    directory = _cache_dir(ticker)
+    if directory is None:
+        return pd.DataFrame()
+    path = directory / "ravenpack_articles.parquet"
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_parquet(path)
+    except Exception:
+        return pd.DataFrame()
+
+
+def ravenpack_article_list(
+    articles: pd.DataFrame,
+    *,
+    ticker: str,
+    limit: int = 25,
+) -> dict[str, Any] | None:
+    """Selectable RavenPack rows for 1E inspect (headline when present)."""
+    if not isinstance(articles, pd.DataFrame) or articles.empty:
+        return None
+    work = articles.copy()
+    if "relevance_score" not in work.columns and "relevance" in work.columns:
+        work["relevance_score"] = pd.to_numeric(work["relevance"], errors="coerce") / 100.0
+    time_col = "article_time" if "article_time" in work.columns else "timestamp_utc"
+    if time_col in work.columns:
+        work = work.sort_values(time_col, ascending=False)
+    cols = [
+        c for c in [
+            time_col, "headline", "event_text", "relevance_score",
+            "event_sentiment_score", "sentiment_score", "topic", "group", "type",
+            "sub_type", "news_type", "source_name", "rp_story_id", "css", "nip",
+        ]
+        if c in work.columns
+    ]
+    display = work[cols].head(max(1, min(int(limit), 250))).copy()
+    if time_col in display.columns:
+        display[time_col] = pd.to_datetime(display[time_col], utc=True, errors="coerce").dt.strftime(
+            "%Y-%m-%d %H:%M"
+        )
+        display = display.rename(columns={time_col: "article_time"})
+    display = display.where(pd.notna(display), None)
+    return {
+        "ticker": ticker,
+        "total": int(len(articles)),
+        "shown": int(len(display)),
+        "has_headline": "headline" in articles.columns,
+        "rows": display.to_dict(orient="records"),
+    }
+
+
+def ravenpack_article_detail(
+    ticker: str,
+    *,
+    rp_story_id: str = "",
+    article_time: str = "",
+    headline: str = "",
+) -> dict[str, Any]:
+    """1E inspect panel for one RavenPack row from the ticker cache."""
+    articles = load_cached_ravenpack(ticker)
+    if articles.empty:
+        raise ValueError(f"No cached RavenPack articles for {ticker}.")
+    work = articles.copy()
+    if "relevance_score" not in work.columns and "relevance" in work.columns:
+        work["relevance_score"] = pd.to_numeric(work["relevance"], errors="coerce") / 100.0
+    hit = None
+    if rp_story_id and "rp_story_id" in work.columns:
+        matched = work[work["rp_story_id"].astype(str) == str(rp_story_id)]
+        if not matched.empty:
+            hit = matched.iloc[0]
+    if hit is None and headline and "headline" in work.columns:
+        matched = work[work["headline"].astype(str) == str(headline)]
+        if not matched.empty:
+            hit = matched.iloc[0]
+    if hit is None and article_time:
+        time_col = "article_time" if "article_time" in work.columns else "timestamp_utc"
+        times = pd.to_datetime(work[time_col], utc=True, errors="coerce").dt.tz_localize(None)
+        target = pd.to_datetime(article_time, utc=True, errors="coerce")
+        if not pd.isna(target):
+            target = target.tz_localize(None) if getattr(target, "tzinfo", None) else target
+            idx = (times - target).abs().idxmin()
+            hit = work.loc[idx]
+    if hit is None:
+        raise ValueError("Could not locate that RavenPack article in cache.")
+    def _val(key: str):
+        v = hit.get(key) if hasattr(hit, "get") else hit[key] if key in hit.index else None
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            return None
+        if hasattr(v, "isoformat"):
+            return str(v)
+        return v if not isinstance(v, (pd.Timestamp,)) else str(v)
+
+    return {
+        "ticker": ticker,
+        "headline": _val("headline") or "(no headline in batch cache)",
+        "event_text": _val("event_text"),
+        "relevance_score": float(_val("relevance_score")) if _val("relevance_score") is not None else None,
+        "event_sentiment_score": float(_val("event_sentiment_score")) if _val("event_sentiment_score") is not None else None,
+        "sentiment_score": float(_val("sentiment_score")) if _val("sentiment_score") is not None else None,
+        "topic": _val("topic"),
+        "group": _val("group"),
+        "type": _val("type"),
+        "sub_type": _val("sub_type"),
+        "news_type": _val("news_type"),
+        "source_name": _val("source_name"),
+        "rp_story_id": _val("rp_story_id"),
+        "article_time": _val("article_time") or _val("timestamp_utc"),
+        "css": _val("css"),
+        "nip": _val("nip"),
+        "note": (
+            None
+            if _val("headline")
+            else "Batch RavenPack cache often omits headline/event_text; relevance and taxonomy still apply to this ticker."
+        ),
+    }
+
+
+def load_story(
+    story_id: str,
+    headline: str | None = None,
+    ticker: str = "UNKNOWN",
+    story_date: str | None = None,
+    *,
+    include_ravenpack: bool = True,
+) -> dict[str, Any]:
+    """Fetch and persist one Refinitiv story, with RavenPack relevance when possible."""
     story_id = str(story_id or "").strip()
     if not story_id:
         raise ValueError("Select a Refinitiv headline with a story ID.")
     headline = str(headline or "Selected headline")
+    clean_ticker = live_data.clean_ticker(ticker) or "UNKNOWN"
     text = fetch_refinitiv_story(PROJECT_ROOT, story_id)
-    path = _story_path(story_id, headline, ticker)
+    path = _story_path(story_id, headline, clean_ticker)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        f"Headline: {headline}\nStory ID: {story_id}\nTicker: {ticker}\n\n{text}\n",
+        f"Headline: {headline}\nStory ID: {story_id}\nTicker: {clean_ticker}\n\n{text}\n",
         encoding="utf-8",
     )
     relative_path = str(path.relative_to(PROJECT_ROOT)) if path.is_relative_to(PROJECT_ROOT) else str(path)
+    ravenpack: dict[str, Any] | None = None
+    if include_ravenpack and clean_ticker != "UNKNOWN":
+        query_fn = _query_ravenpack_day if live_data.wrds_credentials_available() else None
+        ravenpack = resolve_ravenpack_for_story(
+            ticker=clean_ticker,
+            headline=headline,
+            story_time=story_date,
+            cached_articles=load_cached_ravenpack(clean_ticker),
+            day_cache_dir=RAVENPACK_DAY_DIR if query_fn else None,
+            query_day_fn=query_fn,
+        )
     return {
         "story_id": story_id,
         "headline": headline,
+        "ticker": clean_ticker,
+        "story_date": story_date or "",
         "text": text,
         "path": str(path.resolve()),
         "relative_path": relative_path,
+        "ravenpack": ravenpack,
     }
 
 
@@ -244,7 +486,6 @@ def present(result: dict[str, Any]) -> dict[str, Any]:
                       title=f"Split-adjusted close price — {ticker}",
                       labels={"close_price": "Close price (USD)", "date": "Date"})
         fig.update_layout(height=480, hovermode="x unified")
-        charts["price_overview"] = _html(fig)
         charts["prices"] = _html(fig)
 
     news = providers.get("refinitiv", {}).get("news", pd.DataFrame())
@@ -306,11 +547,20 @@ def present(result: dict[str, Any]) -> dict[str, Any]:
         raw.append({"label": f"{name.title()} {'articles' if name == 'ravenpack' else 'prices'}", "table": table, "message": block.get("error") or block.get("status")})
 
     sentiment_table = _records(articles[[c for c in ["article_time", "headline", "event_text", "relevance_score", "event_sentiment_score", "sentiment_score", "topic", "news_type"] if c in articles.columns]] if isinstance(articles, pd.DataFrame) and not articles.empty else pd.DataFrame())
+    headlines = refinitiv_headline_list(news, limit=DEFAULT_HEADLINE_LIMIT)
+    if headlines is not None:
+        headlines["ticker"] = ticker
+        headlines["start_date"] = result["start_date"]
+        headlines["end_date"] = result["end_date"]
+    rp_list = ravenpack_article_list(articles, ticker=ticker, limit=25) if isinstance(articles, pd.DataFrame) else None
     return {
         "ticker": ticker, "start_date": result["start_date"], "end_date": result["end_date"],
         "source": result.get("source", "live"), "cache_created_at": result.get("cache_created_at"),
         "statuses": statuses, "charts": charts,
-        "news": _records(news), "refinitiv_headlines": refinitiv_headline_list(news),
+        "news": _records(news),
+        "refinitiv_headlines": headlines,
         "news_storage": news_storage,
-        "sentiment": sentiment_table, "raw": raw,
+        "sentiment": sentiment_table,
+        "ravenpack_articles": rp_list,
+        "raw": raw,
     }

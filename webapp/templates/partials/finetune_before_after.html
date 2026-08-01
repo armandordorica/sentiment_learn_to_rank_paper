@@ -1,0 +1,117 @@
+{% if error %}
+  <div class="alert alert-error">{{ error }}</div>
+{% elif ba %}
+  <h4>5·3 · Macro-F1 scorecard</h4>
+  <div class="metric-row">
+    <div class="metric">
+      <span class="metric-label">① PhraseBank in-domain</span>
+      <span class="metric-value">{% if ba.pb_in_domain_f1 is not none %}{{ "%.1f%%"|format(ba.pb_in_domain_f1 * 100) }}{% else %}—{% endif %}</span>
+    </div>
+    <div class="metric">
+      <span class="metric-label">② OOD before fine-tune</span>
+      <span class="metric-value">{% if ba.pb_ood_f1 is not none %}{{ "%.1f%%"|format(ba.pb_ood_f1 * 100) }}{% else %}—{% endif %}</span>
+      {% if ba.delta_ood_vs_in is not none %}<span class="muted">{{ "%+.1f"|format(ba.delta_ood_vs_in * 100) }} pp vs in-domain</span>{% endif %}
+    </div>
+    <div class="metric">
+      <span class="metric-label">③ OOD after fine-tune</span>
+      <span class="metric-value">{% if ba.rp_test_f1 is not none %}{{ "%.1f%%"|format(ba.rp_test_f1 * 100) }}{% else %}—{% endif %}</span>
+      {% if ba.delta_after_vs_before is not none %}<span class="muted">{{ "%+.1f"|format(ba.delta_after_vs_before * 100) }} pp vs before</span>{% endif %}
+    </div>
+  </div>
+  <table class="data-table">
+    <thead><tr><th>Checkpoint</th><th>Domain</th><th>Macro-F1</th><th>Accuracy</th></tr></thead>
+    <tbody>
+      {% for row in ba.summary_rows %}
+        <tr>
+          <td>{{ row.checkpoint }}</td>
+          <td>{{ row.domain }}</td>
+          <td>{% if row.macro_f1 is not none %}{{ "%.1f%%"|format(row.macro_f1 * 100) }}{% else %}—{% endif %}</td>
+          <td>{% if row.accuracy is not none %}{{ "%.1f%%"|format(row.accuracy * 100) }}{% else %}—{% endif %}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if ba.summary_chart_html %}<div class="chart-cell">{{ ba.summary_chart_html|safe }}</div>{% endif %}
+  {% if not ba.has_rp %}
+    <div class="alert alert-info">RavenPack fine-tuned checkpoint not found — train it in 5·8 to populate ③ and per-class charts.</div>
+  {% endif %}
+
+  {% if ba.has_rp %}
+    <h4>5·4 · Per-class F1 before &amp; after</h4>
+    <p class="muted">Same {{ "{:,}".format(ba.n_rows) }} {{ ba.ticker }} test rows for both checkpoints.</p>
+    {% if ba.class_pivot_rows %}
+      <div class="table-scroll">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Label</th>
+              <th>PB precision</th><th>PB recall</th><th>PB F1</th>
+              <th>RP precision</th><th>RP recall</th><th>RP F1</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in ba.class_pivot_rows %}
+              <tr>
+                <td>{{ row.label }}</td>
+                <td>{% if row.pb_precision is not none %}{{ "%.1f%%"|format(row.pb_precision * 100) }}{% else %}—{% endif %}</td>
+                <td>{% if row.pb_recall is not none %}{{ "%.1f%%"|format(row.pb_recall * 100) }}{% else %}—{% endif %}</td>
+                <td>{% if row.pb_f1 is not none %}{{ "%.1f%%"|format(row.pb_f1 * 100) }}{% else %}—{% endif %}</td>
+                <td>{% if row.rp_precision is not none %}{{ "%.1f%%"|format(row.rp_precision * 100) }}{% else %}—{% endif %}</td>
+                <td>{% if row.rp_recall is not none %}{{ "%.1f%%"|format(row.rp_recall * 100) }}{% else %}—{% endif %}</td>
+                <td>{% if row.rp_f1 is not none %}{{ "%.1f%%"|format(row.rp_f1 * 100) }}{% else %}—{% endif %}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
+    {% if ba.overall_chart_html %}<div class="chart-cell">{{ ba.overall_chart_html|safe }}</div>{% endif %}
+    {% if ba.class_chart_html %}<div class="chart-cell">{{ ba.class_chart_html|safe }}</div>{% endif %}
+  {% endif %}
+
+  <h4>5·5 · Label prevalence</h4>
+  {% if ba.prevalence_chart_html %}<div class="chart-cell">{{ ba.prevalence_chart_html|safe }}</div>{% endif %}
+  {% if ba.prevalence_gaps %}
+    <details>
+      <summary>Prevalence gap table (percentage points)</summary>
+      <table class="data-table">
+        <thead><tr><th>Label</th><th>Series</th><th>Δ pp</th></tr></thead>
+        <tbody>
+          {% for row in ba.prevalence_gaps %}
+            <tr><td>{{ row.label }}</td><td>{{ row.series }}</td><td>{{ "%+.1f"|format(row.delta_pp) }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </details>
+  {% endif %}
+
+  <h4>5·6 · Sample headlines (PhraseBank mismatches)</h4>
+  <p class="muted">Up to 20 RavenPack test headlines the PhraseBank checkpoint got wrong.</p>
+  {% if ba.samples %}
+    <div class="table-scroll">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Date</th><th>Headline</th><th>Actual</th><th>PB pred</th>
+            <th>P(neg)</th><th>P(neu)</th><th>P(pos)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in ba.samples %}
+            <tr>
+              <td>{{ row.article_date }}</td>
+              <td>{{ row.headline }}</td>
+              <td><span class="pred-pill pred-{{ row.actual }}">{{ row.actual }}</span></td>
+              <td><span class="pred-pill pred-{{ row.pb_pred }}">{{ row.pb_pred }}</span></td>
+              <td>{% if row.p_negative is not none %}{{ "%.3f"|format(row.p_negative) }}{% else %}—{% endif %}</td>
+              <td>{% if row.p_neutral is not none %}{{ "%.3f"|format(row.p_neutral) }}{% else %}—{% endif %}</td>
+              <td>{% if row.p_positive is not none %}{{ "%.3f"|format(row.p_positive) }}{% else %}—{% endif %}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="muted">No mismatch sample available.</p>
+  {% endif %}
+{% endif %}

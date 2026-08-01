@@ -450,6 +450,72 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .check-item span { display: inline-block; width: 1.4rem; font-weight: 700; }
 .check-pass { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
 .check-fail { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+.headline-list-disclosure {
+  margin: .85rem 0 1rem;
+  border: 1px solid var(--border);
+  border-radius: .55rem;
+  background: #f8fafc;
+  padding: 0 .15rem .15rem;
+}
+.headline-list-disclosure > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: .85rem 1rem;
+  font-size: .98rem;
+  color: #1e293b;
+}
+.headline-list-disclosure > summary::-webkit-details-marker { display: none; }
+.headline-list-disclosure > summary::before {
+  content: "▸";
+  display: inline-block;
+  margin-right: .45rem;
+  color: #64748b;
+}
+.headline-list-disclosure[open] > summary::before { content: "▾"; }
+.headline-list-disclosure[open] > summary {
+  border-bottom: 1px solid #e2e8f0;
+  margin-bottom: .35rem;
+}
+.headline-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .65rem 1rem;
+  align-items: end;
+  padding: .75rem 1rem .35rem;
+}
+.headline-toolbar label {
+  display: grid;
+  gap: .25rem;
+  font-size: .78rem;
+  font-weight: 600;
+  color: #475569;
+}
+.headline-toolbar select,
+.headline-toolbar input[type="search"] {
+  min-width: 8rem;
+  padding: .4rem .55rem;
+  border: 1px solid var(--border);
+  border-radius: .4rem;
+  background: #fff;
+  font: inherit;
+}
+.headline-filter { flex: 1 1 14rem; }
+.headline-filter input { width: 100%; min-width: 12rem; }
+.headline-list-disclosure .muted { padding: 0 1rem; }
+.headline-list-disclosure .headline-table-wrap {
+  margin: .4rem 1rem 1rem;
+  max-height: 22rem;
+}
+.sort-btn {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  font-weight: 700;
+  color: inherit;
+  cursor: pointer;
+}
+.sort-btn:hover { color: var(--red); }
 .headline-table-wrap { max-height: 34rem; overflow: auto; border: 1px solid var(--border); border-radius: .45rem; }
 .headline-table { margin: 0; min-width: 980px; }
 .headline-table thead { position: sticky; top: 0; z-index: 1; }
@@ -461,6 +527,41 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .story-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
 .story-heading h4 { margin: .45rem 0 .8rem; }
 .provider-badge { display: inline-block; background: #e0f2fe; color: #075985; border-radius: 999px; padding: .18rem .55rem; font-size: .75rem; font-weight: 700; }
+.pred-pill {
+  display: inline-block;
+  padding: .12rem .45rem;
+  border-radius: .35rem;
+  font-size: .78rem;
+  font-weight: 700;
+}
+.pred-negative { background: #fecaca; color: #7f1d1d; }
+.pred-neutral { background: #e2e8f0; color: #1e293b; }
+.pred-positive { background: #bbf7d0; color: #14532d; }
+.json-block {
+  max-height: 22rem;
+  overflow: auto;
+  padding: .75rem 1rem;
+  background: #0f172a;
+  color: #e2e8f0;
+  border-radius: .45rem;
+  font-size: .78rem;
+}
+.btn-row { display: flex; flex-wrap: wrap; gap: .5rem; margin: .7rem 0 1rem; }
+.rp-article-features {
+  margin-top: 1rem;
+  border: 1px solid #c7e0d4;
+  border-radius: .55rem;
+  padding: 1rem 1.1rem;
+  background: #f3fbf7;
+}
+.finetune-analysis { margin: 1rem 0 1.5rem; }
+.story-relevance { margin: .2rem 0 1.1rem; padding: .9rem 1rem; border: 1px solid #c7e0d4; border-radius: .5rem; background: #f3fbf7; }
+.story-relevance h5 { margin: 0 0 .65rem; color: #065f46; }
+.story-relevance-metrics { margin-bottom: .55rem; }
+.rp-matched-headline, .rp-event-text { margin: .35rem 0; line-height: 1.5; }
+.rp-event-text { color: #334155; white-space: pre-wrap; }
+.nearby-rp { margin-top: .55rem; }
+.nearby-rp summary { cursor: pointer; font-weight: 600; color: #334155; }
 .story-body { white-space: pre-wrap; line-height: 1.65; }
 .source-path { display: grid; gap: .35rem; margin: .8rem 0 1rem; padding: .75rem .9rem; border: 1px solid var(--border); border-radius: .45rem; background: #f8fafc; }
 .source-path code { overflow-wrap: anywhere; color: #0f172a; }

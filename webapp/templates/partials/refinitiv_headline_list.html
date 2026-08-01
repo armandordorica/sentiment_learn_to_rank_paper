@@ -1,0 +1,122 @@
+{# Expects `headlines` dict from refinitiv_headline_list / headlines_from_cache. #}
+{% set h = headlines %}
+{% set ticker = h.ticker %}
+<details class="headline-list-disclosure" {% if expanded %}open{% endif %}>
+  <summary>
+    <strong>Refinitiv headline list</strong>
+    <span class="muted">
+      — showing {{ "{:,}".format(h.shown) }}
+      {% if h.query %}of {{ "{:,}".format(h.matched) }} matches {% endif %}
+      of {{ "{:,}".format(h.total) }} · click to expand
+    </span>
+  </summary>
+
+  <form class="headline-toolbar"
+        hx-get="/data-explorer/headlines"
+        hx-target="#headline-list-panel"
+        hx-swap="innerHTML"
+        hx-indicator="#headline-list-spinner">
+    <input type="hidden" name="ticker" value="{{ ticker }}">
+    <input type="hidden" name="start_date" value="{{ h.start_date }}">
+    <input type="hidden" name="end_date" value="{{ h.end_date }}">
+    <label>Top N
+      <select name="limit" onchange="this.form.requestSubmit()">
+        {% for n in h.limit_choices %}
+          <option value="{{ n }}" {% if n == h.limit %}selected{% endif %}>{{ n }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="headline-filter">Filter
+      <input type="search" name="q" value="{{ h.query }}" placeholder="headline, source, story id…"
+             hx-get="/data-explorer/headlines"
+             hx-target="#headline-list-panel"
+             hx-swap="innerHTML"
+             hx-indicator="#headline-list-spinner"
+             hx-trigger="keyup changed delay:300ms, search"
+             hx-include="closest form">
+    </label>
+    <label>Sort
+      <select name="sort" onchange="this.form.requestSubmit()">
+        <option value="date_desc" {% if h.sort == "date_desc" %}selected{% endif %}>Date · newest</option>
+        <option value="date_asc" {% if h.sort == "date_asc" %}selected{% endif %}>Date · oldest</option>
+        <option value="headline_asc" {% if h.sort == "headline_asc" %}selected{% endif %}>Headline · A–Z</option>
+        <option value="headline_desc" {% if h.sort == "headline_desc" %}selected{% endif %}>Headline · Z–A</option>
+        <option value="source_asc" {% if h.sort == "source_asc" %}selected{% endif %}>Source · A–Z</option>
+        <option value="source_desc" {% if h.sort == "source_desc" %}selected{% endif %}>Source · Z–A</option>
+      </select>
+    </label>
+    <button type="submit" class="btn btn-secondary btn-small">Apply</button>
+  </form>
+
+  <p class="muted">
+    Select a headline to retrieve its full Refinitiv story text and RavenPack relevance to {{ ticker }}.
+    {% if h.query %}
+      Filter <code>{{ h.query }}</code> matched {{ "{:,}".format(h.matched) }} of {{ "{:,}".format(h.total) }};
+      showing top {{ "{:,}".format(h.shown) }}.
+    {% else %}
+      Showing top {{ "{:,}".format(h.shown) }} of {{ "{:,}".format(h.total) }} headlines.
+    {% endif %}
+  </p>
+
+  <div class="headline-table-wrap">
+    <table class="data-table headline-table">
+      <thead>
+        <tr>
+          <th>
+            <button type="button" class="sort-btn"
+                    hx-get="/data-explorer/headlines"
+                    hx-target="#headline-list-panel"
+                    hx-include="closest details .headline-toolbar"
+                    hx-vals='{"sort": "{{ "date_asc" if h.sort == "date_desc" else "date_desc" }}"}'>
+              Date {% if h.sort == "date_desc" %}↓{% elif h.sort == "date_asc" %}↑{% endif %}
+            </button>
+          </th>
+          <th>
+            <button type="button" class="sort-btn"
+                    hx-get="/data-explorer/headlines"
+                    hx-target="#headline-list-panel"
+                    hx-include="closest details .headline-toolbar"
+                    hx-vals='{"sort": "{{ "headline_desc" if h.sort == "headline_asc" else "headline_asc" }}"}'>
+              Headline {% if h.sort == "headline_asc" %}↑{% elif h.sort == "headline_desc" %}↓{% endif %}
+            </button>
+          </th>
+          <th>
+            <button type="button" class="sort-btn"
+                    hx-get="/data-explorer/headlines"
+                    hx-target="#headline-list-panel"
+                    hx-include="closest details .headline-toolbar"
+                    hx-vals='{"sort": "{{ "source_desc" if h.sort == "source_asc" else "source_asc" }}"}'>
+              Source {% if h.sort == "source_asc" %}↑{% elif h.sort == "source_desc" %}↓{% endif %}
+            </button>
+          </th>
+          <th>Story ID</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in h.rows %}
+          <tr>
+            <td class="headline-date">{{ row.date or "—" }}</td>
+            <td>{{ row.headline or "—" }}</td>
+            <td>{{ row.sourceCode or "—" }}</td>
+            <td><code class="story-id">{{ row.storyId or "—" }}</code></td>
+            <td>
+              {% if row.storyId %}
+                <form hx-post="/data-explorer/story" hx-target="#refinitiv-story-panel" hx-swap="innerHTML" hx-indicator="#story-spinner">
+                  <input type="hidden" name="story_id" value="{{ row.storyId }}">
+                  <input type="hidden" name="headline" value="{{ row.headline or 'Selected headline' }}">
+                  <input type="hidden" name="ticker" value="{{ ticker }}">
+                  <input type="hidden" name="story_date" value="{{ row.date or '' }}">
+                  <button type="submit" class="btn btn-secondary btn-small">Read story + relevance</button>
+                </form>
+              {% endif %}
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="5" class="muted">No headlines match this filter.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <span id="headline-list-spinner" class="htmx-indicator muted"> Updating headline list…</span>
+</details>

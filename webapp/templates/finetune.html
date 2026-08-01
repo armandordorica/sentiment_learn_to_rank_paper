@@ -11,16 +11,19 @@
     </div>
   </details>
 {%- endmacro %}
-{% block title %}5·8 — RavenPack Fine-Tuning{% endblock %}
+{% block title %}5 — RavenPack Fine-Tuning{% endblock %}
 {% block content %}
   <div class="card">
     <h1>5 · RavenPack Fine-Tuning</h1>
     <p class="muted">
-      Ported from Streamlit <code>app.py</code> → <code>render_ravenpack_finetuning_tab()</code>,
-      section 5·8 "Train / re-train the checkpoint". Select one ticker for a single-stock
-      baseline, five for a multi-stock pilot, or more for a pooled run — all selected tickers
-      are concatenated into one shuffled dataset, not trained sequentially.
+      AAPL before/after analysis (5·1–5·7), then train/re-train on 1 / 5 / N tickers (5·8),
+      plus the strict multi-basket OOD benchmark.
     </p>
+    <nav class="section-nav" aria-label="Section 5">
+      <a href="#ft-analysis">5·1–5·7 Analysis</a>
+      <a href="#ft-train">5·8 Train</a>
+      <a href="#ft-ood">OOD benchmark</a>
+    </nav>
     <details class="methodology-panel academic-paper">
       <summary>Academic research synopsis: motivation, hypotheses, methods, results, and interpretation</summary>
       <article class="paper-body">
@@ -77,6 +80,18 @@
       </div>
     </details>
     <p><a class="btn btn-secondary wandb-link" href="{{ wandb.url }}" target="_blank" rel="noopener">↗ Open {{ 'checkpoint run' if wandb.run_url else 'project' }} in Weights &amp; Biases</a></p>
+
+    {% if deps.finetuning_deps_available and deps.has_phrasebank_checkpoint and analysis %}
+      {% include "partials/finetune_analysis.html" %}
+      <hr>
+    {% endif %}
+
+    <section id="ft-train">
+    <h2>5·8 · Train / re-train</h2>
+    <p class="muted">
+      Select one ticker for a single-stock baseline, five for a multi-stock pilot, or more for a
+      pooled run — all selected tickers are concatenated into one shuffled dataset, not trained sequentially.
+    </p>
 
     {% if not deps.finetuning_deps_available %}
       <div class="alert alert-error">
@@ -229,7 +244,7 @@
       </div>
 
       <hr>
-      <section>
+      <section id="ft-ood">
         <h2>Out-of-domain and cross-stock benchmark</h2>
         <p class="muted">
           Compare the out-of-the-box PhraseBank model, the AAPL-only model, and the pooled five-stock
@@ -263,6 +278,7 @@
         {% endif %}
       </section>
     {% endif %}
+    </section>
   </div>
 {% endblock %}
 {% block scripts %}

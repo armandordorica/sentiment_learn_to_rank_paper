@@ -18,7 +18,12 @@ if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
 from sentiment_ltr.models import phrasebank_sentiment as _phrasebank_sentiment  # noqa: E402
-from sentiment_ltr.wandb_logging import checkpoint_wandb_links  # noqa: E402
+from sentiment_ltr.wandb_logging import (  # noqa: E402
+    IMPORTED_CHECKPOINT_RUN_IDS,
+    checkpoint_wandb_links,
+    configure_wandb_environment,
+)
+from sentiment_ltr.models.phrasebank_sentiment import phrasebank_baseline_recipe  # noqa: E402
 from sentiment_ltr.viz import (  # noqa: E402
     horizontal_bar_figure,
     split_series_distribution_figures,
@@ -66,12 +71,21 @@ def _checkpoint_cache_token() -> str:
 def training_summary() -> dict[str, Any]:
     """Mirrors Streamlit 3A/3C: headline training config + val/test metrics."""
     metrics = load_metrics()
+    model_dir = resolve_model_dir()
+    try:
+        rel = str(model_dir.relative_to(PROJECT_ROOT))
+    except ValueError:
+        rel = str(model_dir)
     return {
         "model_name": str(metrics.get("model_name", MODEL_NAME)).split("/")[-1],
+        "model_name_full": metrics.get("model_name", MODEL_NAME),
         "epochs": metrics.get("epochs"),
         "learning_rate": metrics.get("learning_rate"),
         "batch_size": metrics.get("per_device_train_batch_size"),
+        "max_length": metrics.get("max_length", 128),
         "device": str(metrics.get("device", "—")).upper(),
+        "checkpoint_path": rel,
+        "has_model": model_is_saved(model_dir),
         "val_f1": metrics.get("validation", {}).get("eval_f1"),
         "val_acc": metrics.get("validation", {}).get("eval_accuracy"),
         "test_f1": metrics.get("test", {}).get("eval_f1"),
@@ -79,6 +93,26 @@ def training_summary() -> dict[str, Any]:
         "train_loss": metrics.get("train_loss"),
         "raw_metrics": metrics,
         "wandb": checkpoint_wandb_links("phrasebank_distilbert_best", metrics),
+        "recipe": phrasebank_baseline_recipe(metrics),
+        "wandb_tracking": wandb_tracking_links(),
+    }
+
+
+def wandb_tracking_links() -> dict[str, Any]:
+    """3F — project + imported PhraseBank run URLs (mirrors Streamlit)."""
+    base = configure_wandb_environment()
+    links = []
+    for model_id, label in [
+        ("phrasebank_distilbert_best", "3-epoch PhraseBank run"),
+        ("phrasebank_distilbert_1ep", "1-epoch baseline run"),
+    ]:
+        info = checkpoint_wandb_links(model_id)
+        links.append({"id": model_id, "label": label, "url": info.get("url")})
+    return {
+        "project": base["project"],
+        "project_url": base["project_url"],
+        "runs": links,
+        "imported_ids": dict(IMPORTED_CHECKPOINT_RUN_IDS),
     }
 
 

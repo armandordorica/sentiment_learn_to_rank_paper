@@ -3,9 +3,78 @@
 {% elif story %}
   <article class="refinitiv-story">
     <div class="story-heading">
-      <div><span class="provider-badge">Refinitiv full story</span><h4>{{ story.headline }}</h4></div>
-      <button type="button" class="btn btn-secondary btn-small" onclick="document.getElementById('refinitiv-story-panel').innerHTML='<p class=&quot;muted&quot;>Select a headline above to read its full story.</p>'">Close</button>
+      <div>
+        <span class="provider-badge">Refinitiv full story</span>
+        {% if story.ticker %}<span class="provider-badge provider-badge-ticker">{{ story.ticker }}</span>{% endif %}
+        <h4>{{ story.headline }}</h4>
+      </div>
+      <button type="button" class="btn btn-secondary btn-small" onclick="document.getElementById('refinitiv-story-panel').innerHTML='<p class=&quot;muted&quot;>Select a headline above to read its full story and RavenPack relevance.</p>'">Close</button>
     </div>
+
+    {% set rp = story.ravenpack %}
+    <section class="story-relevance">
+      <h5>Relevance to {{ story.ticker or "this stock" }}</h5>
+      {% if rp and rp.relevance_score is not none %}
+        <div class="metric-row story-relevance-metrics">
+          <div class="metric">
+            <span class="metric-label">RavenPack relevance</span>
+            <span class="metric-value">{{ "%.2f"|format(rp.relevance_score) }}</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Event sentiment</span>
+            <span class="metric-value">{% if rp.event_sentiment_score is not none %}{{ "%.3f"|format(rp.event_sentiment_score) }}{% else %}—{% endif %}</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">Sentiment × relevance</span>
+            <span class="metric-value">{% if rp.sentiment_score is not none %}{{ "%.3f"|format(rp.sentiment_score) }}{% else %}—{% endif %}</span>
+          </div>
+          {% if rp.matched and rp.match_score is not none %}
+          <div class="metric">
+            <span class="metric-label">Headline match</span>
+            <span class="metric-value">{{ "%.0f"|format(rp.match_score * 100) }}%</span>
+          </div>
+          {% endif %}
+        </div>
+        {% if rp.matched %}
+          <p class="muted">Matched RavenPack headline for this ticker{% if rp.article_time %} · {{ rp.article_time }}{% endif %}{% if rp.topic %} · {{ rp.topic }}{% endif %}{% if rp.type %} / {{ rp.type }}{% endif %}.</p>
+          {% if rp.headline and rp.headline != story.headline %}
+            <p class="rp-matched-headline"><strong>RavenPack headline:</strong> {{ rp.headline }}</p>
+          {% endif %}
+          {% if rp.event_text %}
+            <p class="rp-event-text">{{ rp.event_text }}</p>
+          {% endif %}
+        {% else %}
+          <p class="muted">{{ rp.note or "Showing the strongest RavenPack event for this ticker near the story time (no exact headline match)." }}</p>
+          {% if rp.topic or rp.type %}
+            <p class="muted">Top nearby event{% if rp.article_time %} · {{ rp.article_time }}{% endif %}{% if rp.topic %} · {{ rp.topic }}{% endif %}{% if rp.type %} / {{ rp.type }}{% endif %}{% if rp.headline %} — {{ rp.headline }}{% endif %}</p>
+          {% endif %}
+          {% if rp.nearby and rp.nearby|length > 1 %}
+            <details class="nearby-rp">
+              <summary>Other RavenPack events near this time</summary>
+              <table class="data-table">
+                <thead><tr><th>Time</th><th>Relevance</th><th>Topic</th><th>Type</th><th>Headline</th></tr></thead>
+                <tbody>
+                  {% for row in rp.nearby %}
+                  <tr>
+                    <td>{{ row.article_time or "—" }}</td>
+                    <td>{% if row.relevance_score is not none %}{{ "%.2f"|format(row.relevance_score) }}{% else %}—{% endif %}</td>
+                    <td>{{ row.topic or "—" }}</td>
+                    <td>{{ row.type or "—" }}</td>
+                    <td>{{ row.headline or "—" }}</td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </details>
+          {% endif %}
+        {% endif %}
+      {% elif rp %}
+        <div class="alert alert-info">{{ rp.note or "No RavenPack relevance available for this story yet." }}</div>
+      {% else %}
+        <div class="alert alert-info">RavenPack relevance was not looked up for this story.</div>
+      {% endif %}
+    </section>
+
     <p class="story-body">{{ story.text }}</p>
     <div class="source-path"><strong>Saved full article</strong><code>{{ story.relative_path }}</code><span class="muted">Absolute path: {{ story.path }}</span></div>
     <p class="muted">Story ID: <code>{{ story.story_id }}</code></p>

@@ -2202,7 +2202,7 @@ def render_multi_api_dashboard_tab() -> None:
 
     with pane_overview:
         _anchor("de-1b")
-        # Debug: show provider row counts so we can diagnose empty charts.
+        # Provider coverage only — full price chart lives in the Prices pane (1C).
         with st.expander("🔍 Provider debug", expanded=not bool(live_result["price_frames"])):
             for pname, pres in live_result["providers"].items():
                 prices = pres.get("prices")
@@ -2214,7 +2214,7 @@ def render_multi_api_dashboard_tab() -> None:
                     f"reason={reason or '—'} err={str(err)[:80]}"
                 )
         if live_result["price_frames"]:
-            render_dashboard_price_pane(live_result, key_prefix="dashboard_overview")
+            st.caption("Price series are in the **Prices** pane (1C).")
         else:
             st.warning("No provider returned price data for this ticker/date range. Check the debug expander above.")
         if not ravenpack_articles.empty:

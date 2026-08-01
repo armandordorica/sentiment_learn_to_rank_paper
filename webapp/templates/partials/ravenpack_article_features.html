@@ -1,0 +1,37 @@
+{% if error %}
+  <div class="alert alert-error">{{ error }}</div>
+{% elif article %}
+  <article class="rp-article-features">
+    <div class="story-heading">
+      <div>
+        <span class="provider-badge provider-badge-ticker">{{ article.ticker }}</span>
+        <span class="provider-badge">RavenPack</span>
+        <h4>{{ article.headline }}</h4>
+      </div>
+      <button type="button" class="btn btn-secondary btn-small"
+              onclick="document.getElementById('ravenpack-article-panel').innerHTML='<p class=&quot;muted&quot;>Select a RavenPack row to inspect relevance and features.</p>'">Close</button>
+    </div>
+    {% if article.note %}<div class="alert alert-info">{{ article.note }}</div>{% endif %}
+    {% if article.event_text %}<p class="rp-event-text">{{ article.event_text }}</p>{% endif %}
+    <div class="metric-row">
+      <div class="metric"><span class="metric-label">Relevance</span><span class="metric-value">{% if article.relevance_score is not none %}{{ "%.2f"|format(article.relevance_score) }}{% else %}—{% endif %}</span></div>
+      <div class="metric"><span class="metric-label">Event sentiment</span><span class="metric-value">{% if article.event_sentiment_score is not none %}{{ "%.3f"|format(article.event_sentiment_score) }}{% else %}—{% endif %}</span></div>
+      <div class="metric"><span class="metric-label">Sentiment × relevance</span><span class="metric-value">{% if article.sentiment_score is not none %}{{ "%.3f"|format(article.sentiment_score) }}{% else %}—{% endif %}</span></div>
+    </div>
+    <div class="metric-row">
+      <div class="metric"><span class="metric-label">Topic</span><span class="metric-value compact">{{ article.topic or "—" }}</span></div>
+      <div class="metric"><span class="metric-label">Group</span><span class="metric-value compact">{{ article.group or "—" }}</span></div>
+      <div class="metric"><span class="metric-label">Type</span><span class="metric-value compact">{{ article.type or "—" }}</span></div>
+      <div class="metric"><span class="metric-label">Sub-type</span><span class="metric-value compact">{{ article.sub_type or "—" }}</span></div>
+    </div>
+    <p class="muted">
+      {% if article.article_time %}{{ article.article_time }} · {% endif %}
+      {{ article.news_type or "—" }} · {{ article.source_name or "—" }}
+      {% if article.rp_story_id %} · <code>{{ article.rp_story_id }}</code>{% endif %}
+    </p>
+    <details>
+      <summary>Advanced scores (css, nip)</summary>
+      <p class="muted">css={{ article.css if article.css is not none else "—" }} · nip={{ article.nip if article.nip is not none else "—" }}</p>
+    </details>
+  </article>
+{% endif %}

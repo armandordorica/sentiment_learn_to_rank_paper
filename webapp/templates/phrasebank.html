@@ -4,10 +4,15 @@
   <div class="card">
     <h1>3 · PhraseBank HF Baseline</h1>
     <p class="muted">
-      Ported from Streamlit <code>app.py</code> → <code>render_phrasebank_hf_baseline_tab()</code>
-      (sections 3A/3C). Benchmark classifier: <code>distilbert-base-uncased</code> fine-tuned on
-      Financial PhraseBank.
+      Benchmark classifier: <code>distilbert-base-uncased</code> fine-tuned on Financial PhraseBank.
     </p>
+    <nav class="section-nav" aria-label="PhraseBank sections">
+      <a href="#pb-3a">3A Model</a>
+      <a href="#pb-3b">3B Recipe</a>
+      <a href="#pb-3c">3C Metrics</a>
+      <a href="#pb-3d">3D Dataset</a>
+      <a href="#pb-3f">3F W&amp;B</a>
+    </nav>
 
     {% if not deps.finetuning_deps_available %}
       <div class="alert alert-error">
@@ -19,97 +24,130 @@
         No saved PhraseBank checkpoint found — train it first (Sentiment Lab tab / notebook).
       </div>
     {% else %}
-      <h3>3A · Model &amp; training</h3>
-      <div class="metric-row">
-        <div class="metric"><span class="metric-label">Backbone</span><span class="metric-value">{{ training.model_name }}</span></div>
-        <div class="metric"><span class="metric-label">Epochs</span><span class="metric-value">{{ training.epochs }}</span></div>
-        <div class="metric"><span class="metric-label">Device</span><span class="metric-value">{{ training.device }}</span></div>
-      </div>
-
-      <h3>3C · Performance metrics</h3>
-      <div class="metric-row">
-        <div class="metric"><span class="metric-label">Test macro-F1</span><span class="metric-value">{{ "%.1f%%"|format(training.test_f1 * 100) if training.test_f1 is not none else "—" }}</span></div>
-        <div class="metric"><span class="metric-label">Test accuracy</span><span class="metric-value">{{ "%.1f%%"|format(training.test_acc * 100) if training.test_acc is not none else "—" }}</span></div>
-        <div class="metric"><span class="metric-label">Val macro-F1</span><span class="metric-value">{{ "%.1f%%"|format(training.val_f1 * 100) if training.val_f1 is not none else "—" }}</span></div>
-        <div class="metric"><span class="metric-label">Val accuracy</span><span class="metric-value">{{ "%.1f%%"|format(training.val_acc * 100) if training.val_acc is not none else "—" }}</span></div>
-      </div>
-      <p class="muted">
-        <strong>macro-F1</strong> is the primary metric (equal weight per class).
-        {% if training.train_loss is not none %}Train loss: {{ "%.3f"|format(training.train_loss) }}{% endif %}
-      </p>
-      <p><a class="btn btn-secondary wandb-link" href="{{ training.wandb.url }}" target="_blank" rel="noopener">↗ Open checkpoint in Weights &amp; Biases</a></p>
-
-      <h4>Performance on the training set</h4>
-      <p class="muted">
-        <code>train_baseline()</code> only evaluates the <strong>validation</strong> and
-        <strong>test</strong> splits during training — the train-split score is never computed
-        or saved to <code>metrics.json</code>. Click below to score the saved checkpoint on the
-        <strong>train split itself</strong> (the same rows it was fine-tuned on), using the
-        identical <code>evaluate_checkpoint_on_split()</code> function the Streamlit tab uses —
-        so the numbers below must match the Streamlit "▶ Evaluate on train split" button exactly.
-        This number is expected to be <strong>higher</strong> than validation/test.
-      </p>
-
-      <button class="btn btn-primary"
-              hx-post="/phrasebank/train-eval"
-              hx-target="#train-eval-result"
-              hx-swap="innerHTML"
-              hx-indicator="#train-eval-spinner">
-        ▶ Evaluate on train split
-      </button>
-      <span id="train-eval-spinner" class="htmx-indicator muted">&nbsp;scoring… this may take a minute.</span>
-
-      <div id="train-eval-result">
-        {% include "partials/phrasebank_train_eval.html" %}
-      </div>
-
-      <h3>3D · Dataset dashboard</h3>
-      <p class="muted">
-        Financial PhraseBank: gold-label composition, split sizes, and how the saved
-        checkpoint scores every sentence in each split. Charts below are the exact same
-        Plotly figures Streamlit renders (<code>horizontal_bar_figure</code>,
-        <code>vertical_bar_figure</code>, <code>split_series_distribution_figures</code>
-        from <code>sentiment_ltr.viz</code>) — just embedded via <code>fig.to_html()</code>
-        instead of <code>st.plotly_chart()</code>.
-      </p>
-
-      {% if dataset %}
-        <h4>Gold labels &amp; splits</h4>
+      <section id="pb-3a">
+        <h3>3A · Model &amp; training</h3>
         <div class="metric-row">
-          <div class="metric"><span class="metric-label">Train rows</span><span class="metric-value">{{ "{:,}".format(dataset.train_rows) }}</span></div>
-          <div class="metric"><span class="metric-label">Validation rows</span><span class="metric-value">{{ "{:,}".format(dataset.val_rows) }}</span></div>
-          <div class="metric"><span class="metric-label">Test rows</span><span class="metric-value">{{ "{:,}".format(dataset.test_rows) }}</span></div>
-          <div class="metric"><span class="metric-label">Total</span><span class="metric-value">{{ "{:,}".format(dataset.total_rows) }}</span></div>
+          <div class="metric"><span class="metric-label">Backbone</span><span class="metric-value">{{ training.model_name }}</span></div>
+          <div class="metric"><span class="metric-label">Epochs</span><span class="metric-value">{{ training.epochs }}</span></div>
+          <div class="metric"><span class="metric-label">Learning rate</span><span class="metric-value">{{ training.learning_rate }}</span></div>
+          <div class="metric"><span class="metric-label">Batch size</span><span class="metric-value">{{ training.batch_size }}</span></div>
         </div>
-        <div class="chart-grid">
-          <div class="chart-cell">{{ dataset.balance_chart_html | safe }}</div>
-          <div class="chart-cell">{{ dataset.splits_chart_html | safe }}</div>
-        </div>
-      {% else %}
-        <p class="muted">Could not load dataset summary.</p>
-      {% endif %}
-
-      <h4>Predicted probabilities on each split</h4>
-      <p class="muted">
-        Scores from the saved checkpoint on every sentence (not gold-label accuracy).
-        Whisker plot = full distribution; bar chart = <strong>median (p50)</strong> per class.
-      </p>
-      {% if probability_charts %}
-        <div class="chart-cell">{{ probability_charts.box_chart_html | safe }}</div>
-        <div class="chart-cell">{{ probability_charts.median_chart_html | safe }}</div>
         <table class="data-table">
-          <thead>
-            <tr>{% for col in probability_charts.p50_columns %}<th>{{ col }}</th>{% endfor %}</tr>
-          </thead>
           <tbody>
-            {% for row in probability_charts.p50_rows %}
-              <tr>{% for col in probability_charts.p50_columns %}<td>{{ "%.3f"|format(row[col]) if row[col] is number else row[col] }}</td>{% endfor %}</tr>
-            {% endfor %}
+            <tr><th>Checkpoint</th><td><code>{{ training.checkpoint_path }}</code> ({{ "on disk" if training.has_model else "metrics only" }})</td></tr>
+            <tr><th>Base weights</th><td><code>{{ training.model_name_full }}</code></td></tr>
+            <tr><th>Task</th><td>3-way sequence classification (negative / neutral / positive)</td></tr>
+            <tr><th>Max tokens</th><td>{{ training.max_length }}</td></tr>
+            <tr><th>Best checkpoint</th><td>validation macro-F1 (<code>load_best_model_at_end</code>)</td></tr>
+            <tr><th>Training device</th><td>{{ training.device }}</td></tr>
+            <tr><th>Notebook</th><td><code>notebooks/liquidAI_prep.ipynb</code></td></tr>
           </tbody>
         </table>
-      {% else %}
-        <p class="muted">No saved checkpoint — train the model in Sentiment Lab to populate these charts.</p>
-      {% endif %}
+      </section>
+
+      <section id="pb-3f">
+        <h3>3F · W&amp;B experiment tracking</h3>
+        <p class="muted">
+          Trainer runs and imported offline metrics sync to <code>{{ training.wandb_tracking.project }}</code>.
+        </p>
+        <p class="btn-row">
+          <a class="btn btn-secondary wandb-link" href="{{ training.wandb_tracking.project_url }}" target="_blank" rel="noopener">Open W&amp;B project</a>
+          {% for run in training.wandb_tracking.runs %}
+            <a class="btn btn-secondary wandb-link" href="{{ run.url }}" target="_blank" rel="noopener">{{ run.label }}</a>
+          {% endfor %}
+        </p>
+      </section>
+
+      <section id="pb-3b">
+        <h3>3B · Reproduction recipe</h3>
+        <p class="muted">
+          Settings and code pointers for <code>phrasebank_sentiment.train_baseline()</code> —
+          shared by this page, Interactive validation, and <code>notebooks/liquidAI_prep.ipynb</code>.
+        </p>
+        {% for section, rows in training.recipe.items() %}
+          <h4>{{ section }}</h4>
+          <table class="data-table">
+            <thead><tr><th>Item</th><th>Value / pointer</th></tr></thead>
+            <tbody>
+              {% for key, value in rows %}
+                <tr><td><strong>{{ key }}</strong></td><td>{{ value|safe }}</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% endfor %}
+      </section>
+
+      <section id="pb-3c">
+        <h3>3C · Performance metrics</h3>
+        <div class="metric-row">
+          <div class="metric"><span class="metric-label">Test macro-F1</span><span class="metric-value">{{ "%.1f%%"|format(training.test_f1 * 100) if training.test_f1 is not none else "—" }}</span></div>
+          <div class="metric"><span class="metric-label">Test accuracy</span><span class="metric-value">{{ "%.1f%%"|format(training.test_acc * 100) if training.test_acc is not none else "—" }}</span></div>
+          <div class="metric"><span class="metric-label">Val macro-F1</span><span class="metric-value">{{ "%.1f%%"|format(training.val_f1 * 100) if training.val_f1 is not none else "—" }}</span></div>
+          <div class="metric"><span class="metric-label">Val accuracy</span><span class="metric-value">{{ "%.1f%%"|format(training.val_acc * 100) if training.val_acc is not none else "—" }}</span></div>
+        </div>
+        <p class="muted">
+          <strong>macro-F1</strong> is the primary metric (equal weight per class).
+          {% if training.train_loss is not none %}Train loss: {{ "%.3f"|format(training.train_loss) }}{% endif %}
+        </p>
+        <p><a class="btn btn-secondary wandb-link" href="{{ training.wandb.url }}" target="_blank" rel="noopener">↗ Open checkpoint in Weights &amp; Biases</a></p>
+
+        <h4>Performance on the training set</h4>
+        <p class="muted">
+          Click below to score the saved checkpoint on the <strong>train split</strong>
+          (never persisted to <code>metrics.json</code> during training).
+        </p>
+        <button class="btn btn-primary"
+                hx-post="/phrasebank/train-eval"
+                hx-target="#train-eval-result"
+                hx-swap="innerHTML"
+                hx-indicator="#train-eval-spinner">
+          ▶ Evaluate on train split
+        </button>
+        <span id="train-eval-spinner" class="htmx-indicator muted">&nbsp;scoring… this may take a minute.</span>
+        <div id="train-eval-result">
+          {% include "partials/phrasebank_train_eval.html" %}
+        </div>
+      </section>
+
+      <section id="pb-3d">
+        <h3>3D · Dataset dashboard</h3>
+        <p class="muted">
+          Gold-label composition, split sizes, and predicted probabilities from the saved checkpoint.
+        </p>
+        {% if dataset %}
+          <h4>Gold labels &amp; splits</h4>
+          <div class="metric-row">
+            <div class="metric"><span class="metric-label">Train rows</span><span class="metric-value">{{ "{:,}".format(dataset.train_rows) }}</span></div>
+            <div class="metric"><span class="metric-label">Validation rows</span><span class="metric-value">{{ "{:,}".format(dataset.val_rows) }}</span></div>
+            <div class="metric"><span class="metric-label">Test rows</span><span class="metric-value">{{ "{:,}".format(dataset.test_rows) }}</span></div>
+            <div class="metric"><span class="metric-label">Total</span><span class="metric-value">{{ "{:,}".format(dataset.total_rows) }}</span></div>
+          </div>
+          <div class="chart-grid">
+            <div class="chart-cell">{{ dataset.balance_chart_html | safe }}</div>
+            <div class="chart-cell">{{ dataset.splits_chart_html | safe }}</div>
+          </div>
+        {% else %}
+          <p class="muted">Could not load dataset summary.</p>
+        {% endif %}
+
+        <h4>Predicted probabilities on each split</h4>
+        {% if probability_charts %}
+          <div class="chart-cell">{{ probability_charts.box_chart_html | safe }}</div>
+          <div class="chart-cell">{{ probability_charts.median_chart_html | safe }}</div>
+          <table class="data-table">
+            <thead>
+              <tr>{% for col in probability_charts.p50_columns %}<th>{{ col }}</th>{% endfor %}</tr>
+            </thead>
+            <tbody>
+              {% for row in probability_charts.p50_rows %}
+                <tr>{% for col in probability_charts.p50_columns %}<td>{{ "%.3f"|format(row[col]) if row[col] is number else row[col] }}</td>{% endfor %}</tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% else %}
+          <p class="muted">No saved checkpoint — train the model in Interactive validation to populate these charts.</p>
+        {% endif %}
+      </section>
     {% endif %}
   </div>
 {% endblock %}
