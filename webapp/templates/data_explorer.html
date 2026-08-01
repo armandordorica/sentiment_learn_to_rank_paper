@@ -14,7 +14,8 @@
     <a href="#de-1c">1C · Price charts</a>
     <a href="#de-1d">1D · Refinitiv headlines &amp; stories</a>
     <a href="#de-1e">1E · RavenPack sentiment</a>
-    <a href="#de-1f">1F · Full provider tables</a>
+    <a href="#de-1f">1F · Soft-match comparison</a>
+    <a href="#de-1g">1G · Full provider tables</a>
   </nav>
   <p id="section-nav-hint" class="alert alert-info" hidden></p>
 
@@ -56,15 +57,16 @@
     </form>
   </section>
 </div>
-{# Keep stable anchor targets so 1B–1F nav links always resolve; HTMX replaces this block after Load data. #}
+{# Keep stable anchor targets so 1B–1G nav links always resolve; HTMX replaces this block after Load data. #}
 <div id="explorer-results">
   <div class="card result-card">
-    <p class="muted">Choose a ticker and click <strong>Load data</strong> to populate sections 1B–1F below.</p>
+    <p class="muted">Choose a ticker and click <strong>Load data</strong> to populate sections 1B–1G below.</p>
     <section id="de-1b"><h3>1B · Provider coverage snapshot</h3><p class="muted">Waiting for data…</p></section>
     <section id="de-1c"><h3>1C · Price charts</h3><p class="muted">Waiting for data…</p></section>
     <section id="de-1d"><h3>1D · Refinitiv headlines &amp; stories</h3><p class="muted">Waiting for data…</p></section>
     <section id="de-1e"><h3>1E · RavenPack sentiment</h3><p class="muted">Waiting for data…</p></section>
-    <section id="de-1f"><h3>1F · Full provider tables</h3><p class="muted">Waiting for data…</p></section>
+    <section id="de-1f"><h3>1F · Soft-match comparison</h3><p class="muted">Waiting for data…</p></section>
+    <section id="de-1g"><h3>1G · Full provider tables</h3><p class="muted">Waiting for data…</p></section>
   </div>
 </div>
 {% endblock %}

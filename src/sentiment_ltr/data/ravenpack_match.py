@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,16 @@ _UPDATE_PREFIX = re.compile(
     r"^(?:update\s*\d+\s*[-–—]\s*|media\s*[-–—]\s*|press\s+digest\s*[-–—]\s*)",
     re.IGNORECASE,
 )
+
+# Function words + weak verbs that inflate Jaccard without meaning "same story".
+_STOPWORDS = frozenset({
+    "the", "and", "for", "with", "from", "that", "this", "are", "was", "were",
+    "will", "has", "have", "had", "its", "into", "onto", "over", "under",
+    "about", "after", "before", "between", "through", "during", "without",
+    "within", "available", "makes", "made", "lands", "land", "new", "says",
+    "say", "said", "update", "press", "media", "inc", "corp", "ltd", "plc",
+    "shares", "share", "stock", "stocks", "company", "systems",
+})
 
 
 def soft_headline(value: object) -> str:
@@ -35,16 +46,36 @@ def token_set(value: object) -> set[str]:
     return set(re.findall(r"[a-z0-9]{3,}", soft_headline(value)))
 
 
+def content_token_set(value: object) -> set[str]:
+    """Tokens that carry topic signal (drop stopwords and pure digits)."""
+    return {t for t in token_set(value) if t not in _STOPWORDS and not t.isdigit()}
+
+
 def headline_match_score(left: object, right: object) -> float:
-    """1.0 exact soft-key match; otherwise token Jaccard in [0, 1)."""
-    if not soft_headline(left) or not soft_headline(right):
+    """1.0 exact soft-key match; else max of Jaccard, content overlap, sequence ratio.
+
+    Wire desks and RavenPack often rewrite the same story with different verbs
+    (e.g. Sony Interview pay-TV vs cable/satellite), so plain Jaccard alone is
+    too brittle.
+    """
+    soft_left = soft_headline(left)
+    soft_right = soft_headline(right)
+    if not soft_left or not soft_right:
         return 0.0
     if headline_key(left) == headline_key(right):
         return 1.0
     a, b = token_set(left), token_set(right)
     if not a or not b:
         return 0.0
-    return len(a & b) / len(a | b)
+    jaccard = len(a & b) / len(a | b)
+
+    ca, cb = content_token_set(left), content_token_set(right)
+    content_overlap = 0.0
+    if ca and cb and len(ca & cb) >= 2:
+        content_overlap = len(ca & cb) / min(len(ca), len(cb))
+
+    seq = SequenceMatcher(None, soft_left, soft_right).ratio()
+    return max(jaccard, content_overlap, seq)
 
 
 def _ensure_relevance_score(frame: pd.DataFrame) -> pd.DataFrame:
@@ -71,11 +102,14 @@ def find_best_ravenpack_match(
     story_time: pd.Timestamp | None,
     window_hours: float = 36.0,
     min_score: float = 0.45,
+    fallback_outside_window: bool = True,
 ) -> dict[str, Any] | None:
     """Return the best RavenPack row for ``headline`` near ``story_time``.
 
     Requires a ``headline`` column on ``articles``. Returns ``None`` when no row
-    clears ``min_score``.
+    clears ``min_score``. When ``fallback_outside_window`` is False and no
+    RavenPack rows fall inside the time window, return ``None`` instead of
+    scanning the full corpus.
     """
     if not isinstance(articles, pd.DataFrame) or articles.empty or "headline" not in articles.columns:
         return None
@@ -89,9 +123,16 @@ def find_best_ravenpack_match(
         center = pd.Timestamp(story_time).tz_localize(None) if getattr(story_time, "tzinfo", None) else pd.Timestamp(story_time)
         delta = pd.Timedelta(hours=window_hours)
         in_window = times.notna() & (times >= center - delta) & (times <= center + delta)
-        candidates = work.loc[in_window] if in_window.any() else work
+        if in_window.any():
+            candidates = work.loc[in_window]
+        elif fallback_outside_window:
+            candidates = work
+        else:
+            return None
         cand_times = times.loc[candidates.index]
     else:
+        if not fallback_outside_window:
+            return None
         candidates = work
         cand_times = times
 
@@ -231,69 +272,77 @@ def resolve_ravenpack_for_story(
     day_cache_dir: Path | None = None,
     query_day_fn=None,
 ) -> dict[str, Any]:
-    """Best-effort RavenPack relevance context for a Refinitiv story click."""
+    """Best-effort RavenPack relevance via **headline soft-match**, not timestamps.
+
+    Timestamp-adjacent RavenPack events are *not* used to invent a relevance score
+    (many unrelated stories share a day). Matching requires a headline-bearing
+    RavenPack frame.
+    """
     center = pd.to_datetime(story_time, utc=True, errors="coerce")
     if pd.isna(center):
         center = None
     else:
         center = center.tz_localize(None) if getattr(center, "tzinfo", None) else center
 
-    # 1) Prefer a text-bearing day pull (live or day-cache).
+    errors: list[str] = []
+
+    def _try_match(frame: pd.DataFrame | None, source: str) -> dict[str, Any] | None:
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return None
+        if "headline" not in frame.columns or not frame["headline"].notna().any():
+            return None
+        hit = find_best_ravenpack_match(frame, headline=headline, story_time=center)
+        if hit:
+            hit["source"] = source
+            return hit
+        return None
+
+    # 1) Prefer already-loaded / rich cached articles with headlines.
+    hit = _try_match(cached_articles, "cached_headline_match")
+    if hit:
+        return hit
+
+    # 2) Optional WRDS day pull with headlines (narrow window for live assist).
     if center is not None and day_cache_dir is not None and query_day_fn is not None:
         try:
-            day_frame = load_ravenpack_day_with_text(
-                ticker,
-                center.strftime("%Y-%m-%d"),
-                cache_dir=day_cache_dir,
-                query_fn=query_day_fn,
-            )
-            hit = find_best_ravenpack_match(
-                day_frame, headline=headline, story_time=center
-            )
+            day_frames = []
+            for offset in (0, -1, 1):
+                day = (center + pd.Timedelta(days=offset)).strftime("%Y-%m-%d")
+                day_frames.append(
+                    load_ravenpack_day_with_text(
+                        ticker, day, cache_dir=day_cache_dir, query_fn=query_day_fn
+                    )
+                )
+            day_frame = pd.concat(
+                [f for f in day_frames if isinstance(f, pd.DataFrame) and not f.empty],
+                ignore_index=True,
+            ) if any(isinstance(f, pd.DataFrame) and not f.empty for f in day_frames) else pd.DataFrame()
+            hit = _try_match(day_frame, "day_headline_match")
             if hit:
-                hit["source"] = "day_headline_match"
                 return hit
-            # Also try ±1 calendar day if the story is near midnight.
-            for offset in (-1, 1):
-                other = (center + pd.Timedelta(days=offset)).strftime("%Y-%m-%d")
-                other_frame = load_ravenpack_day_with_text(
-                    ticker, other, cache_dir=day_cache_dir, query_fn=query_day_fn
-                )
-                hit = find_best_ravenpack_match(
-                    other_frame, headline=headline, story_time=center
-                )
-                if hit:
-                    hit["source"] = "day_headline_match"
-                    return hit
-        except Exception as exc:  # noqa: BLE001 — UI must still show the story
-            day_error = str(exc)[:200]
-        else:
-            day_error = None
-    else:
-        day_error = None
+        except Exception as exc:  # noqa: BLE001
+            errors.append(str(exc)[:200])
 
-    # 2) Try headline match against whatever the explorer already loaded.
-    if isinstance(cached_articles, pd.DataFrame) and not cached_articles.empty:
-        hit = find_best_ravenpack_match(
-            cached_articles, headline=headline, story_time=center
-        )
-        if hit:
-            return hit
-        nearby = nearby_ravenpack_summary(cached_articles, story_time=center)
-        if nearby:
-            if day_error:
-                nearby["note"] = f"{nearby['note']} Day text pull failed: {day_error}"
-            return nearby
+    note = (
+        "No RavenPack headline matched this Refinitiv story. "
+        "Relevance is only shown for a soft-matched RavenPack title "
+        "(not by timestamp proximity)."
+    )
+    if errors:
+        note = f"{note} Day headline pull failed: {errors[0]}"
+    elif isinstance(cached_articles, pd.DataFrame) and not cached_articles.empty:
+        if "headline" not in cached_articles.columns or not cached_articles["headline"].notna().any():
+            note = (
+                "Cached RavenPack rows for this ticker have no headlines yet. "
+                "Re-pull RavenPack (headlines are now always included) or use the "
+                "rich export under data/raw/news/ravenpack/."
+            )
 
     return {
         "matched": False,
         "match_score": None,
         "source": "none",
-        "note": (
-            day_error
-            or "No RavenPack relevance found near this story. "
-            "Enable RavenPack for the ticker load, or check WRDS credentials for a day text pull."
-        ),
+        "note": note,
         "relevance_score": None,
         "event_sentiment_score": None,
         "sentiment_score": None,

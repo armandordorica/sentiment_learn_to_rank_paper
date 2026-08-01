@@ -1,0 +1,99 @@
+{# Expects `articles` dict from ravenpack_article_list / ravenpack_list_from_cache. #}
+{% set a = articles %}
+{% set ticker = a.ticker %}
+<details class="headline-list-disclosure" {% if expanded %}open{% endif %}>
+  <summary>
+    <strong>RavenPack article list</strong>
+    <span class="muted">
+      — showing {{ "{:,}".format(a.shown) }}
+      {% if a.query %}of {{ "{:,}".format(a.matched) }} matches {% endif %}
+      of {{ "{:,}".format(a.total) }} · click to expand
+    </span>
+  </summary>
+
+  <form class="headline-toolbar"
+        hx-get="/data-explorer/ravenpack-articles"
+        hx-target="#ravenpack-list-panel"
+        hx-swap="innerHTML"
+        hx-indicator="#ravenpack-list-spinner">
+    <input type="hidden" name="ticker" value="{{ ticker }}">
+    <input type="hidden" name="start_date" value="{{ a.start_date }}">
+    <input type="hidden" name="end_date" value="{{ a.end_date }}">
+    <label>Top N
+      <select name="limit" onchange="this.form.requestSubmit()">
+        {% for n in a.limit_choices %}
+          <option value="{{ n }}" {% if n == a.limit %}selected{% endif %}>{{ n }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="headline-filter">Filter
+      <input type="search" name="q" value="{{ a.query }}"
+             placeholder="headline, topic, story id…"
+             {% if not a.has_headline %}disabled title="No headlines in this cache"{% endif %}
+             hx-get="/data-explorer/ravenpack-articles"
+             hx-target="#ravenpack-list-panel"
+             hx-swap="innerHTML"
+             hx-indicator="#ravenpack-list-spinner"
+             hx-trigger="keyup changed delay:300ms, search"
+             hx-include="closest form">
+    </label>
+    <label>Sort
+      <select name="sort" onchange="this.form.requestSubmit()">
+        <option value="date_desc" {% if a.sort == "date_desc" %}selected{% endif %}>Date · newest</option>
+        <option value="date_asc" {% if a.sort == "date_asc" %}selected{% endif %}>Date · oldest</option>
+        <option value="relevance_desc" {% if a.sort == "relevance_desc" %}selected{% endif %}>Relevance · high</option>
+        <option value="relevance_asc" {% if a.sort == "relevance_asc" %}selected{% endif %}>Relevance · low</option>
+        <option value="headline_asc" {% if a.sort == "headline_asc" %}selected{% endif %}>Headline · A–Z</option>
+        <option value="headline_desc" {% if a.sort == "headline_desc" %}selected{% endif %}>Headline · Z–A</option>
+      </select>
+    </label>
+    <button type="submit" class="btn btn-secondary btn-small">Apply</button>
+  </form>
+
+  <p class="muted">
+    {% if a.query %}
+      Filter <code>{{ a.query }}</code> matched {{ "{:,}".format(a.matched) }} of {{ "{:,}".format(a.total) }};
+      showing top {{ "{:,}".format(a.shown) }}.
+    {% else %}
+      Showing top {{ "{:,}".format(a.shown) }} of {{ "{:,}".format(a.total) }} RavenPack rows.
+    {% endif %}
+  </p>
+
+  <div class="headline-table-wrap">
+    <table class="data-table headline-table">
+      <thead>
+        <tr>
+          <th>Time</th>
+          {% if a.has_headline %}<th>Headline</th>{% endif %}
+          <th>Relevance</th>
+          <th>Event sent.</th>
+          <th>Topic</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in a.rows %}
+          <tr>
+            <td class="headline-date">{{ row.article_time or "—" }}</td>
+            {% if a.has_headline %}<td>{{ row.headline or "—" }}</td>{% endif %}
+            <td>{% if row.relevance_score is not none %}{{ "%.2f"|format(row.relevance_score) }}{% else %}—{% endif %}</td>
+            <td>{% if row.event_sentiment_score is not none %}{{ "%.3f"|format(row.event_sentiment_score) }}{% else %}—{% endif %}</td>
+            <td>{{ row.topic or "—" }}</td>
+            <td>
+              <form hx-post="/data-explorer/ravenpack-article" hx-target="#ravenpack-article-panel" hx-swap="innerHTML">
+                <input type="hidden" name="ticker" value="{{ ticker }}">
+                <input type="hidden" name="rp_story_id" value="{{ row.rp_story_id or '' }}">
+                <input type="hidden" name="article_time" value="{{ row.article_time or '' }}">
+                <input type="hidden" name="headline" value="{{ row.headline or '' }}">
+                <button type="submit" class="btn btn-secondary btn-small">Inspect</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="{% if a.has_headline %}6{% else %}5{% endif %}" class="muted">No RavenPack rows match this filter.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <span id="ravenpack-list-spinner" class="htmx-indicator muted"> Updating RavenPack list…</span>
+</details>

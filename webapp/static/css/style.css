@@ -521,6 +521,17 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 .headline-table thead { position: sticky; top: 0; z-index: 1; }
 .headline-table form { margin: 0; }
 .headline-date { white-space: nowrap; }
+.check-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+  font-size: .85rem;
+  white-space: nowrap;
+}
+.soft-match-table { min-width: 1100px; }
+.soft-match-hit td:nth-child(3),
+.soft-match-hit td:nth-child(4) { font-weight: 500; }
+.soft-match-miss { opacity: 0.72; }
 .story-id { display: inline-block; max-width: 18rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .btn-small { padding: .35rem .6rem; font-size: .8rem; white-space: nowrap; }
 .refinitiv-story { margin-top: 1rem; border: 1px solid var(--border); border-radius: .55rem; padding: 1rem 1.1rem; background: #fff; }

@@ -511,7 +511,7 @@ def query_ravenpack_articles(
     year_progress_callback: Callable[[int, int, float, "str | None"], None] | None = None,
     year_timeout_s: int = 90,
     *,
-    include_text: bool = False,
+    include_text: bool = True,
 ) -> pd.DataFrame:
     """Fetch RavenPack sentiment articles for a ticker from WRDS.
 
@@ -522,6 +522,10 @@ def query_ravenpack_articles(
     year's table is very large.  Each year query has a server-side statement_timeout
     of `year_timeout_s` seconds; timed-out years are skipped and the connection is
     rolled back so subsequent years can still run.
+
+    By default selects ``headline`` and ``event_text`` (null when RavenPack has no
+    event snippet). Pass ``include_text=False`` only for size-constrained pulls;
+    ``headline`` is still always selected so Refinitiv soft-matching remains possible.
 
     year_progress_callback(yr, n_rows, elapsed_s, error_str | None) is called after
     each year so callers can log real-time progress without polling.
@@ -593,8 +597,8 @@ def query_ravenpack_articles(
                 rp_entity_id = best_id
 
         # ── Year-by-year fetch with per-query server-side timeout ───────────────
-        # Batch pulls omit headline / event_text to keep parquet size down; UI pulls
-        # can request them via include_text=True.
+        # Always pull ``headline``. Default also pulls ``event_text`` when present
+        # on WRDS (many rows are null — e.g. tabular listings).
         if include_text:
             cols = (
                 "timestamp_utc, rp_story_id, relevance, event_sentiment_score, headline, event_text, "
@@ -602,7 +606,7 @@ def query_ravenpack_articles(
             )
         else:
             cols = (
-                "timestamp_utc, rp_story_id, relevance, event_sentiment_score, "
+                "timestamp_utc, rp_story_id, relevance, event_sentiment_score, headline, "
                 "source_name, topic, \"group\", \"type\", "
                 "sub_type, news_type, css, nip"
             )

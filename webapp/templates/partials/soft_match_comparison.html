@@ -1,0 +1,97 @@
+{# Expects `soft_matches` dict from soft_match_comparison / soft_match_from_cache. #}
+{% set s = soft_matches %}
+{% set ticker = s.ticker %}
+<details class="headline-list-disclosure" open>
+  <summary>
+    <strong>Soft-match comparison</strong>
+    <span class="muted">
+      — {{ "{:,}".format(s.shown) }} rows
+      {% if s.matched is defined %}· {{ "{:,}".format(s.matched) }} matched{% endif %}
+      · click to expand
+    </span>
+  </summary>
+
+  <form class="headline-toolbar"
+        hx-get="/data-explorer/soft-matches"
+        hx-target="#soft-match-panel"
+        hx-swap="innerHTML"
+        hx-indicator="#soft-match-spinner">
+    <input type="hidden" name="ticker" value="{{ ticker }}">
+    <input type="hidden" name="start_date" value="{{ s.start_date }}">
+    <input type="hidden" name="end_date" value="{{ s.end_date }}">
+    <label>Top N Refinitiv
+      <select name="limit" onchange="this.form.requestSubmit()">
+        {% for n in s.limit_choices %}
+          <option value="{{ n }}" {% if n == s.limit %}selected{% endif %}>{{ n }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="headline-filter">Filter Refinitiv
+      <input type="search" name="q" value="{{ s.query }}"
+             placeholder="e.g. sony, interview…"
+             hx-get="/data-explorer/soft-matches"
+             hx-target="#soft-match-panel"
+             hx-swap="innerHTML"
+             hx-indicator="#soft-match-spinner"
+             hx-trigger="keyup changed delay:350ms, search"
+             hx-include="closest form">
+    </label>
+    <label>Min score
+      <select name="min_score" onchange="this.form.requestSubmit()">
+        {% for score in [0.30, 0.45, 0.55, 0.70] %}
+          <option value="{{ score }}" {% if (s.min_score|float) == score %}selected{% endif %}>{{ "%.2f"|format(score) }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label class="check-inline">
+      <input type="checkbox" name="matched_only" value="true"
+             {% if s.matched_only %}checked{% endif %}
+             onchange="this.form.requestSubmit()">
+      Matched only
+    </label>
+    <button type="submit" class="btn btn-secondary btn-small">Apply</button>
+  </form>
+
+  <p class="muted">
+    Each Refinitiv headline is soft-matched to RavenPack within a {{ s.window_hours }}h window
+    (score ≥ {{ "%.2f"|format(s.min_score) }}; never by timestamp alone).
+    {% if s.query %}
+      Filter <code>{{ s.query }}</code> · {{ "{:,}".format(s.candidates) }} Refinitiv candidates ·
+      {{ "{:,}".format(s.matched) }} matched.
+    {% else %}
+      Showing newest {{ "{:,}".format(s.candidates) }} of {{ "{:,}".format(s.total_refinitiv) }} Refinitiv headlines ·
+      {{ "{:,}".format(s.matched) }} matched.
+    {% endif %}
+  </p>
+  {% if s.note %}<div class="alert alert-info">{{ s.note }}</div>{% endif %}
+
+  <div class="headline-table-wrap">
+    <table class="data-table headline-table soft-match-table">
+      <thead>
+        <tr>
+          <th>date_refinitiv</th>
+          <th>date_ravenpack</th>
+          <th>headline_refinitiv</th>
+          <th>headline_ravenpack</th>
+          <th>score</th>
+          <th>relevance</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in s.rows %}
+          <tr class="{% if row.matched %}soft-match-hit{% else %}soft-match-miss{% endif %}">
+            <td class="headline-date">{{ row.date_refinitiv or "—" }}</td>
+            <td class="headline-date">{{ row.date_ravenpack or "—" }}</td>
+            <td>{{ row.headline_refinitiv or "—" }}</td>
+            <td>{{ row.headline_ravenpack or "—" }}</td>
+            <td>{% if row.match_score is not none %}{{ "%.2f"|format(row.match_score) }}{% else %}—{% endif %}</td>
+            <td>{% if row.relevance_score is not none %}{{ "%.2f"|format(row.relevance_score) }}{% else %}—{% endif %}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="6" class="muted">No rows to compare for this filter / threshold.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <span id="soft-match-spinner" class="htmx-indicator muted"> Updating soft-match table…</span>
+</details>

@@ -17,6 +17,15 @@ def test_headline_match_strips_wire_prefixes():
     ) >= 0.8
 
 
+def test_headline_match_rewritten_same_story():
+    """Refinitiv and RavenPack often rewrite the same event with different verbs."""
+    score = headline_match_score(
+        "UPDATE 2-Sony's 'Interview' lands on pay TV and in 580 theaters",
+        "Sony Makes 'The Interview' Available on Cable, Satellite Systems",
+    )
+    assert score >= 0.45
+
+
 def test_find_best_ravenpack_match_prefers_windowed_headline():
     articles = pd.DataFrame({
         "timestamp_utc": pd.to_datetime([
@@ -47,7 +56,8 @@ def test_find_best_ravenpack_match_prefers_windowed_headline():
     assert hit["event_text"] == "stylus event"
 
 
-def test_nearby_fallback_without_headlines():
+def test_nearby_helper_still_available_but_resolve_does_not_use_it():
+    """Timestamp-adjacent scores must not be assigned as this story's relevance."""
     articles = pd.DataFrame({
         "timestamp_utc": pd.to_datetime(["2014-12-31 20:00:00", "2014-12-31 21:00:00"]),
         "relevance": [40, 95],
@@ -59,9 +69,19 @@ def test_nearby_fallback_without_headlines():
         articles, story_time=pd.Timestamp("2014-12-31 22:00:00")
     )
     assert summary is not None
-    assert summary["matched"] is False
     assert summary["relevance_score"] == 0.95
-    assert len(summary["nearby"]) == 2
+
+    result = resolve_ravenpack_for_story(
+        ticker="AAPL",
+        headline="UPDATE 2-Sony's 'Interview' lands on pay TV and in 580 theaters",
+        story_time="2014-12-31 22:30:00",
+        cached_articles=articles,
+        day_cache_dir=None,
+        query_day_fn=None,
+    )
+    assert result["matched"] is False
+    assert result["relevance_score"] is None
+    assert "headline" in result["note"].lower() or "matched" in result["note"].lower()
 
 
 def test_resolve_uses_injected_day_frame(tmp_path):

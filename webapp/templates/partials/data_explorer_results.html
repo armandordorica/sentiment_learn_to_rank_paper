@@ -15,7 +15,8 @@
   </section>
   <section id="de-1d">
     <h3>1D · Refinitiv headlines &amp; stories</h3>
-    <p class="muted">Refinitiv/LSEG headlines and full wire stories. Expand the collapsed list for top-N / filter / sort, then click <strong>Read story + relevance</strong> for full text plus RavenPack <code>relevance_score</code>.</p>
+    <p class="muted">Refinitiv/LSEG headlines and full wire stories. Expand the collapsed list for top-N / filter / sort, then click <strong>Read story + relevance</strong> for full text plus RavenPack <code>relevance_score</code> when a RavenPack <em>headline</em> soft-matches (never by timestamp alone).</p>
+
     {% if result.news_storage.saved %}
       <div class="source-path"><strong>Saved article data</strong><code title="{{ result.news_storage.path }}">{{ result.news_storage.relative_path }}</code><span class="muted">Absolute path: {{ result.news_storage.path }}</span></div>
     {% else %}
@@ -39,48 +40,33 @@
     <p class="muted">Entity-linked RavenPack scores for this ticker. Inspect a row for relevance and taxonomy{% if result.ravenpack_articles and not result.ravenpack_articles.has_headline %} (batch cache often omits headlines){% endif %}.</p>
     {% if result.charts.sentiment %}<div class="chart-cell">{{ result.charts.sentiment|safe }}</div>{% endif %}
     {% if result.ravenpack_articles %}
-      <details class="headline-list-disclosure">
-        <summary>
-          <strong>RavenPack article list</strong>
-          <span class="muted">— showing {{ "{:,}".format(result.ravenpack_articles.shown) }} of {{ "{:,}".format(result.ravenpack_articles.total) }} · click to expand</span>
-        </summary>
-        <div class="headline-table-wrap">
-          <table class="data-table headline-table">
-            <thead>
-              <tr>
-                <th>Time</th>
-                {% if result.ravenpack_articles.has_headline %}<th>Headline</th>{% endif %}
-                <th>Relevance</th><th>Event sent.</th><th>Topic</th><th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for row in result.ravenpack_articles.rows %}
-                <tr>
-                  <td class="headline-date">{{ row.article_time or "—" }}</td>
-                  {% if result.ravenpack_articles.has_headline %}<td>{{ row.headline or "—" }}</td>{% endif %}
-                  <td>{% if row.relevance_score is not none %}{{ "%.2f"|format(row.relevance_score) }}{% else %}—{% endif %}</td>
-                  <td>{% if row.event_sentiment_score is not none %}{{ "%.3f"|format(row.event_sentiment_score) }}{% else %}—{% endif %}</td>
-                  <td>{{ row.topic or "—" }}</td>
-                  <td>
-                    <form hx-post="/data-explorer/ravenpack-article" hx-target="#ravenpack-article-panel" hx-swap="innerHTML">
-                      <input type="hidden" name="ticker" value="{{ result.ticker }}">
-                      <input type="hidden" name="rp_story_id" value="{{ row.rp_story_id or '' }}">
-                      <input type="hidden" name="article_time" value="{{ row.article_time or '' }}">
-                      <input type="hidden" name="headline" value="{{ row.headline or '' }}">
-                      <button type="submit" class="btn btn-secondary btn-small">Inspect</button>
-                    </form>
-                  </td>
-                </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
-      </details>
+      <div id="ravenpack-list-panel">
+        {% with articles=result.ravenpack_articles %}
+          {% include "partials/ravenpack_article_list.html" %}
+        {% endwith %}
+      </div>
       <div id="ravenpack-article-panel"><p class="muted">Select a RavenPack row to inspect relevance and features.</p></div>
     {% else %}
       {% with table=result.sentiment %}{% include "partials/data_table.html" %}{% endwith %}
     {% endif %}
   </section>
-  <section id="de-1f"><h3>1F · Full provider tables</h3>{% for item in result.raw %}<details><summary>{{ item.label }}</summary>{% with table=item.table %}{% include "partials/data_table.html" %}{% endwith %}</details>{% endfor %}</section>
+  <section id="de-1f">
+    <h3>1F · Soft-match comparison</h3>
+    <p class="muted">
+      Side-by-side Refinitiv and RavenPack headlines for the same ticker window:
+      <code>date_refinitiv</code>, <code>date_ravenpack</code>, <code>headline_refinitiv</code>, <code>headline_ravenpack</code>.
+      Filter (e.g. <code>sony</code>) to inspect rewritten titles that still soft-match.
+    </p>
+    {% if result.soft_matches %}
+      <div id="soft-match-panel">
+        {% with soft_matches=result.soft_matches %}
+          {% include "partials/soft_match_comparison.html" %}
+        {% endwith %}
+      </div>
+    {% else %}
+      <div class="alert alert-info">Need Refinitiv headlines in cache to build the soft-match table.</div>
+    {% endif %}
+  </section>
+  <section id="de-1g"><h3>1G · Full provider tables</h3>{% for item in result.raw %}<details><summary>{{ item.label }}</summary>{% with table=item.table %}{% include "partials/data_table.html" %}{% endwith %}</details>{% endfor %}</section>
 </div>
 {% endif %}

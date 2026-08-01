@@ -20,7 +20,10 @@ if str(SRC_PATH) not in sys.path:
 load_dotenv(PROJECT_ROOT / ".env")
 
 from sentiment_ltr.data import live_data  # noqa: E402
-from sentiment_ltr.data.ravenpack_match import resolve_ravenpack_for_story  # noqa: E402
+from sentiment_ltr.data.ravenpack_match import (  # noqa: E402
+    find_best_ravenpack_match,
+    resolve_ravenpack_for_story,
+)
 from sentiment_ltr.data.refinitiv_queries import fetch_refinitiv_story  # noqa: E402
 
 DEFAULT_START = "2003-01-01"
@@ -29,6 +32,12 @@ QUICK_TICKERS = ["AAPL", "MSFT", "SPY", "GOOGL", "TSLA"]
 TOP1K_BY_TICKER_DIR = PROJECT_ROOT / "data" / "raw" / "data_explorer_top1k" / "by_ticker"
 FULL_STORY_DIR = PROJECT_ROOT / "data" / "raw" / "data_explorer_full_stories"
 RAVENPACK_DAY_DIR = PROJECT_ROOT / "data" / "raw" / "data_explorer_ravenpack_days"
+RP_LIST_LIMIT_CHOICES = (10, 25, 50, 100, 250)
+DEFAULT_RP_LIST_LIMIT = 25
+SOFT_MATCH_LIMIT_CHOICES = (25, 50, 100, 250)
+DEFAULT_SOFT_MATCH_LIMIT = 50
+DEFAULT_SOFT_MATCH_MIN_SCORE = 0.45
+DEFAULT_SOFT_MATCH_WINDOW_HOURS = 36.0
 
 
 def _refinitiv_ready() -> bool:
@@ -114,6 +123,10 @@ def load_cached(ticker: str, start: str, end: str) -> dict[str, Any] | None:
         except Exception:
             return pd.DataFrame()
 
+    ravenpack = load_cached_ravenpack(ticker)
+    if ravenpack.empty:
+        ravenpack = read("ravenpack_articles.parquet")
+    time_col = "timestamp_utc" if "timestamp_utc" in ravenpack.columns else "article_time"
     frames = {
         "refinitiv_prices": _filter(read("refinitiv_prices.parquet"), "date", start, end),
         "refinitiv_news": _filter(read("refinitiv_news.parquet"), "date", start, end),
@@ -121,8 +134,9 @@ def load_cached(ticker: str, start: str, end: str) -> dict[str, Any] | None:
         "wrds_prices": _filter(read("wrds_prices.parquet"), "date", start, end),
         "wrds_names": read("wrds_names.parquet"),
         "yahoo_prices": _filter(read("yahoo_prices.parquet"), "date", start, end),
-        "ravenpack": _filter(read("ravenpack_articles.parquet"), "timestamp_utc", start, end),
+        "ravenpack": _filter(ravenpack, time_col, start, end) if time_col in ravenpack.columns else ravenpack,
     }
+
 
     def provider(frame: pd.DataFrame, **extra: Any) -> dict[str, Any]:
         return {"status": "ok" if not frame.empty else "empty", "error": None, "prices": frame, **extra}
@@ -303,7 +317,16 @@ def _query_ravenpack_day(ticker: str, start: str, end: str) -> pd.DataFrame:
 
 
 def load_cached_ravenpack(ticker: str) -> pd.DataFrame:
-    """Full cached RavenPack frame for a ticker (may omit headline/event_text)."""
+    """RavenPack rows for a ticker, preferring frames that include ``headline``.
+
+    Order:
+    1. Rich export under ``data/raw/news/ravenpack/{ticker}_articles_*.parquet``
+    2. Batch Data Explorer cache, enriched with rich headlines when possible
+    """
+    rich = _load_rich_ravenpack_export(ticker)
+    if not rich.empty and "headline" in rich.columns:
+        return rich
+
     directory = _cache_dir(ticker)
     if directory is None:
         return pd.DataFrame()
@@ -311,26 +334,134 @@ def load_cached_ravenpack(ticker: str) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
     try:
-        return pd.read_parquet(path)
+        batch = pd.read_parquet(path)
     except Exception:
         return pd.DataFrame()
+    if batch.empty:
+        return batch
+    if "headline" in batch.columns and batch["headline"].notna().any():
+        return batch
+    # Legacy batch caches omitted titles — attach from rich export by story id.
+    if not rich.empty:
+        return _attach_headlines_from_rich(batch, rich)
+    return batch
+
+
+def _load_rich_ravenpack_export(ticker: str) -> pd.DataFrame:
+    """Load the headline-bearing RavenPack training export when present."""
+    try:
+        from sentiment_ltr.models.ravenpack_sentiment import discover_ravenpack_article_files
+    except Exception:
+        return pd.DataFrame()
+    paths = discover_ravenpack_article_files([live_data.clean_ticker(ticker) or ticker])
+    for path in paths:
+        try:
+            frame = pd.read_parquet(path)
+        except Exception:
+            continue
+        if frame.empty:
+            continue
+        work = frame.copy()
+        if "rp_story_id" not in work.columns and "story_id" in work.columns:
+            work["rp_story_id"] = work["story_id"]
+        if "timestamp_utc" not in work.columns and "article_time" in work.columns:
+            work["timestamp_utc"] = work["article_time"]
+        if "relevance" not in work.columns and "relevance_score" in work.columns:
+            # rich export already stores 0–1 relevance_score
+            work["relevance"] = pd.to_numeric(work["relevance_score"], errors="coerce") * 100.0
+        if "relevance_score" not in work.columns and "relevance" in work.columns:
+            work["relevance_score"] = pd.to_numeric(work["relevance"], errors="coerce") / 100.0
+        if "ticker" not in work.columns:
+            work["ticker"] = live_data.clean_ticker(ticker) or ticker.upper()
+        return work
+    return pd.DataFrame()
+
+
+def _attach_headlines_from_rich(batch: pd.DataFrame, rich: pd.DataFrame) -> pd.DataFrame:
+    """Left-join rich headlines onto a legacy batch frame by story id."""
+    if batch.empty or rich.empty:
+        return batch
+    left = batch.copy()
+    right = rich.copy()
+    left_id = "rp_story_id" if "rp_story_id" in left.columns else None
+    right_id = "rp_story_id" if "rp_story_id" in right.columns else (
+        "story_id" if "story_id" in right.columns else None
+    )
+    if not left_id or not right_id:
+        return left
+    cols = [right_id]
+    for c in ("headline", "event_text"):
+        if c in right.columns:
+            cols.append(c)
+    merge_right = right[cols].drop_duplicates(subset=[right_id], keep="first")
+    if right_id != left_id:
+        merge_right = merge_right.rename(columns={right_id: left_id})
+    already = [c for c in ("headline", "event_text") if c in left.columns]
+    if already:
+        left = left.drop(columns=already)
+    out = left.merge(merge_right, on=left_id, how="left")
+    return out
 
 
 def ravenpack_article_list(
     articles: pd.DataFrame,
     *,
     ticker: str,
-    limit: int = 25,
+    limit: int = DEFAULT_RP_LIST_LIMIT,
+    query: str = "",
+    sort: str = "date_desc",
 ) -> dict[str, Any] | None:
-    """Selectable RavenPack rows for 1E inspect (headline when present)."""
+    """Selectable RavenPack rows for 1E inspect (headline search when present)."""
     if not isinstance(articles, pd.DataFrame) or articles.empty:
         return None
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = DEFAULT_RP_LIST_LIMIT
+    limit = max(1, min(limit, max(RP_LIST_LIMIT_CHOICES)))
+    sort = sort if sort in {"date_desc", "date_asc", "headline_asc", "headline_desc",
+                            "relevance_desc", "relevance_asc"} else "date_desc"
+
     work = articles.copy()
     if "relevance_score" not in work.columns and "relevance" in work.columns:
         work["relevance_score"] = pd.to_numeric(work["relevance"], errors="coerce") / 100.0
     time_col = "article_time" if "article_time" in work.columns else "timestamp_utc"
-    if time_col in work.columns:
-        work = work.sort_values(time_col, ascending=False)
+    total = int(len(work))
+    has_headline = "headline" in work.columns
+
+    q = str(query or "").strip().lower()
+    if q:
+        mask = pd.Series(False, index=work.index)
+        for col in ("headline", "event_text", "topic", "type", "rp_story_id", "news_type"):
+            if col in work.columns:
+                mask = mask | work[col].astype(str).str.lower().str.contains(
+                    q, na=False, regex=False
+                )
+        work = work.loc[mask]
+    matched = int(len(work))
+
+    if sort.startswith("date") and time_col in work.columns:
+        keys = pd.to_datetime(work[time_col], utc=True, errors="coerce")
+        work = work.assign(_sort_key=keys).sort_values(
+            "_sort_key", ascending=sort == "date_asc", kind="stable"
+        ).drop(columns="_sort_key")
+    elif sort.startswith("headline") and has_headline:
+        work = work.sort_values(
+            "headline", ascending=sort == "headline_asc", kind="stable", na_position="last"
+        )
+    elif sort.startswith("relevance") and "relevance_score" in work.columns:
+        work = work.sort_values(
+            "relevance_score",
+            ascending=sort == "relevance_asc",
+            kind="stable",
+            na_position="last",
+        )
+    elif time_col in work.columns:
+        keys = pd.to_datetime(work[time_col], utc=True, errors="coerce")
+        work = work.assign(_sort_key=keys).sort_values(
+            "_sort_key", ascending=False, kind="stable"
+        ).drop(columns="_sort_key")
+
     cols = [
         c for c in [
             time_col, "headline", "event_text", "relevance_score",
@@ -339,7 +470,7 @@ def ravenpack_article_list(
         ]
         if c in work.columns
     ]
-    display = work[cols].head(max(1, min(int(limit), 250))).copy()
+    display = work[cols].head(limit).copy()
     if time_col in display.columns:
         display[time_col] = pd.to_datetime(display[time_col], utc=True, errors="coerce").dt.strftime(
             "%Y-%m-%d %H:%M"
@@ -348,11 +479,226 @@ def ravenpack_article_list(
     display = display.where(pd.notna(display), None)
     return {
         "ticker": ticker,
-        "total": int(len(articles)),
+        "total": total,
+        "matched": matched,
         "shown": int(len(display)),
-        "has_headline": "headline" in articles.columns,
+        "limit": limit,
+        "query": str(query or "").strip(),
+        "sort": sort,
+        "limit_choices": list(RP_LIST_LIMIT_CHOICES),
+        "has_headline": has_headline,
         "rows": display.to_dict(orient="records"),
     }
+
+
+def ravenpack_list_from_cache(
+    ticker: str,
+    start: str,
+    end: str,
+    *,
+    limit: int = DEFAULT_RP_LIST_LIMIT,
+    query: str = "",
+    sort: str = "date_desc",
+) -> dict[str, Any]:
+    """Reload RavenPack rows from the ticker cache for HTMX filter/sort/top-N."""
+    cached = load_cached(ticker, start, end)
+    if cached is None:
+        raise ValueError(
+            "No local cache for this ticker/window. Re-run Load data, or use a cached ticker."
+        )
+    articles = cached["providers"].get("ravenpack", {}).get("articles", pd.DataFrame())
+    listing = ravenpack_article_list(
+        articles, ticker=live_data.clean_ticker(ticker) or ticker.upper(),
+        limit=limit, query=query, sort=sort,
+    )
+    if listing is None:
+        raise ValueError("No RavenPack articles in cache for this ticker/window.")
+    listing["start_date"] = start
+    listing["end_date"] = end
+    return listing
+
+
+def soft_match_comparison(
+    news: pd.DataFrame,
+    articles: pd.DataFrame,
+    *,
+    ticker: str,
+    limit: int = DEFAULT_SOFT_MATCH_LIMIT,
+    query: str = "",
+    min_score: float = DEFAULT_SOFT_MATCH_MIN_SCORE,
+    window_hours: float = DEFAULT_SOFT_MATCH_WINDOW_HOURS,
+    matched_only: bool = False,
+) -> dict[str, Any] | None:
+    """Side-by-side Refinitiv ↔ RavenPack soft-match table for inspection."""
+    if not isinstance(news, pd.DataFrame) or news.empty or "headline" not in news.columns:
+        return None
+    if not isinstance(articles, pd.DataFrame) or articles.empty or "headline" not in articles.columns:
+        return {
+            "ticker": ticker,
+            "rows": [],
+            "total_refinitiv": int(len(news)),
+            "matched": 0,
+            "shown": 0,
+            "limit": limit,
+            "query": str(query or "").strip(),
+            "min_score": float(min_score),
+            "window_hours": float(window_hours),
+            "matched_only": matched_only,
+            "limit_choices": list(SOFT_MATCH_LIMIT_CHOICES),
+            "note": "RavenPack cache has no headlines to soft-match against.",
+        }
+
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = DEFAULT_SOFT_MATCH_LIMIT
+    limit = max(1, min(limit, max(SOFT_MATCH_LIMIT_CHOICES)))
+    try:
+        min_score = float(min_score)
+    except (TypeError, ValueError):
+        min_score = DEFAULT_SOFT_MATCH_MIN_SCORE
+    min_score = max(0.0, min(min_score, 1.0))
+
+    ref = news.copy()
+    date_col = "date" if "date" in ref.columns else None
+    total_ref = int(len(ref))
+    q = str(query or "").strip().lower()
+    if q:
+        mask = ref["headline"].astype(str).str.lower().str.contains(q, na=False, regex=False)
+        if "storyId" in ref.columns:
+            mask = mask | ref["storyId"].astype(str).str.lower().str.contains(q, na=False, regex=False)
+        ref = ref.loc[mask]
+    if date_col:
+        keys = pd.to_datetime(ref[date_col], utc=True, errors="coerce")
+        ref = ref.assign(_sort_key=keys).sort_values(
+            "_sort_key", ascending=False, kind="stable"
+        ).drop(columns="_sort_key")
+    ref = ref.head(limit)
+
+    rows: list[dict[str, Any]] = []
+    n_matched = 0
+    for _, item in ref.iterrows():
+        headline = str(item.get("headline") or "")
+        story_time = pd.to_datetime(item.get(date_col), utc=True, errors="coerce") if date_col else pd.NaT
+        if not pd.isna(story_time):
+            story_time = story_time.tz_localize(None) if getattr(story_time, "tzinfo", None) else story_time
+        hit = find_best_ravenpack_match(
+            articles,
+            headline=headline,
+            story_time=None if pd.isna(story_time) else story_time,
+            window_hours=window_hours,
+            min_score=min_score,
+            fallback_outside_window=False,
+        )
+        date_ref = (
+            story_time.strftime("%Y-%m-%d %H:%M") if not pd.isna(story_time) else None
+        )
+        if hit is None:
+            if matched_only:
+                continue
+            rows.append({
+                "date_refinitiv": date_ref,
+                "date_ravenpack": None,
+                "headline_refinitiv": headline or None,
+                "headline_ravenpack": None,
+                "match_score": None,
+                "relevance_score": None,
+                "matched": False,
+                "story_id": item.get("storyId"),
+                "rp_story_id": None,
+            })
+            continue
+        n_matched += 1
+        rp_time = hit.get("article_time")
+        if rp_time:
+            parsed = pd.to_datetime(rp_time, utc=True, errors="coerce")
+            if not pd.isna(parsed):
+                parsed = parsed.tz_localize(None) if getattr(parsed, "tzinfo", None) else parsed
+                rp_time = parsed.strftime("%Y-%m-%d %H:%M")
+        rows.append({
+            "date_refinitiv": date_ref,
+            "date_ravenpack": rp_time,
+            "headline_refinitiv": headline or None,
+            "headline_ravenpack": hit.get("headline"),
+            "match_score": hit.get("match_score"),
+            "relevance_score": hit.get("relevance_score"),
+            "matched": True,
+            "story_id": item.get("storyId"),
+            "rp_story_id": hit.get("rp_story_id"),
+        })
+
+    return {
+        "ticker": ticker,
+        "rows": rows,
+        "total_refinitiv": total_ref,
+        "candidates": int(len(ref)),
+        "matched": n_matched,
+        "shown": len(rows),
+        "limit": limit,
+        "query": str(query or "").strip(),
+        "min_score": float(min_score),
+        "window_hours": float(window_hours),
+        "matched_only": matched_only,
+        "limit_choices": list(SOFT_MATCH_LIMIT_CHOICES),
+        "note": None,
+    }
+
+
+def soft_match_from_cache(
+    ticker: str,
+    start: str,
+    end: str,
+    *,
+    limit: int = DEFAULT_SOFT_MATCH_LIMIT,
+    query: str = "",
+    min_score: float = DEFAULT_SOFT_MATCH_MIN_SCORE,
+    matched_only: bool = False,
+) -> dict[str, Any]:
+    """Reload soft-match comparison from cache for HTMX controls."""
+    cached = load_cached(ticker, start, end)
+    if cached is None:
+        raise ValueError(
+            "No local cache for this ticker/window. Re-run Load data, or use a cached ticker."
+        )
+    news = cached["providers"].get("refinitiv", {}).get("news", pd.DataFrame())
+    articles = cached["providers"].get("ravenpack", {}).get("articles", pd.DataFrame())
+    table = soft_match_comparison(
+        news,
+        articles,
+        ticker=live_data.clean_ticker(ticker) or ticker.upper(),
+        limit=limit,
+        query=query,
+        min_score=min_score,
+        matched_only=matched_only,
+    )
+    if table is None:
+        raise ValueError("No Refinitiv headlines in cache for this ticker/window.")
+    table["start_date"] = start
+    table["end_date"] = end
+    return table
+
+
+def _ravenpack_inspect_note(
+    *,
+    headline: object,
+    event_text: object,
+    news_type: object,
+) -> str | None:
+    """Explain empty RavenPack fields — FULL-ARTICLE ≠ full wire body in WRDS."""
+    if not headline:
+        return (
+            "Batch RavenPack cache often omits headline/event_text; "
+            "relevance and taxonomy still apply to this ticker."
+        )
+    if event_text:
+        return None
+    nt = news_type or "—"
+    return (
+        "RavenPack WRDS has no full wire body for this row — only the headline "
+        f"(taxonomy/scores may also be empty). `news_type={nt}` labels the source "
+        "item type; it is not downloadable article text. Use Refinitiv "
+        "'Read story' for the Reuters body when a soft-matched headline exists nearby."
+    )
 
 
 def ravenpack_article_detail(
@@ -413,10 +759,10 @@ def ravenpack_article_detail(
         "article_time": _val("article_time") or _val("timestamp_utc"),
         "css": _val("css"),
         "nip": _val("nip"),
-        "note": (
-            None
-            if _val("headline")
-            else "Batch RavenPack cache often omits headline/event_text; relevance and taxonomy still apply to this ticker."
+        "note": _ravenpack_inspect_note(
+            headline=_val("headline"),
+            event_text=_val("event_text"),
+            news_type=_val("news_type"),
         ),
     }
 
@@ -552,7 +898,33 @@ def present(result: dict[str, Any]) -> dict[str, Any]:
         headlines["ticker"] = ticker
         headlines["start_date"] = result["start_date"]
         headlines["end_date"] = result["end_date"]
-    rp_list = ravenpack_article_list(articles, ticker=ticker, limit=25) if isinstance(articles, pd.DataFrame) else None
+    rp_list = ravenpack_article_list(articles, ticker=ticker, limit=DEFAULT_RP_LIST_LIMIT) if isinstance(articles, pd.DataFrame) else None
+    if rp_list is not None:
+        rp_list["start_date"] = result["start_date"]
+        rp_list["end_date"] = result["end_date"]
+    # Soft-match table is built on demand via HTMX (can be multi-second on dense tickers).
+    soft_matches = None
+    if isinstance(news, pd.DataFrame) and not news.empty and "headline" in news.columns:
+        soft_matches = {
+            "ticker": ticker,
+            "start_date": result["start_date"],
+            "end_date": result["end_date"],
+            "rows": [],
+            "total_refinitiv": int(len(news)),
+            "candidates": 0,
+            "matched": 0,
+            "shown": 0,
+            "limit": DEFAULT_SOFT_MATCH_LIMIT,
+            "query": "",
+            "min_score": DEFAULT_SOFT_MATCH_MIN_SCORE,
+            "window_hours": DEFAULT_SOFT_MATCH_WINDOW_HOURS,
+            "matched_only": False,
+            "limit_choices": list(SOFT_MATCH_LIMIT_CHOICES),
+            "note": (
+                "Click Apply (or type a filter such as sony) to build the soft-match table. "
+                "Deferred on Load data so dense tickers stay responsive."
+            ),
+        }
     return {
         "ticker": ticker, "start_date": result["start_date"], "end_date": result["end_date"],
         "source": result.get("source", "live"), "cache_created_at": result.get("cache_created_at"),
@@ -562,5 +934,6 @@ def present(result: dict[str, Any]) -> dict[str, Any]:
         "news_storage": news_storage,
         "sentiment": sentiment_table,
         "ravenpack_articles": rp_list,
+        "soft_matches": soft_matches,
         "raw": raw,
     }

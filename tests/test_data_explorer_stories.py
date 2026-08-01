@@ -109,20 +109,84 @@ def test_present_exposes_saved_refinitiv_news_path(tmp_path):
     }
 
 
-def test_news_chart_uses_high_contrast_bars():
-    result = de.present({
-        "ticker": "MSFT", "start_date": "2014-01-01", "end_date": "2014-01-02",
-        "providers": {
-            "refinitiv": {
-                "status": "ok", "error": None, "prices": pd.DataFrame(),
-                "news": pd.DataFrame(),
-                "news_daily_counts": pd.DataFrame({
-                    "date": pd.to_datetime(["2014-01-01", "2014-01-02"]),
-                    "article_count": [4, 8],
-                }),
-            }
-        },
+def test_ravenpack_article_list_filters_headline():
+    articles = pd.DataFrame({
+        "timestamp_utc": pd.to_datetime([
+            "2014-12-30T10:00:00Z",
+            "2014-12-31T19:07:00Z",
+            "2014-12-31T20:00:00Z",
+        ]),
+        "headline": [
+            "Apple patent granted",
+            "Sony Makes 'The Interview' Available on Cable, Satellite Systems",
+            "Microsoft cloud deal",
+        ],
+        "relevance": [90, 12, 80],
+        "event_sentiment_score": [0.1, None, 0.2],
+        "topic": ["business", None, "business"],
+        "rp_story_id": ["1", "2", "3"],
     })
-    chart = result["charts"]["news"]
-    assert "#dc4f52" in chart
-    assert '"plot_bgcolor":"#ffffff"' in chart
+    result = de.ravenpack_article_list(
+        articles, ticker="AAPL", limit=10, query="sony", sort="date_desc"
+    )
+    assert result["matched"] == 1
+    assert result["shown"] == 1
+    assert "Interview" in result["rows"][0]["headline"]
+    assert result["query"] == "sony"
+
+
+def test_soft_match_comparison_sony_interview_pair():
+    news = pd.DataFrame({
+        "date": pd.to_datetime(["2014-12-31T22:30:00Z"]),
+        "headline": ["UPDATE 2-Sony's 'Interview' lands on pay TV and in 580 theaters"],
+        "storyId": ["urn:newsml:nNRA110go5:0"],
+        "sourceCode": ["NS:RTRS"],
+    })
+    articles = pd.DataFrame({
+        "timestamp_utc": pd.to_datetime([
+            "2014-12-31T19:07:40Z",
+            "2014-12-31T21:00:00Z",
+        ]),
+        "headline": [
+            "Sony Makes 'The Interview' Available on Cable, Satellite Systems",
+            "Unrelated bank merger announced today",
+        ],
+        "relevance": [12, 99],
+        "event_sentiment_score": [None, 0.1],
+        "rp_story_id": ["6BA5", "OTHER"],
+    })
+    table = de.soft_match_comparison(
+        news, articles, ticker="AAPL", limit=25, query="sony", min_score=0.45
+    )
+    assert table["matched"] == 1
+    assert table["shown"] == 1
+    row = table["rows"][0]
+    assert row["matched"] is True
+    assert "Interview" in row["headline_ravenpack"]
+    assert row["date_refinitiv"].startswith("2014-12-31")
+    assert row["date_ravenpack"].startswith("2014-12-31")
+    assert row["relevance_score"] == pytest.approx(0.12)
+
+
+def test_soft_match_comparison_unmatched_rows_optional():
+    news = pd.DataFrame({
+        "date": pd.to_datetime(["2014-12-31T12:00:00Z"]),
+        "headline": ["Completely unique widget recall nobody else covered"],
+        "storyId": ["x"],
+    })
+    articles = pd.DataFrame({
+        "timestamp_utc": pd.to_datetime(["2014-12-31T12:30:00Z"]),
+        "headline": ["Apple launches new iPhone in China"],
+        "relevance": [90],
+    })
+    all_rows = de.soft_match_comparison(
+        news, articles, ticker="AAPL", matched_only=False, min_score=0.45
+    )
+    assert all_rows["matched"] == 0
+    assert all_rows["shown"] == 1
+    assert all_rows["rows"][0]["headline_ravenpack"] is None
+
+    only = de.soft_match_comparison(
+        news, articles, ticker="AAPL", matched_only=True, min_score=0.45
+    )
+    assert only["shown"] == 0

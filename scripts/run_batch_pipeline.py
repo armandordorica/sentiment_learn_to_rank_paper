@@ -573,6 +573,7 @@ def main() -> None:
                         permno=_permno,
                         year_progress_callback=_rp_year_cb,
                         year_timeout_s=args.year_timeout,
+                        # default include_text=True → headline + event_text when present
                     ),
                     args.provider_timeout, "RavenPack"
                 )

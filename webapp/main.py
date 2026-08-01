@@ -235,6 +235,65 @@ def data_explorer_headlines(
         )
 
 
+@app.get("/data-explorer/ravenpack-articles", response_class=HTMLResponse)
+def data_explorer_ravenpack_articles(
+    request: Request,
+    ticker: str = Query(default=""),
+    start_date: str = Query(default=de.DEFAULT_START),
+    end_date: str = Query(default=de.DEFAULT_END),
+    limit: int = Query(default=de.DEFAULT_RP_LIST_LIMIT),
+    q: str = Query(default=""),
+    sort: str = Query(default="date_desc"),
+) -> HTMLResponse:
+    try:
+        articles = de.ravenpack_list_from_cache(
+            ticker, start_date, end_date, limit=limit, query=q, sort=sort
+        )
+        return templates.TemplateResponse(
+            request,
+            "partials/ravenpack_article_list.html",
+            {"articles": articles, "expanded": True},
+        )
+    except Exception as exc:  # noqa: BLE001
+        return HTMLResponse(
+            f'<div class="alert alert-error"><strong>Could not refresh RavenPack list:</strong> {exc}</div>',
+            status_code=200,
+        )
+
+
+@app.get("/data-explorer/soft-matches", response_class=HTMLResponse)
+def data_explorer_soft_matches(
+    request: Request,
+    ticker: str = Query(default=""),
+    start_date: str = Query(default=de.DEFAULT_START),
+    end_date: str = Query(default=de.DEFAULT_END),
+    limit: int = Query(default=de.DEFAULT_SOFT_MATCH_LIMIT),
+    q: str = Query(default=""),
+    min_score: float = Query(default=de.DEFAULT_SOFT_MATCH_MIN_SCORE),
+    matched_only: bool = Query(default=False),
+) -> HTMLResponse:
+    try:
+        soft_matches = de.soft_match_from_cache(
+            ticker,
+            start_date,
+            end_date,
+            limit=limit,
+            query=q,
+            min_score=min_score,
+            matched_only=matched_only,
+        )
+        return templates.TemplateResponse(
+            request,
+            "partials/soft_match_comparison.html",
+            {"soft_matches": soft_matches, "expanded": True},
+        )
+    except Exception as exc:  # noqa: BLE001
+        return HTMLResponse(
+            f'<div class="alert alert-error"><strong>Could not refresh soft-match table:</strong> {exc}</div>',
+            status_code=200,
+        )
+
+
 @app.post("/data-explorer/ravenpack-article", response_class=HTMLResponse)
 def data_explorer_ravenpack_article(
     request: Request,
