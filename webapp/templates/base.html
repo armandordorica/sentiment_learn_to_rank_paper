@@ -12,17 +12,26 @@
   <header class="topbar">
     <div class="topbar-inner">
       <span class="brand">Sentiment LTR <span class="brand-sub">FastAPI (migration POC)</span></span>
-      <nav class="tabnav">
-        {% for item in nav_items %}
-          {% if item.enabled %}
-            <a class="tab {% if item.href == active_href %}active{% endif %}" href="{{ item.href }}">
-              <span class="tab-num">{{ item.num }}</span>{{ item.label }}
-            </a>
-          {% else %}
-            <span class="tab tab-disabled" title="Not yet migrated — see docs/fastapi_migration_plan.md">
-              <span class="tab-num">{{ item.num }}</span>{{ item.label }}
-            </span>
-          {% endif %}
+      <nav class="tabnav" aria-label="Primary">
+        {% for group in nav_groups %}
+          <div class="nav-group {% if group.id == active_group %}nav-group-active{% endif %} {% if group.standalone %}nav-group-standalone{% endif %}">
+            <div class="nav-group-label" title="{{ group.blurb }}">{{ group.label }}</div>
+            <div class="nav-group-items">
+              {% for item in group.pages %}
+                {% if item.enabled %}
+                  <a class="tab {% if item.href == active_href %}active{% endif %}"
+                     href="{{ item.href }}"
+                     title="{{ item.hint }}">
+                    <span class="tab-num">{{ item.num }}</span>{{ item.label }}
+                  </a>
+                {% else %}
+                  <span class="tab tab-disabled" title="Not yet migrated — see docs/fastapi_migration_plan.md">
+                    <span class="tab-num">{{ item.num }}</span>{{ item.label }}
+                  </span>
+                {% endif %}
+              {% endfor %}
+            </div>
+          </div>
         {% endfor %}
       </nav>
     </div>

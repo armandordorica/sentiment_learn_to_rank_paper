@@ -6561,149 +6561,157 @@ def render_batch_pipeline_tab() -> bool:  # noqa: C901 – intentionally long UI
 
 (
     tab_overview,
-    tab_dashboard,
-    tab_batch,
-    tab_phrasebank_baseline,
-    tab_ravenpack_baseline,
-    tab_ravenpack_finetuning,
-    tab_sentiment,
+    tab_data,
+    tab_models,
     tab_validation,
 ) = st.tabs([
     "🏠 Overview",
-    "1 · One stock — inspect & retrieve",
-    "2 · Many stocks — retrieve & store",
-    "3 · PhraseBank HF Baseline",
-    "4 · RavenPack Baseline Eval",
-    "5 · RavenPack Fine-Tuning",
-    "6 · Sentiment Lab",
-    "7 · Paper Validation (2003-2014)",
+    "📦 Data retrieval",
+    "🧠 Models & training",
+    "📋 Paper Validation",
 ])
 
 with tab_overview:
     st.header("📖 App Overview")
     st.caption(
         "This app supports the **Sentiment Learn-to-Rank** PhD research project. "
-        "Use the numbered tabs above to navigate. "
-        "Each tab has a **📋 Jump to section** expander at the top with working in-tab anchor links."
+        "Top-level tabs are workflow groups; each group has nested pages. "
+        "Use **📋 Jump to section** expanders inside a page for in-page anchors."
     )
     st.info(
-        "💡 **How the links work:**  "
-        "Click a tab number above to go there first. "
-        "Then click any section link in the cards below — the page will scroll to that section. "
-        "Links only work *within* the tab you're already on (Streamlit cross-tab anchors aren't supported by browsers).",
+        "💡 **How navigation works:** pick a workflow group above "
+        "(Data retrieval · Models & training · Paper Validation), then use the "
+        "nested tabs for the specific page. In-page section links only work within "
+        "the page you’re already on.",
         icon=None,
     )
 
     st.markdown("---")
 
-    # ── Tab cards with real href links ────────────────────────────────────────
-    # Each section entry is (anchor_id, display_label).
-    # anchor_id must match the _anchor() call injected before that heading.
-    _TAB_CARDS = [
+    _NAV_GROUPS = [
         {
-            "num": "1", "label": "One stock — inspect & retrieve",
-            "desc": "Inspect and retrieve data for a single ticker: prices (WRDS, Yahoo, Refinitiv), Refinitiv news with drill-down, and RavenPack sentiment. Works from local cache (instant) or live API pull.",
-            "sections": [
-                ("de-1a", "1A  Pick ticker & providers"),
-                ("de-1b", "1B  Provider coverage snapshot"),
-                ("de-1c", "1C  Price charts"),
-                ("de-1d", "1D  Refinitiv headlines & stories"),
-                ("de-1e", "1E  RavenPack sentiment"),
-                ("de-1f", "1F  Full provider tables"),
+            "group": "📦 Data retrieval",
+            "blurb": "Pull market & news data — one ticker at a time, or cache the full universe.",
+            "pages": [
+                {
+                    "num": "1", "label": "One stock — inspect & retrieve",
+                    "desc": "Inspect and retrieve data for a single ticker: prices (WRDS, Yahoo, Refinitiv), Refinitiv news, and RavenPack sentiment. Cache-first or live pull.",
+                    "sections": [
+                        ("de-1a", "1A  Pick ticker & providers"),
+                        ("de-1b", "1B  Provider coverage snapshot"),
+                        ("de-1c", "1C  Price charts"),
+                        ("de-1d", "1D  Refinitiv headlines & stories"),
+                        ("de-1e", "1E  RavenPack sentiment"),
+                        ("de-1f", "1F  Full provider tables"),
+                    ],
+                },
+                {
+                    "num": "2", "label": "Many stocks — retrieve & store",
+                    "desc": "Retrieve and store data for many tickers (the ~1,000 CRSP universe). Launch/monitor batch jobs and inspect cache / failures.",
+                    "sections": [
+                        ("bp-2a", "2A  Launch / monitor batch"),
+                        ("bp-2b", "2B  What’s already cached"),
+                        ("bp-2c", "2C  Why providers failed"),
+                        ("bp-2d", "2D  CRSP delisting returns"),
+                        ("bp-2e", "2E  Cash-merger exit prices"),
+                    ],
+                },
             ],
         },
         {
-            "num": "2", "label": "Many stocks — retrieve & store",
-            "desc": "Retrieve and store data for many tickers (the ~1,000 CRSP universe). Launch/monitor the batch job, inspect cache coverage, provider failures, CRSP delisting, and cash-merger exits.",
-            "sections": [
-                ("bp-2a", "2A  Launch / monitor batch"),
-                ("bp-2b", "2B  What’s already cached"),
-                ("bp-2c", "2C  Why providers failed"),
-                ("bp-2d", "2D  CRSP delisting returns"),
-                ("bp-2e", "2E  Cash-merger exit prices"),
+            "group": "🧠 Models & training",
+            "blurb": "Baselines → fine-tuning → interactive validation of the news-sentiment (TRNA substitute) model.",
+            "pages": [
+                {
+                    "num": "3", "label": "PhraseBank baseline",
+                    "desc": "In-domain DistilBERT on Financial PhraseBank — the warm-start before RavenPack adaptation.",
+                    "sections": [
+                        ("pb-3a", "3A  Model & training"),
+                        ("pb-3b", "3B  Reproduction recipe"),
+                        ("pb-3c", "3C  Performance metrics"),
+                        ("pb-3d", "3D  Dataset dashboard"),
+                        ("pb-3f", "3F  W&B tracking"),
+                    ],
+                },
+                {
+                    "num": "4", "label": "RavenPack OOD eval",
+                    "desc": "Zero-shot PhraseBank checkpoint on RavenPack headlines — measures the domain shift that motivates fine-tuning.",
+                    "sections": [
+                        ("rp-be-4d", "4D  Label distribution shift"),
+                        ("rp-be-4c", "4C  Class-level metrics"),
+                        ("rp-be-4e", "4E  Run evaluation"),
+                    ],
+                },
+                {
+                    "num": "5", "label": "Fine-tune RavenPack ⭐",
+                    "desc": "Main experiment page: time-based splits, before/after F1, train on 1 / 5 / N stocks, OOD baskets.",
+                    "sections": [
+                        ("rp-ft-51", "5·1  Train / val / test split"),
+                        ("rp-ft-52", "5·2  Tokenization & padding"),
+                        ("rp-ft-53", "5·3  Macro-F1 before vs after"),
+                        ("rp-ft-54", "5·4  Per-class F1"),
+                        ("rp-ft-55", "5·5  Label prevalence"),
+                        ("rp-ft-56", "5·6  Sample headlines"),
+                        ("rp-ft-57", "5·7  Hyperparameters & provenance"),
+                        ("rp-ft-58", "5·8  Train (1 / 5 / N tickers)"),
+                    ],
+                },
+                {
+                    "num": "6", "label": "Interactive validation",
+                    "desc": "Browse RavenPack articles, train/refresh PhraseBank, and score custom headlines live (validation sandbox).",
+                    "sections": [
+                        ("sl-6a", "6A  News data coverage"),
+                        ("sl-6b", "6B  Compute device"),
+                        ("sl-6c", "6C  Financial PhraseBank"),
+                        ("sl-6d", "6D  RavenPack browser"),
+                        ("sl-6e", "6E  Live inference"),
+                    ],
+                },
             ],
         },
         {
-            "num": "3", "label": "PhraseBank HF Baseline",
-            "desc": "Documents the DistilBERT checkpoint trained on Financial PhraseBank — the starting point before RavenPack domain adaptation. Shows training config, val/test F1, class balance, and probability charts.",
-            "sections": [
-                ("pb-3a", "3A  Model & training"),
-                ("pb-3b", "3B  Reproduction recipe"),
-                ("pb-3c", "3C  Performance metrics"),
-                ("pb-3d", "3D  Dataset dashboard"),
-                ("pb-3f", "3F  W&B tracking"),
-            ],
-        },
-        {
-            "num": "4", "label": "RavenPack Baseline Eval",
-            "desc": "Zero-shot evaluation of the PhraseBank checkpoint on RavenPack headlines (out-of-domain). Reveals the distribution shift that motivates fine-tuning.",
-            "sections": [
-                ("rp-be-4d", "4D  Label distribution shift"),
-                ("rp-be-4c", "4C  Class-level metrics"),
-                ("rp-be-4e", "4E  Run evaluation"),
-            ],
-        },
-        {
-            "num": "5", "label": "RavenPack Fine-Tuning ⭐",
-            "desc": "Main experiment tab. Time-based split → tokenization → before/after macro-F1 → per-class F1 → label prevalence → sample headlines → hyperparameters → train on 1 / 5 / N stocks.",
-            "sections": [
-                ("rp-ft-51", "5·1  Train / val / test split"),
-                ("rp-ft-52", "5·2  Tokenization & padding"),
-                ("rp-ft-53", "5·3  Macro-F1 before vs after"),
-                ("rp-ft-54", "5·4  Per-class F1"),
-                ("rp-ft-55", "5·5  Label prevalence"),
-                ("rp-ft-56", "5·6  Sample headlines"),
-                ("rp-ft-57", "5·7  Hyperparameters & provenance"),
-                ("rp-ft-58", "5·8  Train (1 / 5 / N tickers)"),
-            ],
-        },
-        {
-            "num": "6", "label": "Sentiment Lab",
-            "desc": "Interactive version of liquidAI_prep.ipynb. Train the PhraseBank baseline, browse RavenPack articles, and score custom headlines live.",
-            "sections": [
-                ("sl-6a", "6A  News data coverage"),
-                ("sl-6b", "6B  Compute device"),
-                ("sl-6c", "6C  Financial PhraseBank"),
-                ("sl-6d", "6D  RavenPack browser"),
-                ("sl-6e", "6E  Live inference"),
-            ],
-        },
-        {
-            "num": "7", "label": "Paper Validation (2003-2014)",
-            "desc": "Paper data inputs vs our substitutes, then CRSP universe sanity checks: 1,000-row count, unique PERMNOs, volume ranks, top-20 volume & monthly price charts.",
-            "sections": [
-                ("pv-70", "7·0  Paper inputs vs ours"),
-                ("pv-7a", "7A  Universe summary"),
-                ("pv-7b", "7B  Top 20 by volume"),
-                ("pv-7c", "7C  Monthly volume over time"),
-                ("pv-7d", "7D  Monthly prices"),
+            "group": "📋 Paper Validation",
+            "blurb": "Standalone live check: what Song et al. need vs what we can do as of now.",
+            "pages": [
+                {
+                    "num": "7", "label": "Status & gaps (2003–2014)",
+                    "desc": "Paper inputs vs substitutes map, CRSP universe checks, top-20 volume & monthly price charts.",
+                    "sections": [
+                        ("pv-70", "7·0  Paper inputs vs ours"),
+                        ("pv-7a", "7A  Universe summary"),
+                        ("pv-7b", "7B  Top 20 by volume"),
+                        ("pv-7c", "7C  Monthly volume over time"),
+                        ("pv-7d", "7D  Monthly prices"),
+                    ],
+                },
             ],
         },
     ]
 
-    for card in _TAB_CARDS:
-        with st.container(border=True):
-            c_num, c_body = st.columns([0.06, 0.94])
-            c_num.markdown(
-                f"<div style='font-size:2rem;font-weight:700;color:#e05252;line-height:1.1'>"
-                f"{card['num']}</div>",
-                unsafe_allow_html=True,
-            )
-            with c_body:
-                st.markdown(f"**{card['label']}**")
-                st.caption(card["desc"])
-                if card["sections"]:
-                    links_html = "".join(
-                        f'<li style="margin:0.1em 0;">{_scroll_link(aid, label)}</li>'
-                        for aid, label in card["sections"]
-                    )
-                    st.markdown(
-                        f'<ul style="margin:0.3em 0 0 0;padding-left:1.2em;line-height:1.7;">'
-                        f'{links_html}</ul>',
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    st.caption("_(navigate directly to the tab — no deep anchors wired yet)_")
+    for group in _NAV_GROUPS:
+        st.markdown(f"### {group['group']}")
+        st.caption(group["blurb"])
+        for card in group["pages"]:
+            with st.container(border=True):
+                c_num, c_body = st.columns([0.06, 0.94])
+                c_num.markdown(
+                    f"<div style='font-size:2rem;font-weight:700;color:#e05252;line-height:1.1'>"
+                    f"{card['num']}</div>",
+                    unsafe_allow_html=True,
+                )
+                with c_body:
+                    st.markdown(f"**{card['label']}**")
+                    st.caption(card["desc"])
+                    if card["sections"]:
+                        links_html = "".join(
+                            f'<li style="margin:0.1em 0;">{_scroll_link(aid, label)}</li>'
+                            for aid, label in card["sections"]
+                        )
+                        st.markdown(
+                            f'<ul style="margin:0.3em 0 0 0;padding-left:1.2em;line-height:1.7;">'
+                            f'{links_html}</ul>',
+                            unsafe_allow_html=True,
+                        )
 
     st.markdown("---")
     st.markdown("### Quick Status")
@@ -6729,37 +6737,55 @@ with tab_overview:
         st.markdown("**Research workflow**")
         st.markdown("""
 ```
-Tab 3  Train PhraseBank baseline
+Data retrieval → cache market & news
    ↓
-Tab 4  Evaluate baseline OOD on RavenPack
+Models: PhraseBank baseline (3)
    ↓
-Tab 5  Fine-tune on 1 / 5 / N stocks
+Models: RavenPack OOD eval (4)
    ↓
-Tab 5  Compare before vs after
+Models: Fine-tune RavenPack (5)
    ↓
-Tab 2  Batch-cache market data for all 1k stocks
+Models: Interactive validation (6)
    ↓
-Tab 7  Validate universe selection
+Paper Validation → status & gaps (7)
 ```
 """)
 
-with tab_dashboard:
-    render_multi_api_dashboard_tab()
+with tab_data:
+    st.caption("Pull market & news data — one ticker, or cache many tickers.")
+    tab_dashboard, tab_batch = st.tabs([
+        "1 · One stock — inspect & retrieve",
+        "2 · Many stocks — retrieve & store",
+    ])
+    with tab_dashboard:
+        render_multi_api_dashboard_tab()
+    with tab_batch:
+        _batch_auto_refresh = render_batch_pipeline_tab()
 
-with tab_batch:
-    _batch_auto_refresh = render_batch_pipeline_tab()
-
-with tab_phrasebank_baseline:
-    render_phrasebank_hf_baseline_tab()
-
-with tab_ravenpack_baseline:
-    render_ravenpack_baseline_eval_tab()
-
-with tab_ravenpack_finetuning:
-    render_ravenpack_finetuning_tab()
-
-with tab_sentiment:
-    render_sentiment_lab_tab()
+with tab_models:
+    st.caption(
+        "Baselines, RavenPack fine-tuning, and interactive validation of the "
+        "news-sentiment model (TRNA substitute)."
+    )
+    (
+        tab_phrasebank_baseline,
+        tab_ravenpack_baseline,
+        tab_ravenpack_finetuning,
+        tab_sentiment,
+    ) = st.tabs([
+        "3 · PhraseBank baseline",
+        "4 · RavenPack OOD eval",
+        "5 · Fine-tune RavenPack",
+        "6 · Interactive validation",
+    ])
+    with tab_phrasebank_baseline:
+        render_phrasebank_hf_baseline_tab()
+    with tab_ravenpack_baseline:
+        render_ravenpack_baseline_eval_tab()
+    with tab_ravenpack_finetuning:
+        render_ravenpack_finetuning_tab()
+    with tab_sentiment:
+        render_sentiment_lab_tab()
 
 with tab_validation:
     universe = load_bundled_csv(DEFAULT_UNIVERSE_PATHS)

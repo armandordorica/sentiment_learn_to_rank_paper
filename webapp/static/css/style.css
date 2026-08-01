@@ -24,19 +24,58 @@ body {
 }
 
 .topbar-inner {
-  max-width: 1100px;
+  max-width: 1200px;
   margin: 0 auto;
-  padding: 0.75rem 1.5rem;
+  padding: 0.65rem 1.5rem;
   display: flex;
-  align-items: center;
-  gap: 2rem;
+  align-items: flex-start;
+  gap: 1.25rem;
   flex-wrap: wrap;
 }
 
-.brand { font-weight: 700; font-size: 1.1rem; }
+.brand { font-weight: 700; font-size: 1.1rem; padding-top: .55rem; }
 .brand-sub { font-weight: 400; color: #64748b; font-size: 0.85rem; }
 
-.tabnav { display: flex; gap: 0.25rem; flex-wrap: wrap; }
+.tabnav {
+  display: flex;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.4rem 0.5rem 0.45rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.5rem;
+  background: #f8fafc;
+  min-width: 0;
+}
+.nav-group-active {
+  border-color: #fecaca;
+  background: #fff7f7;
+}
+.nav-group-standalone {
+  background: #fff;
+  border-color: #cbd5e1;
+}
+.nav-group-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #64748b;
+  padding: 0 0.25rem;
+}
+.nav-group-active .nav-group-label { color: #9f1239; }
+.nav-group-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
 
 .tab {
   display: inline-flex;
@@ -46,11 +85,13 @@ body {
   border-radius: 0.4rem;
   text-decoration: none;
   color: var(--text);
-  font-size: 0.9rem;
+  font-size: 0.88rem;
+  border: 1px solid transparent;
+  background: #fff;
 }
-.tab:hover { background: #f1f5f9; }
-.tab.active { background: var(--red); color: white; }
-.tab-disabled { color: #b0b4bd; cursor: not-allowed; }
+.tab:hover { background: #f1f5f9; border-color: #e2e8f0; }
+.tab.active { background: var(--red); color: white; border-color: var(--red); }
+.tab-disabled { color: #b0b4bd; cursor: not-allowed; background: transparent; }
 .tab-num {
   font-weight: 700;
   color: var(--red);
@@ -59,6 +100,23 @@ body {
 .tab.active .tab-num { color: white; }
 
 .content { max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem 6rem; }
+
+.home-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1rem;
+  margin: 1.25rem 0;
+}
+.home-group {
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 1rem 1.1rem;
+  background: #f8fafc;
+}
+.home-group-standalone { background: #fff; border-color: #94a3b8; }
+.home-group h2 { margin: 0 0 0.35rem; font-size: 1.05rem; }
+.home-group ul { margin: 0.6rem 0 0; padding-left: 1.1rem; }
+.home-group li { margin: 0.35rem 0; }
 
 .card {
   background: var(--bg);

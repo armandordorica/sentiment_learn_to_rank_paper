@@ -2,23 +2,41 @@
 {% block title %}Sentiment LTR — FastAPI POC{% endblock %}
 {% block content %}
   <div class="card">
-    <h1>Sentiment LTR — FastAPI migration proof-of-concept</h1>
+    <h1>Sentiment LTR — FastAPI migration</h1>
     <p>
-      This app is being incrementally ported from the Streamlit app (<code>app.py</code>)
-      to FastAPI + Jinja2 + HTMX. See
-      <code>docs/fastapi_migration_plan.md</code> for the full migration checklist.
+      Incremental port from the Streamlit app (<code>app.py</code>) to FastAPI + Jinja2 + HTMX.
+      See <code>docs/fastapi_migration_plan.md</code> for the full checklist.
     </p>
-    <p><strong>Currently migrated:</strong></p>
-    <ul>
-      <li><a href="/data-explorer">Tab 1 — One stock — inspect &amp; retrieve</a></li>
-      <li><a href="/batch">Tab 2 — Many stocks — retrieve &amp; store</a></li>
-      <li><a href="/phrasebank">Tab 3 — PhraseBank HF Baseline</a></li>
-      <li><a href="/raven-eval">Tab 4 — RavenPack Baseline Eval</a></li>
-      <li><a href="/finetune">Tab 5 — RavenPack Fine-Tuning (section 5·8: train on 1 / 5 / N tickers)</a></li>
-    </ul>
+    <p class="muted">Navigation is grouped by workflow:</p>
+    <div class="home-groups">
+      <section class="home-group">
+        <h2>Data retrieval</h2>
+        <p class="muted">Pull and cache market / news inputs.</p>
+        <ul>
+          <li><a href="/data-explorer">1 · One stock</a> — inspect &amp; retrieve a single ticker</li>
+          <li><a href="/batch">2 · Many stocks</a> — retrieve &amp; store the universe cache</li>
+        </ul>
+      </section>
+      <section class="home-group">
+        <h2>Models &amp; training</h2>
+        <p class="muted">Baselines, fine-tuning, and interactive checks.</p>
+        <ul>
+          <li><a href="/phrasebank">3 · PhraseBank baseline</a> — in-domain DistilBERT benchmark</li>
+          <li><a href="/raven-eval">4 · RavenPack OOD eval</a> — zero-shot on news headlines</li>
+          <li><a href="/finetune">5 · Fine-tune RavenPack</a> — train / compare news-sentiment models</li>
+          <li><a href="/sentiment-lab">6 · Interactive validation</a> — browse articles &amp; score headlines</li>
+        </ul>
+      </section>
+      <section class="home-group home-group-standalone">
+        <h2>Paper Validation</h2>
+        <p class="muted">Standalone live check of Song et al. requirements vs what we have now.</p>
+        <ul>
+          <li><a href="/paper-validation">7 · Status &amp; gaps</a> — paper inputs map + CRSP universe charts</li>
+        </ul>
+      </section>
+    </div>
     <p class="muted">
-      The original Streamlit app keeps running unchanged (<code>streamlit run app.py</code>)
-      side by side with this one until every tab above is ported and verified.
+      Streamlit still runs side by side (<code>streamlit run app.py</code>) until every section is verified.
     </p>
   </div>
 {% endblock %}

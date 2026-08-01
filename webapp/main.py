@@ -60,19 +60,92 @@ def _md_inline_code(text: Any) -> Markup:
 
 templates.env.filters["md_inline_code"] = _md_inline_code
 
-NAV_ITEMS = [
-    {"num": "1", "label": "One stock — inspect & retrieve", "href": "/data-explorer", "enabled": True},
-    {"num": "2", "label": "Many stocks — retrieve & store", "href": "/batch", "enabled": True},
-    {"num": "3", "label": "PhraseBank Baseline", "href": "/phrasebank", "enabled": True},
-    {"num": "4", "label": "RavenPack Baseline Eval", "href": "/raven-eval", "enabled": True},
-    {"num": "5", "label": "RavenPack Fine-Tuning", "href": "/finetune", "enabled": True},
-    {"num": "6", "label": "Sentiment Lab", "href": "/sentiment-lab", "enabled": True},
-    {"num": "7", "label": "Paper Validation", "href": "/paper-validation", "enabled": True},
+NAV_GROUPS = [
+    {
+        "id": "data",
+        "label": "Data retrieval",
+        "blurb": "Pull market & news data",
+        "pages": [
+            {
+                "num": "1",
+                "label": "One stock",
+                "hint": "Inspect & retrieve a single ticker",
+                "href": "/data-explorer",
+                "enabled": True,
+            },
+            {
+                "num": "2",
+                "label": "Many stocks",
+                "hint": "Retrieve & store the universe cache",
+                "href": "/batch",
+                "enabled": True,
+            },
+        ],
+    },
+    {
+        "id": "models",
+        "label": "Models & training",
+        "blurb": "Baselines, fine-tuning, interactive checks",
+        "pages": [
+            {
+                "num": "3",
+                "label": "PhraseBank baseline",
+                "hint": "In-domain DistilBERT benchmark",
+                "href": "/phrasebank",
+                "enabled": True,
+            },
+            {
+                "num": "4",
+                "label": "RavenPack OOD eval",
+                "hint": "Zero-shot baseline on news headlines",
+                "href": "/raven-eval",
+                "enabled": True,
+            },
+            {
+                "num": "5",
+                "label": "Fine-tune RavenPack",
+                "hint": "Train / compare news-sentiment models",
+                "href": "/finetune",
+                "enabled": True,
+            },
+            {
+                "num": "6",
+                "label": "Interactive validation",
+                "hint": "Browse articles & score headlines live",
+                "href": "/sentiment-lab",
+                "enabled": True,
+            },
+        ],
+    },
+    {
+        "id": "paper",
+        "label": "Paper Validation",
+        "blurb": "Live gap check vs Song et al.",
+        "standalone": True,
+        "pages": [
+            {
+                "num": "7",
+                "label": "Status & gaps",
+                "hint": "What the paper needs vs what we have now",
+                "href": "/paper-validation",
+                "enabled": True,
+            },
+        ],
+    },
 ]
 
 
 def _base_context(active_href: str) -> dict[str, Any]:
-    return {"nav_items": NAV_ITEMS, "active_href": active_href}
+    active_group = None
+    for group in NAV_GROUPS:
+        if any(item.get("href") == active_href for item in group["pages"]):
+            active_group = group["id"]
+            break
+    return {
+        "nav_groups": NAV_GROUPS,
+        "active_href": active_href,
+        "active_group": active_group,
+    }
 
 
 @app.get("/", response_class=HTMLResponse)

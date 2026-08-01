@@ -47,15 +47,17 @@ The project is past the "can we pull data?" stage and into "can we pull it relia
 
 ### What Works Today
 
-**Streamlit app (`app.py`)** — seven tabs:
+**Streamlit app (`app.py`)** — hierarchical workflow groups:
 
-1. **One stock — inspect & retrieve** — single-ticker queries across Refinitiv, WRDS/CRSP, Yahoo, and RavenPack with combined price charts, news coverage, sentiment panes, and provider tables.
-2. **Many stocks — retrieve & store** — launch, monitor, and inspect bulk fetches for all 1,000 universe tickers; live status banner, cache snapshot, per-provider failure breakdown, and per-ticker manifest table.
-3. **PhraseBank HF Baseline** — Hugging Face DistilBERT benchmark on Financial PhraseBank: dataset dashboard (gold labels, box + p50 probability charts), training metrics, and checkpoint details.
-4. **RavenPack Baseline Eval** — score the PhraseBank checkpoint on cached RavenPack headlines (out-of-domain): accuracy, macro-F1, confusion matrices, and mismatch samples.
-5. **RavenPack Fine-Tuning** — multi-ticker RavenPack training, checkpoint comparison, and OOD baskets (also in FastAPI `/finetune`).
-6. **Sentiment Lab** — fine-tuning workflow for the news-sentiment model (TRNA substitute): RavenPack article browser, PhraseBank training, headline scoring, and compute-device report.
-7. **Paper Validation (2003-2014)** — paper-inputs vs substitutes map, CRSP universe checks, and top-20 volume/price charts.
+1. **Data retrieval**
+   - **One stock — inspect & retrieve** — single-ticker queries across Refinitiv, WRDS/CRSP, Yahoo, and RavenPack.
+   - **Many stocks — retrieve & store** — bulk fetch/cache for all 1,000 universe tickers.
+2. **Models & training**
+   - **PhraseBank baseline** — in-domain DistilBERT benchmark.
+   - **RavenPack OOD eval** — zero-shot baseline on RavenPack headlines.
+   - **Fine-tune RavenPack** — multi-ticker training and checkpoint comparison.
+   - **Interactive validation** — article browser and live headline scoring (former Sentiment Lab).
+3. **Paper Validation** — standalone live gap check vs Song et al., plus CRSP universe charts.
 
 **Batch caching** — `scripts/run_batch_pipeline.py` writes one directory per ticker under:
 
@@ -143,6 +145,7 @@ code does. Keep it updated as part of every commit (see
 | 2026-07-18 | **Five-stock model + three-basket strict OOD benchmark** — downloaded headline-bearing RavenPack exports and jointly fine-tuned the PhraseBank checkpoint on AAPL, MSFT, JPM, XOM, and JNJ (171,701 train / 24,741 validation / 35,100 test rows; zero story-ID or normalized-headline leakage). Fixed pooled loading across historical `story_id`/`article_date` and fresh `rp_story_id`/`article_time` schemas, exposed temporal split windows in Section 5, and corrected checkpoint fingerprints to hash the actual saved weights rather than inherited provenance. Added three disjoint evaluation-only baskets—BAC/INTC/GE/F/PFE, CSCO/WFC/GM/VZ/CMCSA, and BMY/TSN/CSX/EBAY/MS—with 54,365 total 2013–2014 test headlines. Section 5 now renders grouped macro-F1/accuracy charts and a 15-stock heatmap, then reports the unweighted three-basket average: PhraseBank **34.8%**, AAPL-only **46.3%**, five-stock **59.8%** macro-F1 (five-stock **+25.0 points** vs PhraseBank); average accuracy was 37.3%, 58.5%, and 67.8%. *Decision:* average three independently composed OOD baskets rather than rely on one stock selection, while retaining basket/ticker audit tables. *Why:* the broader, graph-first benchmark makes cross-stock generalization easier to interpret and less sensitive to one evaluation universe. |
 | 2026-07-19 | **Twenty-stock pooled model + reproducible four-checkpoint benchmark UX** — jointly fine-tuned the PhraseBank checkpoint on the preceding five stocks plus C, GS, AIG, ORCL, QCOM, HPQ, IBM, T, WMT, KO, MCD, AMZN, CAT, BA, and CVX (503,502 train / 54,204 validation / 81,020 test; zero story-ID/headline overlap), preserving the earlier model at `data/models/ravenpack_distilbert_5stock/`. The completed 20-stock checkpoint reached **70.6% validation macro-F1** and **68.1% test macro-F1**. Section 5 now distinguishes and hashes all four checkpoints (PhraseBank, AAPL-only, five-stock, twenty-stock), evaluates them against the same three strictly disjoint OOD baskets, and persistently caches tables/Plotly charts by checkpoint SHA, basket definition, and source-file fingerprint. Added horizontal metric bars to both audit tables and six collapsible documentation panels: a full research data contract/notebook summary plus subsection-specific goals, paths, schemas, procedures, assumptions, and risks. *Decision:* use content-addressed benchmark caching and explicit file/schema provenance rather than opaque UI state. *Why:* reruns should be fast but automatically invalidate after model/data changes, and every displayed result should be interpretable and reproducible directly from the web app. |
 | 2026-08-01 | **Paper Validation replication map + clearer data-retrieval UX** — added Paper Validation **7·0** (collapsible side-by-side Song et al. inputs vs our substitutes, with live Batch cache counts, TRNA field map, code/webapp pointers); expanded `docs/data_pull_validation.md` inventory; renamed tabs **One stock — inspect & retrieve** and **Many stocks — retrieve & store**; restyled section-nav chips, fixed hash scrolling (including Data Explorer placeholders before Load data), and clarified subsection labels. Also surfaced a Section 5 research-results synopsis from saved checkpoint `metrics.json` (with tests). *Decision:* keep routes `/data-explorer` and `/batch` stable while renaming only the user-facing labels. *Why:* make the TRNA→RavenPack/DistilBERT gap and the one-stock vs N-stock retrieval split obvious without hunting docs. |
+| 2026-08-01 | **Hierarchical webapp navigation** — regrouped FastAPI topbar and Streamlit tabs into three workflow groups: **Data retrieval** (one stock / many stocks), **Models & training** (PhraseBank baseline, RavenPack OOD eval, fine-tune, interactive validation), and standalone **Paper Validation**. Routes unchanged; Sentiment Lab relabeled as interactive validation under Models. *Decision:* hierarchy in the chrome, not a rewrite of page URLs. *Why:* seven flat tabs made unrelated workflows compete for attention; grouping by job (retrieve → model → paper status) matches how the replication is actually done. |
 
 ### Immediate Next Steps
 
@@ -327,24 +330,20 @@ HTMX stack under `webapp/`. Both apps currently run side by side against the sam
 underlying code in `src/sentiment_ltr/`, so numbers match exactly between the two UIs.
 See `docs/fastapi_migration_plan.md` for the tab-by-tab migration status.
 
-**Ported so far:**
+**Ported so far** (grouped in the topbar):
 
-- **Tab 1 — One stock — inspect & retrieve** → `/data-explorer` (cache-first ticker/date query,
-  provider status, price/news/sentiment charts, and raw provider tables; optional
-  live refresh across Refinitiv, WRDS/CRSP, Yahoo, and RavenPack).
-- **Tab 2 — Many stocks — retrieve & store** → `/batch` (runner controls with live
-  progress polling, cached-data snapshot, failure reasons by provider, CRSP
-  delisting reasons, cash-merger exits, filterable per-ticker status table).
-- **Tab 3 — PhraseBank HF Baseline** → `/phrasebank` (dataset dashboard, training
-  metrics, live train/val/test evaluation, probability charts).
-- **Tab 4 — RavenPack Baseline Eval** → `/raven-eval` (zero-shot PhraseBank
-  checkpoint on RavenPack headlines: label distribution shift, class-level
-  metrics, provenance snapshot, on-demand evaluation with split/row-cap
-  controls).
-- **Tab 5·8 — RavenPack Fine-Tuning** → `/finetune` (ticker multi-select, coverage
-  table, background training job with live HTMX status polling).
+- **Data retrieval**
+  - **1 · One stock** → `/data-explorer`
+  - **2 · Many stocks** → `/batch`
+- **Models & training**
+  - **3 · PhraseBank baseline** → `/phrasebank`
+  - **4 · RavenPack OOD eval** → `/raven-eval`
+  - **5 · Fine-tune RavenPack** → `/finetune`
+  - **6 · Interactive validation** → `/sentiment-lab`
+- **Paper Validation** (standalone)
+  - **7 · Status & gaps** → `/paper-validation`
 
-All seven top-level Streamlit tabs now have FastAPI routes; some deeper subsections remain in progress as tracked in the migration plan.
+All seven Streamlit pages now have FastAPI routes under these three groups; some deeper subsections remain in progress as tracked in the migration plan.
 
 The webapp has a small test suite under `tests/` (adapter metric math +
 route/template rendering with the model layer mocked):
