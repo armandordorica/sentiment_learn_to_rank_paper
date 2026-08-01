@@ -4,13 +4,14 @@
 <div class="card">
   <h1>1 · One stock — inspect &amp; retrieve</h1>
   <p class="muted">
-    Look up <strong>one ticker</strong> across Refinitiv, WRDS/CRSP, Yahoo Finance, and RavenPack.
-    Prefer the local cache when present; use a live refresh to ignore it.
+    Choose a ticker, timeline, and exactly which services/fields to load.
+    Cached fields return immediately; missing tabular fields live-pull;
+    Refinitiv full story bodies queue an overnight resumable job (skips existing).
   </p>
 
   <nav class="section-nav" aria-label="One-stock data sections">
-    <a href="#de-1a">1A · Pick ticker &amp; providers</a>
-    <a href="#de-1b">1B · Provider coverage snapshot</a>
+    <a href="#de-1a">1A · Pick ticker &amp; fields</a>
+    <a href="#de-1b">1B · Provider &amp; field coverage</a>
     <a href="#de-1c">1C · Price charts</a>
     <a href="#de-1d">1D · Refinitiv headlines &amp; stories</a>
     <a href="#de-1e">1E · RavenPack sentiment</a>
@@ -20,7 +21,7 @@
   <p id="section-nav-hint" class="alert alert-info" hidden></p>
 
   <section id="de-1a">
-    <h3>1A · Pick ticker, dates &amp; providers</h3>
+    <h3>1A · Ticker, timeline &amp; field selection</h3>
     <div class="metric-row">
       <div class="metric"><span class="metric-label">Refinitiv</span><span class="metric-value compact">{{ status.refinitiv }}</span></div>
       <div class="metric"><span class="metric-label">WRDS/CRSP</span><span class="metric-value compact">{{ status.wrds }}</span></div>
@@ -28,40 +29,78 @@
       <div class="metric"><span class="metric-label">RavenPack</span><span class="metric-value compact">{{ status.ravenpack }}</span></div>
     </div>
 
-    {% if cache %}
-      <div class="alert alert-success">Cached data is available for AAPL{% if cache.company_name %} ({{ cache.company_name }}){% endif %}. Window {{ cache.start_date or "—" }} → {{ cache.end_date or "—" }}.</div>
-    {% endif %}
-
-    <form hx-post="/data-explorer/query" hx-target="#explorer-results" hx-swap="innerHTML" hx-indicator="#explorer-spinner">
+    <form id="explorer-load-form"
+          hx-post="/data-explorer/query"
+          hx-target="#explorer-results"
+          hx-swap="innerHTML"
+          hx-indicator="#explorer-spinner">
       <div class="quick-buttons">
-        {% for symbol in quick_tickers %}<button type="button" class="btn btn-secondary" onclick="this.form.ticker.value='{{ symbol }}'">{{ symbol }}</button>{% endfor %}
-        <button type="button" class="btn btn-secondary" onclick="this.form.start_date.value='2003-01-01';this.form.end_date.value='2014-12-31'">Paper window</button>
-        <button type="button" class="btn btn-secondary" onclick="this.form.start_date.value='1990-01-01';this.form.end_date.value='{{ today }}'">Full history</button>
+        {% for symbol in quick_tickers %}<button type="button" class="btn btn-secondary" onclick="this.form.ticker.value='{{ symbol }}'; this.form.querySelector('[name=ticker]').dispatchEvent(new Event('change'))">{{ symbol }}</button>{% endfor %}
+        <button type="button" class="btn btn-secondary" onclick="this.form.start_date.value='2003-01-01';this.form.end_date.value='2014-12-31'; this.form.start_date.dispatchEvent(new Event('change'))">Paper window</button>
+        <button type="button" class="btn btn-secondary" onclick="this.form.start_date.value='1990-01-01';this.form.end_date.value='{{ today }}'; this.form.start_date.dispatchEvent(new Event('change'))">Full history</button>
       </div>
       <div class="form-grid">
-        <label>Ticker<input name="ticker" value="{{ ticker }}" maxlength="16" required></label>
-        <label>Start date<input type="date" name="start_date" value="{{ start_date }}" min="1990-01-01" max="{{ today }}" required></label>
-        <label>End date<input type="date" name="end_date" value="{{ end_date }}" min="1990-01-01" max="{{ today }}" required></label>
+        <label>Ticker
+          <input name="ticker" value="{{ ticker }}" maxlength="16" required
+                 hx-get="/data-explorer/inventory"
+                 hx-target="#cache-inventory"
+                 hx-include="#explorer-load-form"
+                 hx-trigger="change delay:200ms">
+        </label>
+        <label>Start date
+          <input type="date" name="start_date" value="{{ start_date }}" min="1990-01-01" max="{{ today }}" required
+                 hx-get="/data-explorer/inventory"
+                 hx-target="#cache-inventory"
+                 hx-include="#explorer-load-form"
+                 hx-trigger="change">
+        </label>
+        <label>End date
+          <input type="date" name="end_date" value="{{ end_date }}" min="1990-01-01" max="{{ today }}" required
+                 hx-get="/data-explorer/inventory"
+                 hx-target="#cache-inventory"
+                 hx-include="#explorer-load-form"
+                 hx-trigger="change">
+        </label>
       </div>
-      <div class="check-grid">
-        <label><input type="checkbox" name="use_refinitiv" value="true" {% if defaults.refinitiv %}checked{% endif %}> Refinitiv prices/news</label>
-        <label><input type="checkbox" name="use_wrds" value="true" {% if defaults.wrds %}checked{% endif %}> WRDS/CRSP prices</label>
-        <label><input type="checkbox" name="use_yahoo" value="true" checked> Yahoo prices</label>
-        <label><input type="checkbox" name="use_ravenpack" value="true" {% if defaults.ravenpack %}checked{% endif %}> RavenPack sentiment</label>
-        <label><input type="checkbox" name="include_refinitiv_news" value="true" {% if defaults.refinitiv %}checked{% endif %}> Include Refinitiv headlines</label>
+
+      <h4>Services &amp; fields to load</h4>
+      <p class="muted">Unchecked products are ignored. Ready products are not re-fetched on <strong>Load selected</strong>.</p>
+      <div class="check-grid pull-product-grid">
+        {% for product in pull_products %}
+          <label class="pull-product-option">
+            <input type="checkbox" name="pull_ids" value="{{ product.id }}"
+                   {% if product.id in default_selected %}checked{% endif %}>
+            <span>
+              <strong>{{ product.service }} · {{ product.label }}</strong>
+              {% if product.overnight %}<em class="muted">overnight</em>{% endif %}
+              <small class="muted">{{ product.fields|join(', ') }}</small>
+            </span>
+          </label>
+        {% endfor %}
       </div>
-      <p class="muted">Load data prefers the local cache. Provider choices apply when a live pull is needed.</p>
-      <button class="btn btn-primary" type="submit" name="action" value="load">Load data</button>
-      <button class="btn btn-secondary" type="submit" name="action" value="live">Re-pull live (ignore cache)</button>
-      <span id="explorer-spinner" class="htmx-indicator muted"> Retrieving data…</span>
+
+      <div id="cache-inventory">
+        {% if inventory %}
+          {% include "partials/cache_inventory.html" %}
+        {% else %}
+          <p class="muted">Change ticker/dates to refresh local cache inventory.</p>
+        {% endif %}
+      </div>
+
+      <div class="button-row">
+        <button class="btn btn-secondary" type="submit" name="action" value="check">Check cache only</button>
+        <button class="btn btn-primary" type="submit" name="action" value="load">Load selected</button>
+        <button class="btn btn-secondary" type="submit" name="action" value="live">Re-pull live (force)</button>
+        <span id="explorer-spinner" class="htmx-indicator muted"> Working…</span>
+      </div>
     </form>
   </section>
 </div>
 {# Keep stable anchor targets so 1B–1G nav links always resolve; HTMX replaces this block after Load data. #}
 <div id="explorer-results">
   <div class="card result-card">
-    <p class="muted">Choose a ticker and click <strong>Load data</strong> to populate sections 1B–1G below.</p>
-    <section id="de-1b"><h3>1B · Provider coverage snapshot</h3><p class="muted">Waiting for data…</p></section>
+    <p class="muted">Select fields above, then <strong>Check cache</strong> or <strong>Load selected</strong>.</p>
+    <section id="de-1b"><h3>1B · Provider &amp; field coverage</h3><p class="muted">Waiting for data…</p></section>
     <section id="de-1c"><h3>1C · Price charts</h3><p class="muted">Waiting for data…</p></section>
     <section id="de-1d"><h3>1D · Refinitiv headlines &amp; stories</h3><p class="muted">Waiting for data…</p></section>
     <section id="de-1e"><h3>1E · RavenPack sentiment</h3><p class="muted">Waiting for data…</p></section>

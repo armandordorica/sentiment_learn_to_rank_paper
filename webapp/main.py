@@ -161,8 +161,35 @@ def index(request: Request) -> HTMLResponse:
 def data_explorer_page(request: Request) -> HTMLResponse:
     ctx = _base_context(active_href="/data-explorer")
     ctx.update(de.page_defaults())
-    ctx.update({"cache": de.cache_info("AAPL"), "result": None, "error": None})
+    ticker = ctx.get("ticker", "AAPL")
+    start = ctx.get("start_date", de.DEFAULT_START)
+    end = ctx.get("end_date", de.DEFAULT_END)
+    ctx.update({
+        "cache": de.cache_info(ticker),
+        "inventory": de.build_inventory(ticker, start, end),
+        "result": None,
+        "error": None,
+    })
     return templates.TemplateResponse(request, "data_explorer.html", ctx)
+
+
+@app.get("/data-explorer/inventory", response_class=HTMLResponse)
+def data_explorer_inventory(
+    request: Request,
+    ticker: str = Query(default="AAPL"),
+    start_date: str = Query(default=de.DEFAULT_START),
+    end_date: str = Query(default=de.DEFAULT_END),
+) -> HTMLResponse:
+    try:
+        inventory = de.build_inventory(ticker, start_date, end_date)
+        return templates.TemplateResponse(
+            request, "partials/cache_inventory.html", {"inventory": inventory}
+        )
+    except Exception as exc:  # noqa: BLE001
+        return HTMLResponse(
+            f'<div class="alert alert-error"><strong>Inventory failed:</strong> {exc}</div>',
+            status_code=200,
+        )
 
 
 @app.post("/data-explorer/query", response_class=HTMLResponse)
@@ -172,24 +199,52 @@ def data_explorer_query(
     start_date: str = Form(default=de.DEFAULT_START),
     end_date: str = Form(default=de.DEFAULT_END),
     action: str = Form(default="load"),
+    pull_ids: list[str] = Form(default=[]),
+    # Backward-compatible aliases from older forms
     use_refinitiv: bool = Form(default=False),
     use_wrds: bool = Form(default=False),
     use_yahoo: bool = Form(default=False),
     use_ravenpack: bool = Form(default=False),
     include_refinitiv_news: bool = Form(default=False),
 ) -> HTMLResponse:
+    selected = list(pull_ids or [])
+    if not selected:
+        # Legacy checkbox fallback
+        if use_refinitiv:
+            selected.append("refinitiv_prices")
+        if include_refinitiv_news or use_refinitiv:
+            selected.append("refinitiv_headlines")
+        if use_wrds:
+            selected.append("wrds_prices")
+        if use_yahoo:
+            selected.append("yahoo_prices")
+        if use_ravenpack:
+            selected.append("ravenpack_articles")
     try:
-        raw = de.query(
-            ticker, start_date, end_date, force_live=action == "live",
-            refinitiv=use_refinitiv, wrds=use_wrds, yahoo=use_yahoo,
-            ravenpack=use_ravenpack, include_news=include_refinitiv_news,
+        outcome = de.selective_load(
+            ticker, start_date, end_date, selected_ids=selected, action=action
         )
-        result, error = de.present(raw), None
+        if outcome["mode"] == "check":
+            return templates.TemplateResponse(
+                request,
+                "partials/data_explorer_results.html",
+                {
+                    "result": None,
+                    "error": None,
+                    "check_only": True,
+                    "messages": outcome["messages"],
+                    "inventory": outcome["inventory"],
+                },
+            )
+        return templates.TemplateResponse(
+            request,
+            "partials/data_explorer_results.html",
+            {"result": outcome["result"], "error": None},
+        )
     except Exception as exc:  # noqa: BLE001
-        result, error = None, str(exc)
-    return templates.TemplateResponse(
-        request, "partials/data_explorer_results.html", {"result": result, "error": error}
-    )
+        return templates.TemplateResponse(
+            request, "partials/data_explorer_results.html", {"result": None, "error": str(exc)}
+        )
 
 
 @app.post("/data-explorer/story", response_class=HTMLResponse)
@@ -244,10 +299,12 @@ def data_explorer_ravenpack_articles(
     limit: int = Query(default=de.DEFAULT_RP_LIST_LIMIT),
     q: str = Query(default=""),
     sort: str = Query(default="date_desc"),
+    only_event_text: bool = Query(default=False),
 ) -> HTMLResponse:
     try:
         articles = de.ravenpack_list_from_cache(
-            ticker, start_date, end_date, limit=limit, query=q, sort=sort
+            ticker, start_date, end_date, limit=limit, query=q, sort=sort,
+            only_event_text=only_event_text,
         )
         return templates.TemplateResponse(
             request,
@@ -292,6 +349,49 @@ def data_explorer_soft_matches(
             f'<div class="alert alert-error"><strong>Could not refresh soft-match table:</strong> {exc}</div>',
             status_code=200,
         )
+
+
+@app.post("/data-explorer/cache-stories", response_class=HTMLResponse)
+def data_explorer_cache_stories(
+    request: Request,
+    ticker: str = Form(default="AAPL"),
+    start_date: str = Form(default=de.DEFAULT_START),
+    end_date: str = Form(default=de.DEFAULT_END),
+    limit: str = Form(default=""),
+) -> HTMLResponse:
+    try:
+        limit_n = int(limit) if str(limit).strip() else None
+    except ValueError:
+        limit_n = None
+    try:
+        started = de.start_full_story_cache_job(
+            ticker, start_date, end_date, limit=limit_n
+        )
+        status = de.full_story_cache_status(ticker)
+        status["started"] = started
+        return templates.TemplateResponse(
+            request,
+            "partials/story_cache_status.html",
+            {"story_cache_status": status},
+        )
+    except Exception as exc:  # noqa: BLE001
+        return HTMLResponse(
+            f'<div class="alert alert-error"><strong>Could not start story cache:</strong> {exc}</div>',
+            status_code=200,
+        )
+
+
+@app.get("/data-explorer/cache-stories/status", response_class=HTMLResponse)
+def data_explorer_cache_stories_status(
+    request: Request,
+    ticker: str = Query(default="AAPL"),
+) -> HTMLResponse:
+    status = de.full_story_cache_status(ticker)
+    return templates.TemplateResponse(
+        request,
+        "partials/story_cache_status.html",
+        {"story_cache_status": status},
+    )
 
 
 @app.post("/data-explorer/ravenpack-article", response_class=HTMLResponse)

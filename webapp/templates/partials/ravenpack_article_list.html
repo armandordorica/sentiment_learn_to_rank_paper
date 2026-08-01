@@ -47,15 +47,28 @@
         <option value="headline_desc" {% if a.sort == "headline_desc" %}selected{% endif %}>Headline · Z–A</option>
       </select>
     </label>
+    <label class="check-inline">
+      <input type="checkbox" name="only_event_text" value="true"
+             {% if a.only_event_text %}checked{% endif %}
+             onchange="this.form.requestSubmit()">
+      Only with event_text
+      {% if a.with_event_text is defined %}
+        <span class="muted">({{ "{:,}".format(a.with_event_text) }})</span>
+      {% endif %}
+    </label>
     <button type="submit" class="btn btn-secondary btn-small">Apply</button>
   </form>
 
   <p class="muted">
+    {% if a.only_event_text %}
+      Showing rows with non-empty <code>event_text</code>
+      ({{ "{:,}".format(a.with_event_text) }} of {{ "{:,}".format(a.total) }}).
+    {% endif %}
     {% if a.query %}
       Filter <code>{{ a.query }}</code> matched {{ "{:,}".format(a.matched) }} of {{ "{:,}".format(a.total) }};
       showing top {{ "{:,}".format(a.shown) }}.
     {% else %}
-      Showing top {{ "{:,}".format(a.shown) }} of {{ "{:,}".format(a.total) }} RavenPack rows.
+      Showing top {{ "{:,}".format(a.shown) }} of {{ "{:,}".format(a.matched if a.only_event_text else a.total) }} RavenPack rows.
     {% endif %}
   </p>
 
@@ -65,6 +78,7 @@
         <tr>
           <th>Time</th>
           {% if a.has_headline %}<th>Headline</th>{% endif %}
+          <th>event_text</th>
           <th>Relevance</th>
           <th>Event sent.</th>
           <th>Topic</th>
@@ -76,6 +90,7 @@
           <tr>
             <td class="headline-date">{{ row.article_time or "—" }}</td>
             {% if a.has_headline %}<td>{{ row.headline or "—" }}</td>{% endif %}
+            <td class="rp-event-cell">{{ row.event_text or "—" }}</td>
             <td>{% if row.relevance_score is not none %}{{ "%.2f"|format(row.relevance_score) }}{% else %}—{% endif %}</td>
             <td>{% if row.event_sentiment_score is not none %}{{ "%.3f"|format(row.event_sentiment_score) }}{% else %}—{% endif %}</td>
             <td>{{ row.topic or "—" }}</td>

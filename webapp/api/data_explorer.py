@@ -25,6 +25,14 @@ from sentiment_ltr.data.ravenpack_match import (  # noqa: E402
     resolve_ravenpack_for_story,
 )
 from sentiment_ltr.data.refinitiv_queries import fetch_refinitiv_story  # noqa: E402
+from sentiment_ltr.data.refinitiv_story_cache import (  # noqa: E402
+    digests_on_disk,
+    read_progress as read_story_pull_progress,
+    story_path as cached_story_path,
+    write_story_file,
+)
+from webapp.api import data_explorer_inventory as inventory  # noqa: E402
+
 
 DEFAULT_START = "2003-01-01"
 DEFAULT_END = "2014-12-31"
@@ -69,6 +77,8 @@ def page_defaults() -> dict[str, Any]:
             "yahoo": True,
             "ravenpack": wrds_ready,
         },
+        "pull_products": inventory.PULL_PRODUCTS,
+        "default_selected": inventory.DEFAULT_SELECTED,
     }
 
 
@@ -305,10 +315,7 @@ def headlines_from_cache(
 
 
 def _story_path(story_id: str, headline: str, ticker: str) -> Path:
-    slug = re.sub(r"[^a-z0-9]+", "-", headline.lower()).strip("-")[:80] or "refinitiv-story"
-    digest = hashlib.sha256(story_id.encode("utf-8")).hexdigest()[:12]
-    clean_ticker = live_data.clean_ticker(ticker) or "UNKNOWN"
-    return FULL_STORY_DIR / clean_ticker / f"{slug}--{digest}.txt"
+    return cached_story_path(PROJECT_ROOT, ticker, story_id, headline)
 
 
 def _query_ravenpack_day(ticker: str, start: str, end: str) -> pd.DataFrame:
@@ -410,6 +417,7 @@ def ravenpack_article_list(
     limit: int = DEFAULT_RP_LIST_LIMIT,
     query: str = "",
     sort: str = "date_desc",
+    only_event_text: bool = False,
 ) -> dict[str, Any] | None:
     """Selectable RavenPack rows for 1E inspect (headline search when present)."""
     if not isinstance(articles, pd.DataFrame) or articles.empty:
@@ -428,6 +436,15 @@ def ravenpack_article_list(
     time_col = "article_time" if "article_time" in work.columns else "timestamp_utc"
     total = int(len(work))
     has_headline = "headline" in work.columns
+    with_event_text_total = 0
+    if "event_text" in work.columns:
+        et_all = _nonempty_mask(work["event_text"])
+        with_event_text_total = int(et_all.sum())
+
+    if only_event_text and "event_text" in work.columns:
+        work = work.loc[_nonempty_mask(work["event_text"])]
+    elif only_event_text:
+        work = work.iloc[0:0].copy()
 
     q = str(query or "").strip().lower()
     if q:
@@ -480,11 +497,13 @@ def ravenpack_article_list(
     return {
         "ticker": ticker,
         "total": total,
+        "with_event_text": with_event_text_total,
         "matched": matched,
         "shown": int(len(display)),
         "limit": limit,
         "query": str(query or "").strip(),
         "sort": sort,
+        "only_event_text": bool(only_event_text),
         "limit_choices": list(RP_LIST_LIMIT_CHOICES),
         "has_headline": has_headline,
         "rows": display.to_dict(orient="records"),
@@ -499,6 +518,7 @@ def ravenpack_list_from_cache(
     limit: int = DEFAULT_RP_LIST_LIMIT,
     query: str = "",
     sort: str = "date_desc",
+    only_event_text: bool = False,
 ) -> dict[str, Any]:
     """Reload RavenPack rows from the ticker cache for HTMX filter/sort/top-N."""
     cached = load_cached(ticker, start, end)
@@ -509,7 +529,7 @@ def ravenpack_list_from_cache(
     articles = cached["providers"].get("ravenpack", {}).get("articles", pd.DataFrame())
     listing = ravenpack_article_list(
         articles, ticker=live_data.clean_ticker(ticker) or ticker.upper(),
-        limit=limit, query=query, sort=sort,
+        limit=limit, query=query, sort=sort, only_event_text=only_event_text,
     )
     if listing is None:
         raise ValueError("No RavenPack articles in cache for this ticker/window.")
@@ -774,6 +794,7 @@ def load_story(
     story_date: str | None = None,
     *,
     include_ravenpack: bool = True,
+    force_fetch: bool = False,
 ) -> dict[str, Any]:
     """Fetch and persist one Refinitiv story, with RavenPack relevance when possible."""
     story_id = str(story_id or "").strip()
@@ -781,13 +802,20 @@ def load_story(
         raise ValueError("Select a Refinitiv headline with a story ID.")
     headline = str(headline or "Selected headline")
     clean_ticker = live_data.clean_ticker(ticker) or "UNKNOWN"
-    text = fetch_refinitiv_story(PROJECT_ROOT, story_id)
     path = _story_path(story_id, headline, clean_ticker)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        f"Headline: {headline}\nStory ID: {story_id}\nTicker: {clean_ticker}\n\n{text}\n",
-        encoding="utf-8",
-    )
+    if path.exists() and not force_fetch:
+        raw = path.read_text(encoding="utf-8")
+        marker = "\n\n"
+        text = raw.split(marker, 1)[1].rstrip("\n") if marker in raw else raw
+    else:
+        text = fetch_refinitiv_story(PROJECT_ROOT, story_id)
+        write_story_file(
+            path,
+            story_id=story_id,
+            headline=headline,
+            ticker=clean_ticker,
+            text=text,
+        )
     relative_path = str(path.relative_to(PROJECT_ROOT)) if path.is_relative_to(PROJECT_ROOT) else str(path)
     ravenpack: dict[str, Any] | None = None
     if include_ravenpack and clean_ticker != "UNKNOWN":
@@ -809,6 +837,123 @@ def load_story(
         "path": str(path.resolve()),
         "relative_path": relative_path,
         "ravenpack": ravenpack,
+    }
+
+
+
+def _nonempty_mask(series: pd.Series) -> pd.Series:
+    text = series.astype(str).str.strip()
+    return series.notna() & text.ne("") & ~text.isin({"None", "nan", "NaT", "<NA>"})
+
+
+def _field_row(frame: pd.DataFrame, column: str, *, note: str = "") -> dict[str, Any] | None:
+    if column not in frame.columns:
+        return None
+    total = int(len(frame))
+    filled = int(_nonempty_mask(frame[column]).sum())
+    return {
+        "field": column,
+        "filled": filled,
+        "missing": total - filled,
+        "pct": round(100.0 * filled / total, 1) if total else 0.0,
+        "note": note,
+    }
+
+
+def _refinitiv_story_body_coverage(news: pd.DataFrame, ticker: str) -> dict[str, Any]:
+    """How many headline rows have a full body saved under FULL_STORY_DIR."""
+    total = int(len(news))
+    # Prefer the module-level FULL_STORY_DIR so tests can monkeypatch it.
+    story_dir = FULL_STORY_DIR / (live_data.clean_ticker(ticker) or ticker.upper())
+    digests: set[str] = set()
+    if story_dir.is_dir():
+        for path in story_dir.glob("*.txt"):
+            stem = path.stem
+            digests.add(stem.rsplit("--", 1)[-1] if "--" in stem else stem)
+    with_body = 0
+    if "storyId" in news.columns and digests:
+        for story_id in news["storyId"].astype(str):
+            digest = hashlib.sha256(story_id.encode("utf-8")).hexdigest()[:12]
+            if digest in digests:
+                with_body += 1
+    pull = read_story_pull_progress(PROJECT_ROOT, ticker) or {}
+    note = (
+        f"On-demand wire body · {len(digests)} file(s) on disk"
+        + (f" · last pull {pull.get('status')} ({pull.get('fetched', 0)} fetched)" if pull else "")
+    )
+    return {
+        "field": "full_story_body (on disk)",
+        "filled": with_body,
+        "missing": total - with_body,
+        "pct": round(100.0 * with_body / total, 1) if total else 0.0,
+        "note": note,
+        "files_on_disk": len(digests),
+        "pull_progress": pull or None,
+    }
+
+
+def field_coverage(
+    *,
+    ticker: str,
+    start_date: str,
+    end_date: str,
+    news: pd.DataFrame,
+    articles: pd.DataFrame,
+    price_blocks: dict[str, pd.DataFrame],
+) -> dict[str, Any]:
+    """Per-field coverage for the selected ticker and date window."""
+    ref_fields: list[dict[str, Any]] = []
+    if isinstance(news, pd.DataFrame) and not news.empty:
+        for col, note in (
+            ("date", "Headline timestamp"),
+            ("headline", "Wire headline text"),
+            ("storyId", "Needed to fetch full body"),
+            ("sourceCode", "e.g. NS:RTRS"),
+        ):
+            row = _field_row(news, col, note=note)
+            if row:
+                ref_fields.append(row)
+        ref_fields.append(_refinitiv_story_body_coverage(news, ticker))
+
+    rp_fields: list[dict[str, Any]] = []
+    if isinstance(articles, pd.DataFrame) and not articles.empty:
+        work = articles.copy()
+        if "relevance_score" not in work.columns and "relevance" in work.columns:
+            work["relevance_score"] = pd.to_numeric(work["relevance"], errors="coerce") / 100.0
+        for col, note in (
+            ("headline", "Always present in rich exports"),
+            ("event_text", "Short ≤400-char snippet when RavenPack tagged an event"),
+            ("relevance_score", "Entity relevance to this ticker"),
+            ("event_sentiment_score", "Only when an event was tagged"),
+            ("sentiment_score", "relevance × event sentiment"),
+            ("topic", "Event taxonomy"),
+            ("group", "Event taxonomy"),
+            ("type", "Event taxonomy"),
+            ("news_type", "Source item class (not a body)"),
+            ("rp_story_id", "Story key"),
+        ):
+            row = _field_row(work, col, note=note)
+            if row:
+                rp_fields.append(row)
+
+    prices = []
+    for name, frame in price_blocks.items():
+        n = int(len(frame)) if isinstance(frame, pd.DataFrame) else 0
+        prices.append({"provider": name, "rows": n})
+
+    return {
+        "ticker": ticker,
+        "start_date": start_date,
+        "end_date": end_date,
+        "refinitiv": {
+            "rows": int(len(news)) if isinstance(news, pd.DataFrame) else 0,
+            "fields": ref_fields,
+        },
+        "ravenpack": {
+            "rows": int(len(articles)) if isinstance(articles, pd.DataFrame) else 0,
+            "fields": rp_fields,
+        },
+        "prices": prices,
     }
 
 
@@ -925,10 +1070,25 @@ def present(result: dict[str, Any]) -> dict[str, Any]:
                 "Deferred on Load data so dense tickers stay responsive."
             ),
         }
+    all_price_blocks = {
+        name: block.get("prices", pd.DataFrame())
+        for name, block in providers.items()
+        if name != "ravenpack"
+    }
+    coverage = field_coverage(
+        ticker=ticker,
+        start_date=result["start_date"],
+        end_date=result["end_date"],
+        news=news if isinstance(news, pd.DataFrame) else pd.DataFrame(),
+        articles=articles if isinstance(articles, pd.DataFrame) else pd.DataFrame(),
+        price_blocks=all_price_blocks,
+    )
+
     return {
         "ticker": ticker, "start_date": result["start_date"], "end_date": result["end_date"],
         "source": result.get("source", "live"), "cache_created_at": result.get("cache_created_at"),
         "statuses": statuses, "charts": charts,
+        "coverage": coverage,
         "news": _records(news),
         "refinitiv_headlines": headlines,
         "news_storage": news_storage,
@@ -936,4 +1096,272 @@ def present(result: dict[str, Any]) -> dict[str, Any]:
         "ravenpack_articles": rp_list,
         "soft_matches": soft_matches,
         "raw": raw,
+    }
+
+
+
+def build_inventory(ticker: str, start: str, end: str) -> dict[str, Any]:
+    """Fast local inventory for the selective Load form."""
+    return inventory.inspect_inventory(
+        ticker=ticker,
+        start=start,
+        end=end,
+        cache_dir=_cache_dir(ticker),
+        project_root=PROJECT_ROOT,
+        load_cached_ravenpack=load_cached_ravenpack,
+        full_story_dir=FULL_STORY_DIR,
+    )
+
+
+def selective_load(
+    ticker: str,
+    start: str,
+    end: str,
+    *,
+    selected_ids: list[str],
+    action: str = "load",
+) -> dict[str, Any]:
+    """Load selected products; skip live pulls when cache already covers them.
+
+    ``action``:
+      - ``check``: inventory only (no present/charts)
+      - ``load``: use cache; live-pull only missing tabular products; queue overnight stories
+      - ``live``: force live for selected tabular products; still skip existing story bodies
+    """
+    ticker = live_data.clean_ticker(ticker)
+    if not ticker:
+        raise ValueError("Enter a valid ticker.")
+    if pd.Timestamp(start) > pd.Timestamp(end):
+        raise ValueError("Start date must be on or before end date.")
+    selected_ids = [str(x) for x in selected_ids if str(x).strip()]
+    if not selected_ids:
+        raise ValueError("Select at least one service / field bundle.")
+
+    inv = build_inventory(ticker, start, end)
+    by_id = {p["id"]: p for p in inv["products"]}
+    flags = inventory.selected_provider_flags(selected_ids)
+    messages: list[dict[str, str]] = []
+    force_live = action == "live"
+
+    # Overnight full-story handling
+    story_job = None
+    if flags["full_stories"]:
+        story = by_id.get("refinitiv_full_stories", {})
+        status = story.get("status")
+        if status == "ready" and not force_live:
+            messages.append({"level": "success", "text": story["message"]})
+        elif status == "blocked":
+            messages.append({"level": "error", "text": story["message"]})
+        else:
+            if action == "check":
+                messages.append({"level": "info", "text": story.get("message") or "Full stories not fully cached."})
+            else:
+                # Only queue missing bodies (script skips existing digests).
+                story_job = start_full_story_cache_job(ticker, start, end)
+                messages.append({
+                    "level": "info",
+                    "text": (
+                        f"Started overnight Refinitiv full-story pull for {ticker} "
+                        f"{start} → {end} (pid {story_job['pid']}). "
+                        f"{story.get('detail') or story.get('message') or ''} "
+                        "Existing bodies are skipped."
+                    ).strip(),
+                })
+
+    # Tabular products
+    for pid in selected_ids:
+        if pid == "refinitiv_full_stories":
+            continue
+        prod = by_id.get(pid)
+        if not prod:
+            continue
+        if prod["status"] == "ready" and not force_live:
+            messages.append({"level": "success", "text": prod["message"]})
+        elif action == "check":
+            level = "success" if prod["status"] == "ready" else ("warn" if prod["status"] == "partial" else "info")
+            messages.append({"level": level, "text": prod["message"]})
+        elif prod["status"] != "ready" or force_live:
+            messages.append({
+                "level": "info",
+                "text": (
+                    f"Will live-pull {prod['service']} {prod['label'].lower()} for "
+                    f"{ticker} {start} → {end}."
+                    if force_live or prod["status"] == "missing"
+                    else prod["message"] + " Live pull may enrich missing fields."
+                ),
+            })
+
+    if action == "check":
+        return {
+            "mode": "check",
+            "inventory": inv,
+            "messages": messages,
+            "story_job": story_job,
+            "result": None,
+        }
+
+    # Decide live providers
+    need_refinitiv = False
+    need_news = False
+    need_wrds = False
+    need_yahoo = False
+    need_ravenpack = False
+    for pid in selected_ids:
+        if pid == "refinitiv_full_stories":
+            continue
+        prod = by_id.get(pid, {})
+        stale = force_live or prod.get("status") != "ready"
+        if not stale:
+            continue
+        if pid == "refinitiv_prices":
+            need_refinitiv = True
+        elif pid == "refinitiv_headlines":
+            need_refinitiv = True
+            need_news = True
+        elif pid == "wrds_prices":
+            need_wrds = True
+        elif pid == "yahoo_prices":
+            need_yahoo = True
+        elif pid == "ravenpack_articles":
+            need_ravenpack = True
+
+    raw = None
+    if any((need_refinitiv, need_wrds, need_yahoo, need_ravenpack)):
+        raw = live_data.run_ticker_data_query(
+            PROJECT_ROOT, ticker, start, end,
+            query_refinitiv=need_refinitiv,
+            query_wrds=need_wrds,
+            query_yahoo=need_yahoo,
+            query_ravenpack=need_ravenpack,
+            news_count=1 if need_news else 0,
+            wrds_limit=10_000,
+        )
+        raw["source"] = "live"
+        messages.append({
+            "level": "info",
+            "text": (
+                f"Live pull finished for {ticker} {start} → {end} "
+                f"(providers: "
+                + ", ".join(
+                    name for name, flag in [
+                        ("refinitiv", need_refinitiv),
+                        ("wrds", need_wrds),
+                        ("yahoo", need_yahoo),
+                        ("ravenpack", need_ravenpack),
+                    ] if flag
+                )
+                + ")."
+            ),
+        })
+    else:
+        raw = load_cached(ticker, start, end)
+        if raw is None:
+            # Still allow presentation shell when only overnight stories selected.
+            raw = {
+                "ticker": ticker,
+                "start_date": start,
+                "end_date": end,
+                "source": "cache",
+                "providers": {
+                    "refinitiv": {"status": "empty", "error": None, "prices": pd.DataFrame(), "news": pd.DataFrame(), "news_daily_counts": pd.DataFrame()},
+                    "wrds": {"status": "empty", "error": None, "prices": pd.DataFrame()},
+                    "yahoo": {"status": "empty", "error": None, "prices": pd.DataFrame()},
+                    "ravenpack": {"status": "empty", "error": None, "articles": pd.DataFrame()},
+                },
+            }
+        else:
+            messages.append({
+                "level": "success",
+                "text": (
+                    f"Loaded {ticker} {start} → {end} from local cache "
+                    "(no live API calls for the selected tabular fields)."
+                ),
+            })
+
+    # Prefer full cache merge so unselected-but-present series still chart if loaded
+    cached = load_cached(ticker, start, end)
+    if cached is not None and raw.get("source") == "live":
+        # Merge: keep live for pulled providers, cache for others
+        for name, block in cached["providers"].items():
+            live_block = raw["providers"].get(name, {})
+            live_status = live_block.get("status")
+            if live_status in {None, "skipped", "empty", "unavailable", "failed"}:
+                raw["providers"][name] = block
+            elif name == "refinitiv":
+                # Keep live prices/news when present; fill missing news from cache
+                if isinstance(live_block.get("news"), pd.DataFrame) and live_block["news"].empty:
+                    live_block["news"] = block.get("news", pd.DataFrame())
+                    live_block["news_daily_counts"] = block.get("news_daily_counts", pd.DataFrame())
+                if isinstance(live_block.get("prices"), pd.DataFrame) and live_block["prices"].empty:
+                    live_block["prices"] = block.get("prices", pd.DataFrame())
+                raw["providers"][name] = live_block
+
+    presented = present(raw)
+    presented["pull_report"] = {
+        "action": action,
+        "messages": messages,
+        "inventory": build_inventory(ticker, start, end),
+        "selected_ids": selected_ids,
+        "story_job": story_job,
+    }
+    return {
+        "mode": action,
+        "inventory": presented["pull_report"]["inventory"],
+        "messages": messages,
+        "story_job": story_job,
+        "result": presented,
+    }
+
+
+def start_full_story_cache_job(
+    ticker: str,
+    start: str,
+    end: str,
+    *,
+    limit: int | None = None,
+    sleep_s: float = 0.25,
+) -> dict[str, Any]:
+    """Launch ``scripts/cache_refinitiv_full_stories.py`` as a detached process."""
+    import subprocess
+
+    ticker = live_data.clean_ticker(ticker) or ticker.upper()
+    script = PROJECT_ROOT / "scripts" / "cache_refinitiv_full_stories.py"
+    cmd = [
+        sys.executable,
+        str(script),
+        "--ticker", ticker,
+        "--start", start,
+        "--end", end,
+        "--sleep", str(sleep_s),
+    ]
+    if limit is not None:
+        cmd.extend(["--limit", str(int(limit))])
+    log_path = FULL_STORY_DIR / ticker / "_pull.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_file = log_path.open("a", encoding="utf-8")
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(PROJECT_ROOT),
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    return {
+        "ticker": ticker,
+        "pid": proc.pid,
+        "cmd": cmd,
+        "log_path": str(log_path),
+        "progress_path": str(FULL_STORY_DIR / ticker / "_pull_progress.json"),
+    }
+
+
+def full_story_cache_status(ticker: str) -> dict[str, Any]:
+    ticker = live_data.clean_ticker(ticker) or ticker.upper()
+    progress = read_story_pull_progress(PROJECT_ROOT, ticker) or {}
+    n_files = len(digests_on_disk(PROJECT_ROOT, ticker))
+    return {
+        "ticker": ticker,
+        "files_on_disk": n_files,
+        "progress": progress,
+        "log_path": str(FULL_STORY_DIR / ticker / "_pull.log"),
     }

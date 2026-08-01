@@ -1,0 +1,9 @@
+{% if messages %}
+  <div class="pull-report">
+    {% for msg in messages %}
+      <div class="alert alert-{{ 'success' if msg.level == 'success' else ('error' if msg.level == 'error' else ('warn' if msg.level == 'warn' else 'info')) }}">
+        {{ msg.text }}
+      </div>
+    {% endfor %}
+  </div>
+{% endif %}

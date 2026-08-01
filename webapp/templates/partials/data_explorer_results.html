@@ -1,9 +1,31 @@
 {% if error %}<div class="card result-card"><div class="alert alert-error">{{ error }}</div></div>
+{% elif check_only %}
+<div class="card result-card">
+  <h3>Cache check</h3>
+  {% include "partials/pull_report.html" %}
+  {% if inventory %}{% include "partials/cache_inventory.html" %}{% endif %}
+  <p class="muted">No charts loaded — click <strong>Load selected</strong> when ready.</p>
+</div>
 {% elif result %}
 <div class="card result-card">
-  <section id="de-1b"><h3>1B · Provider coverage snapshot</h3>
+  {% if result.pull_report %}
+    {% with messages=result.pull_report.messages %}
+      {% include "partials/pull_report.html" %}
+    {% endwith %}
+    {% if result.pull_report.inventory %}
+      {% with inventory=result.pull_report.inventory %}
+        {% include "partials/cache_inventory.html" %}
+      {% endwith %}
+    {% endif %}
+  {% endif %}
+  <section id="de-1b"><h3>1B · Provider &amp; field coverage</h3>
     <div class="metric-row">{% for name, item in result.statuses.items() %}<div class="metric"><span class="metric-label">{{ name|title }}</span><span class="metric-value compact">{{ item.status|upper }} ({{ item.rows }})</span></div>{% endfor %}</div>
     <p class="muted">{{ "📦 Local cache" if result.source == "cache" else "🌐 Live API pull" }} · {{ result.ticker }} · {{ result.start_date }} → {{ result.end_date }}{% if result.cache_created_at %} · cached {{ result.cache_created_at }}{% endif %}</p>
+    {% if result.coverage %}
+      {% with coverage=result.coverage %}
+        {% include "partials/field_coverage.html" %}
+      {% endwith %}
+    {% endif %}
   </section>
   <section id="de-1c">
     <h3>1C · Price charts</h3>

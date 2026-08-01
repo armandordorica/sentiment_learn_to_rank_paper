@@ -1,0 +1,29 @@
+{# Expects `inventory` from build_inventory / selective_load. #}
+{% set inv = inventory %}
+{% if inv %}
+<div class="inventory-panel">
+  <p class="muted"><strong>{{ inv.summary }}</strong></p>
+  <table class="data-table inventory-table">
+    <thead>
+      <tr>
+        <th>Service</th>
+        <th>Fields</th>
+        <th>Status</th>
+        <th>Rows / detail</th>
+        <th>Message</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in inv.products %}
+        <tr class="inv-{{ p.status }}">
+          <td>{{ p.service }} · {{ p.label }}{% if p.overnight %} <span class="muted">(overnight)</span>{% endif %}</td>
+          <td><code>{{ p.fields|join(', ') }}</code></td>
+          <td><span class="inv-badge inv-badge-{{ p.status }}">{{ p.status }}</span></td>
+          <td>{% if p.detail %}{{ p.detail }}{% else %}{{ "{:,}".format(p.rows) }}{% endif %}</td>
+          <td class="muted">{{ p.message }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}

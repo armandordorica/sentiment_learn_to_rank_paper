@@ -1,0 +1,92 @@
+{% set c = coverage %}
+<p class="muted">
+  Field completeness for <strong>{{ c.ticker }}</strong>
+  · {{ c.start_date }} → {{ c.end_date }}.
+  Counts are for this loaded window only.
+</p>
+
+<div class="coverage-grid">
+  <div class="coverage-block">
+    <h4>Refinitiv news · {{ "{:,}".format(c.refinitiv.rows) }} rows</h4>
+    {% if c.refinitiv.fields %}
+      <table class="data-table coverage-fields-table">
+        <thead>
+          <tr><th>Field</th><th>Filled</th><th>Missing</th><th>%</th><th>Note</th></tr>
+        </thead>
+        <tbody>
+          {% for row in c.refinitiv.fields %}
+            <tr class="{% if row.pct >= 99 %}cov-full{% elif row.pct >= 20 %}cov-partial{% else %}cov-sparse{% endif %}">
+              <td><code>{{ row.field }}</code></td>
+              <td>{{ "{:,}".format(row.filled) }}</td>
+              <td>{{ "{:,}".format(row.missing) }}</td>
+              <td>{{ "%.1f"|format(row.pct) }}%</td>
+              <td class="cov-note">{{ row.note }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="muted">No Refinitiv headlines in this window.</p>
+    {% endif %}
+  </div>
+
+  <div class="coverage-block">
+    <h4>RavenPack · {{ "{:,}".format(c.ravenpack.rows) }} rows</h4>
+    {% if c.ravenpack.fields %}
+      <table class="data-table coverage-fields-table">
+        <thead>
+          <tr><th>Field</th><th>Filled</th><th>Missing</th><th>%</th><th>Note</th></tr>
+        </thead>
+        <tbody>
+          {% for row in c.ravenpack.fields %}
+            <tr class="{% if row.pct >= 99 %}cov-full{% elif row.pct >= 20 %}cov-partial{% else %}cov-sparse{% endif %}">
+              <td><code>{{ row.field }}</code></td>
+              <td>{{ "{:,}".format(row.filled) }}</td>
+              <td>{{ "{:,}".format(row.missing) }}</td>
+              <td>{{ "%.1f"|format(row.pct) }}%</td>
+              <td class="cov-note">{{ row.note }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="muted">No RavenPack articles in this window.</p>
+    {% endif %}
+  </div>
+</div>
+
+{% if c.prices %}
+  <p class="muted" style="margin-top:.75rem">
+    Prices:
+    {% for p in c.prices %}
+      {{ p.provider }} {{ "{:,}".format(p.rows) }}{% if not loop.last %} · {% endif %}
+    {% endfor %}
+  </p>
+{% endif %}
+
+{% if c.refinitiv.rows %}
+  {% set ns = namespace(body_filled=0) %}
+  {% for row in c.refinitiv.fields %}
+    {% if row.field == "full_story_body (on disk)" %}
+      {% set ns.body_filled = row.filled %}
+    {% endif %}
+  {% endfor %}
+  <div class="story-cache-panel">
+    <h4>Refinitiv full story bodies</h4>
+    <p class="muted">
+      {{ "{:,}".format(ns.body_filled) }} / {{ "{:,}".format(c.refinitiv.rows) }} cached for this window.
+      To queue an overnight pull (skips existing), select
+      <strong>Refinitiv · Full story bodies</strong> in <strong>1A</strong> and click
+      <strong>Load selected</strong>.
+    </p>
+    <div id="story-cache-status">
+      {% with story_cache_status=none, coverage=c %}
+        {% include "partials/story_cache_status.html" %}
+      {% endwith %}
+    </div>
+    <button type="button" class="btn btn-secondary btn-small"
+            hx-get="/data-explorer/cache-stories/status?ticker={{ c.ticker }}"
+            hx-target="#story-cache-status"
+            hx-swap="innerHTML">Refresh pull status</button>
+  </div>
+{% endif %}

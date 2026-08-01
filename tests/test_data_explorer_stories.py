@@ -190,3 +190,66 @@ def test_soft_match_comparison_unmatched_rows_optional():
         news, articles, ticker="AAPL", matched_only=True, min_score=0.45
     )
     assert only["shown"] == 0
+
+
+def test_field_coverage_refinitiv_and_ravenpack(tmp_path, monkeypatch):
+    monkeypatch.setattr(de, "FULL_STORY_DIR", tmp_path)
+    news = pd.DataFrame({
+        "date": pd.to_datetime(["2014-12-31T22:30:00Z"]),
+        "headline": ["Sony Interview lands on pay TV"],
+        "storyId": ["urn:story:1"],
+        "sourceCode": ["NS:RTRS"],
+    })
+    digest = __import__("hashlib").sha256(b"urn:story:1").hexdigest()[:12]
+    body_dir = tmp_path / "AAPL"
+    body_dir.mkdir()
+    (body_dir / f"sony--{digest}.txt").write_text("full body", encoding="utf-8")
+
+    articles = pd.DataFrame({
+        "headline": ["Sony Makes The Interview Available", "Tabular quote"],
+        "event_text": ["Sony Pictures signed deals", None],
+        "relevance_score": [0.12, 1.0],
+        "event_sentiment_score": [0.1, None],
+        "sentiment_score": [0.012, None],
+        "topic": ["business", None],
+        "group": ["media", None],
+        "type": ["contract", None],
+        "news_type": ["FULL-ARTICLE", "TABULAR-MATERIAL"],
+        "rp_story_id": ["a", "b"],
+    })
+    cov = de.field_coverage(
+        ticker="AAPL",
+        start_date="2014-01-01",
+        end_date="2014-12-31",
+        news=news,
+        articles=articles,
+        price_blocks={"wrds": pd.DataFrame({"date": [1]})},
+    )
+    assert cov["refinitiv"]["rows"] == 1
+    headline = next(r for r in cov["refinitiv"]["fields"] if r["field"] == "headline")
+    assert headline["filled"] == 1 and headline["pct"] == 100.0
+    body = next(r for r in cov["refinitiv"]["fields"] if "full_story_body" in r["field"])
+    assert body["filled"] == 1
+    et = next(r for r in cov["ravenpack"]["fields"] if r["field"] == "event_text")
+    assert et["filled"] == 1 and et["pct"] == 50.0
+    assert cov["prices"][0]["rows"] == 1
+
+
+def test_news_chart_uses_high_contrast_bars():
+    result = de.present({
+        "ticker": "MSFT", "start_date": "2014-01-01", "end_date": "2014-01-02",
+        "providers": {
+            "refinitiv": {
+                "status": "ok", "error": None, "prices": pd.DataFrame(),
+                "news": pd.DataFrame(),
+                "news_daily_counts": pd.DataFrame({
+                    "date": pd.to_datetime(["2014-01-01", "2014-01-02"]),
+                    "article_count": [4, 8],
+                }),
+            }
+        },
+    })
+    chart = result["charts"]["news"]
+    assert "#dc4f52" in chart
+    assert '"plot_bgcolor":"#ffffff"' in chart
+    assert "coverage" in result

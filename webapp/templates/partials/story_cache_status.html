@@ -1,0 +1,30 @@
+{% set status = story_cache_status if story_cache_status is defined else none %}
+{% if status is none and coverage is defined and coverage.refinitiv and coverage.refinitiv.fields %}
+  {% set ns = namespace(body=none) %}
+  {% for row in coverage.refinitiv.fields %}
+    {% if row.field == "full_story_body (on disk)" %}
+      {% set ns.body = row %}
+    {% endif %}
+  {% endfor %}
+  {% if ns.body and ns.body.pull_progress %}
+    {% set status = namespace(
+      ticker=coverage.ticker,
+      files_on_disk=ns.body.files_on_disk,
+      progress=ns.body.pull_progress
+    ) %}
+  {% endif %}
+{% endif %}
+{% if status and status.progress %}
+  <p class="muted">
+    Pull status: <strong>{{ status.progress.status or "—" }}</strong>
+    · on disk {{ "{:,}".format(status.files_on_disk) }}
+    · fetched {{ status.progress.fetched or 0 }}
+    · failed {{ status.progress.failed or 0 }}
+    · elapsed {{ status.progress.elapsed_s or 0 }}s
+    {% if status.progress.pending_this_run %}
+      · processed {{ status.progress.processed or 0 }}/{{ status.progress.pending_this_run }}
+    {% endif %}
+  </p>
+{% else %}
+  <p class="muted">No pull has been started yet for this ticker.</p>
+{% endif %}
