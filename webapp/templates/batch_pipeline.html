@@ -1,18 +1,21 @@
 {% extends "base.html" %}
-{% block title %}2 — Batch Pipeline (Top-1K){% endblock %}
+{% block title %}2 — Many stocks — retrieve &amp; store{% endblock %}
 {% block content %}
 <div class="card">
-  <h1>2 · Top-1,000 Batch Pipeline</h1>
+  <h1>2 · Many stocks — retrieve &amp; store</h1>
   <p class="muted">
-    Pull and cache WRDS/CRSP, Yahoo, and RavenPack data for every ticker in the CRSP
-    top-volume universe. Each ticker is cached immediately; reruns skip completed tickers
-    automatically.
+    Pull and <strong>cache</strong> WRDS/CRSP, Yahoo, RavenPack, and Refinitiv data for the full
+    CRSP top-volume universe (N ≈ 1,000). Each ticker is written to disk as it finishes;
+    reruns skip completed tickers automatically.
   </p>
 
-  <nav class="section-nav">
-    <a href="#bp-2a">2A Runner &amp; progress</a><a href="#bp-2b">2B Cached snapshot</a>
-    <a href="#bp-2c">2C Failure reasons</a><a href="#bp-2d">2D Delisting (CRSP)</a>
-    <a href="#bp-2e">2E Cash-merger exits</a><a href="#bp-tickers">Per-ticker status</a>
+  <nav class="section-nav" aria-label="Multi-stock batch sections">
+    <a href="#bp-2a">2A · Launch / monitor batch</a>
+    <a href="#bp-2b">2B · What’s already cached</a>
+    <a href="#bp-2c">2C · Why providers failed</a>
+    <a href="#bp-2d">2D · CRSP delisting returns</a>
+    <a href="#bp-2e">2E · Cash-merger exit prices</a>
+    <a href="#bp-tickers">Ticker-by-ticker status</a>
   </nav>
 
   <section id="bp-2a">

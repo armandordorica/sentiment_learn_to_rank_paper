@@ -21,6 +21,49 @@
       baseline, five for a multi-stock pilot, or more for a pooled run — all selected tickers
       are concatenated into one shuffled dataset, not trained sequentially.
     </p>
+    <details class="methodology-panel academic-paper">
+      <summary>Academic research synopsis: motivation, hypotheses, methods, results, and interpretation</summary>
+      <article class="paper-body">
+        <header>
+          <p class="paper-kicker">Section 5 · Empirical study</p>
+          <h2>Cross-stock adaptation of financial sentiment classifiers using pooled RavenPack headlines</h2>
+        </header>
+
+        <section><h3>Research goal</h3><p>Determine whether jointly fine-tuning a PhraseBank-initialized language model on a broader universe of RavenPack headlines improves temporal and cross-company sentiment generalization without introducing train–validation–test leakage or sequential catastrophic forgetting.</p></section>
+
+        <section><h3>Introduction and motivation</h3><p>Financial PhraseBank provides a high-quality sentence-level starting point, but its language and label distribution differ from the time-stamped RavenPack news domain used downstream. Fine-tuning on one company may adapt the classifier to RavenPack while over-specializing to company-specific language. This study therefore increases the adaptation universe from AAPL to five stocks and then twenty stocks, pooling all selected companies in a single optimization run.</p></section>
+
+        <section><h3>Research questions and hypotheses</h3><ol class="hypothesis-list">
+          <li><strong>H1 — Adaptation breadth:</strong> pooled multi-stock training will yield higher RavenPack temporal-test macro-F1 than AAPL-only adaptation.</li>
+          <li><strong>H2 — Cross-stock transfer:</strong> the twenty-stock checkpoint will outperform the five-stock checkpoint on companies excluded from both training universes.</li>
+          <li><strong>H3 — Domain adaptation:</strong> RavenPack-adapted checkpoints will outperform the out-of-box PhraseBank checkpoint on strict RavenPack OOD baskets.</li>
+          <li><strong>H4 — Leakage control:</strong> no story identifier or normalized headline will cross the temporal train, validation, and test partitions.</li>
+        </ol></section>
+
+        <section><h3>Data and methodology</h3><p>The unit of observation is a financial-news headline. RavenPack <code>event_sentiment_score</code> is mapped into negative, neutral, or positive labels using the project threshold. Duplicate story IDs and normalized headline text are removed across the pooled universe before splitting. Observations through 2011 form the training set, 2012 is validation, and 2013–2014 is test. DistilBERT begins from <code>data/models/phrasebank_distilbert_best/</code>; checkpoints are selected by validation macro-F1. The strict OOD analysis evaluates fixed PhraseBank, AAPL-only, five-stock, and twenty-stock checkpoint hashes on three disjoint five-stock baskets without refitting.</p></section>
+
+        <section><h3>Saved results</h3>
+          <div class="paper-table-wrap"><table class="data-table paper-results">
+            <thead><tr><th>Checkpoint</th><th>Adaptation universe</th><th>Labeled rows</th><th>Validation macro-F1</th><th>Temporal-test macro-F1</th><th>Temporal-test accuracy</th></tr></thead>
+            <tbody>{% for row in research_paper_results.rows %}<tr>
+              <td><strong>{{ row.title }}</strong><br><code>{{ row.path }}</code></td><td>{{ row.universe }}</td>
+              <td>{{ "{:,}".format(row.labeled_rows) }}</td>
+              <td>{{ "%.1f%%"|format(row.validation_f1 * 100) }}</td>
+              <td>{{ "%.1f%%"|format(row.test_f1 * 100) }}</td>
+              <td>{{ "%.1f%%"|format(row.test_accuracy * 100) }}</td>
+            </tr>{% endfor %}</tbody>
+          </table></div>
+          {% if research_paper_results.twenty_vs_five_test_f1_points is not none %}<p class="result-callout">The twenty-stock model’s native temporal-test macro-F1 is <strong>{{ "%+.1f"|format(research_paper_results.twenty_vs_five_test_f1_points) }} points</strong> above the five-stock model. This is descriptive evidence for H1, not a controlled causal estimate, because each checkpoint’s native test set reflects its own adaptation universe.</p>{% endif %}
+          <p>The four-checkpoint, three-basket OOD benchmark below is the like-for-like test for H2 and H3. Its models receive identical excluded-company rows; those results should be treated as the primary cross-stock comparison.</p>
+        </section>
+
+        <section><h3>Interpretation</h3><p>The saved native tests show progressively higher macro-F1 as the pooled universe expands, consistent with broader exposure improving RavenPack-domain classification. H4 is satisfied by the zero-overlap audit. H2 and H3 should be accepted or rejected only from the common OOD benchmark, since native checkpoint test sets are not identical.</p></section>
+
+        <section><h3>Assumptions, threats to validity, and risks</h3><p>The analysis assumes RavenPack event sentiment is an appropriate target, the score-to-class threshold is substantively meaningful, timestamps represent information availability, and headline-only classification matches the intended use. Principal threats include vendor-label noise, company imbalance, temporal concept drift, syndicated stories not caught by normalization, dependence among headlines, and implicit test-set tuning after repeated inspection. Macro-F1 mitigates class imbalance but does not eliminate selection or coverage bias.</p></section>
+
+        <section><h3>Conclusion and next steps</h3><p>The completed training runs establish a leakage-audited progression from one to five to twenty stocks. The decisive next step is to run and report the cached four-checkpoint OOD benchmark, add uncertainty estimates through stock- or time-block bootstrap resampling, and test sensitivity to label thresholds and alternative company baskets.</p></section>
+      </article>
+    </details>
     <details class="methodology-panel section-overview">
       <summary>Section 5 research summary: data contract, workflow, assumptions, and risks</summary>
       <div class="overview-stack">

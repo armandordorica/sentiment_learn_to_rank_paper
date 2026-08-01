@@ -4,6 +4,62 @@ This guide documents how to pull and validate the current market-side candidate 
 
 At this stage, the goal is not to apply the TRNA news-coverage filter. The goal is to build a sufficiently large CRSP candidate universe that approximates the paper's first universe step: selecting liquid stocks by trading volume.
 
+## Paper Requirements vs. What We Have
+
+Song et al. (2017) need TRNA-style per-article fields and weekly aggregates built from them. We use RavenPack + a custom DistilBERT classifier as substitutes. Status below is the inventory for replication — not an exact numerical match to TRNA.
+
+**Webapps (local):**
+
+| App | Start | Base URL |
+| --- | --- | --- |
+| Streamlit (`app.py`) | `python -m streamlit run app.py` | <http://localhost:8501> |
+| FastAPI (`webapp/`) | `uvicorn webapp.main:app --reload --port 8001` | <http://localhost:8001> |
+
+Streamlit tabs are numbered in the UI (`1 · Data Explorer`, …). FastAPI routes mirror those tabs once migrated.
+
+### Universe & market data
+
+| Paper need | Status | Local path(s) | Webapp |
+| --- | --- | --- | --- |
+| Top 1,000 stocks by average trading volume (2003–2014) | **Have** | Tracked: `app_data/crsp_top_volume_universe.csv`. Raw (gitignored): `data/raw/market/crsp_top_volume_universe.csv` + `…_manifest.json`. Build: `scripts/build_crsp_market_universe.py`, `notebooks/build_top1k_volume_universe.ipynb`. | Streamlit **7 · Paper Validation**; FastAPI [`/paper-validation`](http://localhost:8001/paper-validation) |
+| Exclude stocks with &lt;1 news article/week → ~512 names | **Partial** | News side is largely cached: Batch Pipeline snapshot shows **1,000/1,000** manifests, **437 complete** / **563 partial**, RavenPack **598 ok** / 322 failed / 80 empty (~60% of universe). Helper for the paper threshold lives in `src/sentiment_ltr/data/news_coverage.py` (`avg_articles_per_week >= 1`). Still missing: run that filter over RavenPack-ok tickers and write the final ~512-name universe artifact. | Streamlit **2 · Batch Pipeline** (section **2B · Cached data snapshot**); FastAPI [`/batch`](http://localhost:8001/batch) |
+| Daily OHLCV / returns per universe stock | **Partial** | Per ticker under `data/raw/data_explorer_top1k/by_ticker/rank_XXXX_TICKER/wrds_prices.parquet` (WRDS/CRSP; ~1,000 tickers). Optional cross-checks: `yahoo_prices.parquet`, `refinitiv_prices.parquet`. | Streamlit **1 · Data Explorer**, **2 · Batch Pipeline**; FastAPI [`/data-explorer`](http://localhost:8001/data-explorer), [`/batch`](http://localhost:8001/batch) |
+| Top-20 monthly volume / price validation charts | **Have** | `app_data/top20_monthly_volume.csv`, `app_data/top20_monthly_prices.csv` (also under `data/processed/validation/`). | Streamlit **7 · Paper Validation**; FastAPI [`/paper-validation`](http://localhost:8001/paper-validation) |
+| Benchmark (SPY / S&P 500) over 2003–2014 | **Missing** | — | — |
+| GICS sector membership (lookback windows) | **Missing** | — | — |
+
+### Per-article news sentiment (TRNA fields → our substitutes)
+
+Paper formula: `S_sentiment = relevance × (pos − neg)`.
+
+| Paper (TRNA) field | Status | What we have / path(s) | Webapp |
+| --- | --- | --- | --- |
+| `datetime` (article timestamp) | **Have** | RavenPack `article_time` / `timestamp_utc`. Batch: `data/raw/data_explorer_top1k/by_ticker/rank_XXXX_TICKER/ravenpack_articles.parquet` (~598 tickers with RavenPack). Richer AAPL-style exports: `data/raw/news/ravenpack/{ticker}_articles_2003_2014.parquet`. | Streamlit **1 · Data Explorer** (Sentiment pane), **6 · Sentiment Lab**; FastAPI [`/data-explorer`](http://localhost:8001/data-explorer), [`/sentiment-lab`](http://localhost:8001/sentiment-lab) |
+| Company / stock identifier | **Have** | `ticker` on article rows; batch keyed by CRSP `permno` via `manifest.json` in each `rank_XXXX_TICKER/` dir. | Same as above; Batch Pipeline ticker table |
+| `relevance` ∈ [0, 1] | **Have** | `relevance_score` (= RavenPack `relevance` / 100). Same parquet paths as above. | Data Explorer Sentiment pane shows relevance metrics/columns |
+| Predominant `sentiment` ∈ {−1, 0, +1} | **Partial** | Derived from RavenPack `event_sentiment_score` thresholds for labeling; not TRNA’s native field. Fine-tune labels live in RavenPack training path (`src/sentiment_ltr/models/ravenpack_sentiment.py`). | Streamlit **5 · RavenPack Fine-Tuning**, **6 · Sentiment Lab**; FastAPI [`/finetune`](http://localhost:8001/finetune), [`/sentiment-lab`](http://localhost:8001/sentiment-lab) |
+| `pos`, `obj`, `neg` (class probabilities) | **Partial — model only** | Checkpoints that emit `p(positive)`, `p(neutral)`, `p(negative)`: `data/models/phrasebank_distilbert_best/`, `data/models/ravenpack_distilbert_best/`, `data/models/ravenpack_distilbert_5stock/`. **Not** written back onto the full article corpus yet (Iteration 4.2). RavenPack vendor rows do **not** include these three probs. | Live / eval scoring: Streamlit **3 · PhraseBank HF Baseline**, **4 · RavenPack Baseline Eval**, **5 · RavenPack Fine-Tuning**, **6 · Sentiment Lab**; FastAPI [`/phrasebank`](http://localhost:8001/phrasebank), [`/raven-eval`](http://localhost:8001/raven-eval), [`/finetune`](http://localhost:8001/finetune), [`/sentiment-lab`](http://localhost:8001/sentiment-lab) |
+| `S_sentiment = relevance × (pos − neg)` | **Proxy only** | Vendor proxy (Eq. 8 in fetch notebook): `sentiment_score = relevance_score × event_sentiment_score` on the RavenPack article parquets above. True TRNA-style `relevance × (p_pos − p_neg)` needs batch model scores. | Data Explorer / Sentiment Lab article tables |
+| Headline / story text (for custom model) | **Partial** | Present on rich exports under `data/raw/news/ravenpack/` (`headline`, `event_text`). Batch `ravenpack_articles.parquet` often omits full text (space); confirm per ticker before scoring. | Sentiment Lab article browser; Fine-Tuning coverage table |
+
+### Weekly aggregates & LTR features
+
+| Paper need | Status | Local path(s) | Webapp |
+| --- | --- | --- | --- |
+| Weekly stock sentiment = mean of article `S_sentiment` | **Pilot only** | Example: `data/raw/news/ravenpack/aapl_weekly_sentiment_2003_2014.parquet` (vendor proxy scores, not model `pos`/`neg`). Universe-wide weekly panel **not** built. | Charts for single-ticker RavenPack averages in Data Explorer Sentiment pane |
+| Sentiment shock & trend (sector lookbacks) | **Missing** | — | — |
+| Lagged 1-week / 1-month return & sentiment features | **Missing** | — | — |
+| Quartile relevance labels (1–4) from next-week returns | **Missing** | — | — |
+| RankNet / ListNet + 2006–2014 rolling backtest | **Missing** | — | — |
+
+### Quick read on the TRNA gap
+
+| Piece | Done? |
+| --- | --- |
+| Relevance per article | Yes — RavenPack `relevance_score` |
+| `P(pos)`, `P(neutral)`, `P(neg)` per article at scale | No — model can produce them; batch write to corpus (plan **4.2**) still open |
+| Paper `S_sentiment` and weekly shock/trend features | No — only RavenPack proxy `sentiment_score` + AAPL weekly pilot |
+
 ## Prerequisites
 
 Create and activate the project environment:
@@ -205,6 +261,6 @@ Returned daily fields include:
 
 This output is a market-side candidate universe. It is suitable for the next market-data step: pulling daily OHLCV and return data for the selected `permno` values.
 
-It does not yet match the paper's final 512-stock universe because the paper also excludes stocks with fewer than one news article per week in TRNA. That filter will be applied later after the news sentiment source is available.
+It does not yet match the paper's final 512-stock universe: RavenPack articles are cached for ~598 tickers (Batch Pipeline **2B**), and `news_coverage.py` can compute the ≥1 article/week threshold, but that filter has not been applied to produce a committed ~512-name universe file.
 
 The current ranking uses average daily share volume because the paper says it selected the top 1,000 stocks by average trading volume. The manifest also includes average dollar volume so we can compare or switch liquidity definitions if needed.

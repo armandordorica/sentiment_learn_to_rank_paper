@@ -12,10 +12,10 @@
   </p>
   <p><a class="btn btn-secondary wandb-link" href="{{ wandb.url }}" target="_blank" rel="noopener">↗ Open inference checkpoint in Weights &amp; Biases</a></p>
 
-  <nav class="section-nav">
-    <a href="#rp-be-4c">4C Class-level metrics</a>
-    <a href="#rp-be-4d">4D Label distribution shift</a>
-    <a href="#rp-be-4e">4E Run evaluation</a>
+  <nav class="section-nav" aria-label="RavenPack Baseline Eval sections">
+    <a href="#rp-be-4c">4C · Per-class baseline metrics</a>
+    <a href="#rp-be-4d">4D · PhraseBank vs RavenPack labels</a>
+    <a href="#rp-be-4e">4E · Score RavenPack headlines</a>
   </nav>
 
   {% if not deps.finetuning_deps_available %}
@@ -63,8 +63,11 @@
            hx-get="/raven-eval/static?ticker={{ ticker }}"
            hx-trigger="load"
            hx-swap="innerHTML">
-        <p class="muted">⏳ Scoring the {{ ticker }} test split with the PhraseBank checkpoint…
-          (first run can take a few minutes; cached afterwards)</p>
+        <section id="rp-be-4c">
+          <h3>4C · Per-class baseline metrics</h3>
+          <p class="muted">⏳ Scoring the {{ ticker }} test split with the PhraseBank checkpoint…
+            (first run can take a few minutes; cached afterwards)</p>
+        </section>
       </div>
     </section>
 

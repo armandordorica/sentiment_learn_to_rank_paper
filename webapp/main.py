@@ -19,6 +19,8 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from markupsafe import Markup, escape
+import re
 
 from webapp.api import batch_pipeline as bp
 from webapp.api import phrasebank_baseline as pb
@@ -40,9 +42,27 @@ templates = Jinja2Templates(directory=str(WEBAPP_DIR / "templates"))
 templates.env.globals["loss_chart"] = rp.loss_chart
 templates.env.globals["wandb_project_url"] = rp.wandb_context()["project_url"]
 
+
+def _md_inline_code(text: Any) -> Markup:
+    """Render `` `like_this` `` spans as HTML ``<code>`` (escape the rest)."""
+    if text is None:
+        return Markup("")
+    raw = str(text)
+    parts: list[str] = []
+    pos = 0
+    for match in re.finditer(r"`([^`]+)`", raw):
+        parts.append(str(escape(raw[pos:match.start()])))
+        parts.append(f"<code>{escape(match.group(1))}</code>")
+        pos = match.end()
+    parts.append(str(escape(raw[pos:])))
+    return Markup("".join(parts))
+
+
+templates.env.filters["md_inline_code"] = _md_inline_code
+
 NAV_ITEMS = [
-    {"num": "1", "label": "Data Explorer", "href": "/data-explorer", "enabled": True},
-    {"num": "2", "label": "Batch Pipeline", "href": "/batch", "enabled": True},
+    {"num": "1", "label": "One stock — inspect & retrieve", "href": "/data-explorer", "enabled": True},
+    {"num": "2", "label": "Many stocks — retrieve & store", "href": "/batch", "enabled": True},
     {"num": "3", "label": "PhraseBank Baseline", "href": "/phrasebank", "enabled": True},
     {"num": "4", "label": "RavenPack Baseline Eval", "href": "/raven-eval", "enabled": True},
     {"num": "5", "label": "RavenPack Fine-Tuning", "href": "/finetune", "enabled": True},
@@ -295,6 +315,7 @@ def finetune_page(request: Request) -> HTMLResponse:
         "default_epochs": rp.DEFAULT_RAVENPACK_TRAIN_EPOCHS,
         "coverage": rp.coverage_summary(default_tickers) if default_tickers else None,
         "comparison_models": rp.comparison_models(),
+        "research_paper_results": rp.research_paper_results(),
         "ood_baskets": rp.DEFAULT_OOD_BASKETS,
         "five_stock_tickers": rp.DEFAULT_FIVE_STOCK_TICKERS,
         "twenty_stock_tickers": rp.DEFAULT_TWENTY_STOCK_TICKERS,
@@ -609,6 +630,15 @@ def paper_validation_page(request: Request) -> HTMLResponse:
         ctx["error"] = None
     except Exception as exc:  # noqa: BLE001
         ctx["error"] = str(exc)
+        ctx.setdefault("replication_inputs", [])
+        return templates.TemplateResponse(request, "paper_validation.html", ctx)
+    try:
+        ctx["replication_inputs"] = pv.replication_inputs(
+            universe_rows=ctx["summary"]["rows"]
+        )
+    except Exception as exc:  # noqa: BLE001
+        ctx["replication_inputs"] = []
+        ctx["replication_error"] = str(exc)
     return templates.TemplateResponse(request, "paper_validation.html", ctx)
 
 

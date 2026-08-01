@@ -1997,7 +1997,7 @@ def load_cached_dashboard_result(
 
 def render_multi_api_dashboard_tab() -> None:
     """Render a ticker/date dashboard that combines all available APIs into panes."""
-    st.subheader("Unified Ticker Data Explorer")
+    st.subheader("One stock — inspect & retrieve")
     _tab_toc([
         ("de-1a", "1A  API status & ticker form"),
         ("de-1b", "1B  Overview pane"),
@@ -6042,19 +6042,19 @@ def render_batch_pipeline_tab() -> bool:  # noqa: C901 – intentionally long UI
     if "batch_use_refinitiv" not in st.session_state:
         st.session_state["batch_use_refinitiv"] = True
 
-    st.header("Top-1,000 Batch Pipeline")
-    _tab_toc([
-        ("bp-2a", "2A  Runner controls & live progress"),
-        ("bp-2b", "2B  Cached data snapshot"),
-        ("bp-2c", "2C  Failure reasons by provider"),
-        ("bp-2d", "2D  Delisting reasons (CRSP)"),
-        ("bp-2e", "2E  Cash-merger exits"),
-    ])
+    st.header("Many stocks — retrieve & store")
     st.caption(
-        "Pull and cache WRDS/CRSP, Yahoo, and RavenPack data for every ticker in the "
-        "CRSP top-volume universe. Each ticker is cached immediately; reruns skip "
-        "completed tickers automatically."
+        "Pull and cache WRDS/CRSP, Yahoo, RavenPack, and Refinitiv data for the full "
+        "CRSP top-volume universe (N ≈ 1,000). Each ticker is written to disk as it "
+        "finishes; reruns skip completed tickers automatically."
     )
+    _tab_toc([
+        ("bp-2a", "2A  Launch / monitor batch"),
+        ("bp-2b", "2B  What’s already cached"),
+        ("bp-2c", "2C  Why providers failed"),
+        ("bp-2d", "2D  CRSP delisting returns"),
+        ("bp-2e", "2E  Cash-merger exit prices"),
+    ])
 
     # Load cached manifests once per render (fast path when nothing changed).
     manifests_df = _get_manifests_df()
@@ -6570,8 +6570,8 @@ def render_batch_pipeline_tab() -> bool:  # noqa: C901 – intentionally long UI
     tab_validation,
 ) = st.tabs([
     "🏠 Overview",
-    "1 · Data Explorer",
-    "2 · Batch Pipeline (Top-1K)",
+    "1 · One stock — inspect & retrieve",
+    "2 · Many stocks — retrieve & store",
     "3 · PhraseBank HF Baseline",
     "4 · RavenPack Baseline Eval",
     "5 · RavenPack Fine-Tuning",
@@ -6601,26 +6601,26 @@ with tab_overview:
     # anchor_id must match the _anchor() call injected before that heading.
     _TAB_CARDS = [
         {
-            "num": "1", "label": "Data Explorer",
-            "desc": "Unified ticker/date form — prices (WRDS, Yahoo, Refinitiv), Refinitiv news with drill-down, and RavenPack sentiment charts. Works from local cache (instant) or live API pull.",
+            "num": "1", "label": "One stock — inspect & retrieve",
+            "desc": "Inspect and retrieve data for a single ticker: prices (WRDS, Yahoo, Refinitiv), Refinitiv news with drill-down, and RavenPack sentiment. Works from local cache (instant) or live API pull.",
             "sections": [
-                ("de-1a", "1A  API status & ticker form"),
-                ("de-1b", "1B  Overview pane"),
-                ("de-1c", "1C  Prices pane"),
-                ("de-1d", "1D  News pane"),
-                ("de-1e", "1E  Sentiment pane"),
-                ("de-1f", "1F  Raw data pane"),
+                ("de-1a", "1A  Pick ticker & providers"),
+                ("de-1b", "1B  Provider coverage snapshot"),
+                ("de-1c", "1C  Price charts"),
+                ("de-1d", "1D  Refinitiv headlines & stories"),
+                ("de-1e", "1E  RavenPack sentiment"),
+                ("de-1f", "1F  Full provider tables"),
             ],
         },
         {
-            "num": "2", "label": "Batch Pipeline (Top-1K)",
-            "desc": "Run & monitor the background batch job that pulls all 1,000 CRSP universe tickers. Shows live progress, cached-data snapshot, provider failure breakdowns, CRSP delisting, and cash-merger exits.",
+            "num": "2", "label": "Many stocks — retrieve & store",
+            "desc": "Retrieve and store data for many tickers (the ~1,000 CRSP universe). Launch/monitor the batch job, inspect cache coverage, provider failures, CRSP delisting, and cash-merger exits.",
             "sections": [
-                ("bp-2a", "2A  Runner controls & progress"),
-                ("bp-2b", "2B  Cached snapshot"),
-                ("bp-2c", "2C  Failure reasons"),
-                ("bp-2d", "2D  Delisting (CRSP)"),
-                ("bp-2e", "2E  Cash-merger exits"),
+                ("bp-2a", "2A  Launch / monitor batch"),
+                ("bp-2b", "2B  What’s already cached"),
+                ("bp-2c", "2C  Why providers failed"),
+                ("bp-2d", "2D  CRSP delisting returns"),
+                ("bp-2e", "2E  Cash-merger exit prices"),
             ],
         },
         {
@@ -6670,8 +6670,9 @@ with tab_overview:
         },
         {
             "num": "7", "label": "Paper Validation (2003-2014)",
-            "desc": "Sanity-checks the CRSP candidate universe: 1,000-row count, unique PERMNOs, volume ranks, share/exchange codes, top-20 volume bar chart, monthly volume & price time-series.",
+            "desc": "Paper data inputs vs our substitutes, then CRSP universe sanity checks: 1,000-row count, unique PERMNOs, volume ranks, top-20 volume & monthly price charts.",
             "sections": [
+                ("pv-70", "7·0  Paper inputs vs ours"),
                 ("pv-7a", "7A  Universe summary"),
                 ("pv-7b", "7B  Top 20 by volume"),
                 ("pv-7c", "7C  Monthly volume over time"),
@@ -6773,11 +6774,79 @@ with tab_validation:
 
         st.subheader("Candidate Universe Checks")
         _tab_toc([
+            ("pv-70", "7·0  Paper inputs vs ours"),
             ("pv-7a", "7A  Universe summary"),
             ("pv-7b", "7B  Top 20 by volume"),
             ("pv-7c", "7C  Monthly volume over time"),
             ("pv-7d", "7D  Monthly prices"),
         ])
+
+        _anchor("pv-70")
+        with st.expander("7·0  Paper data inputs vs what we have", expanded=True):
+            st.caption(
+                "Song et al. (2017) requirements on the left; this repo’s substitute, "
+                "code paths, and related tabs on the right. Live counts come from the "
+                "Many stocks — retrieve & store manifests."
+            )
+            try:
+                from webapp.api.paper_validation import replication_inputs as _replication_inputs
+
+                _inputs = _replication_inputs(universe_rows=len(universe))
+            except Exception as exc:
+                _inputs = []
+                st.warning(f"Could not build replication input map: {exc}")
+
+            _status_colors = {
+                "have": ("#dcfce7", "#166534"),
+                "partial": ("#fef9c3", "#854d0e"),
+                "missing": ("#e2e8f0", "#475569"),
+            }
+            for i, item in enumerate(_inputs, start=1):
+                bg, fg = _status_colors.get(item["status"], ("#e2e8f0", "#475569"))
+                with st.container(border=True):
+                    head_l, head_r = st.columns([0.75, 0.25])
+                    head_l.markdown(f"**Input {i}** · `{item['status_label']}`")
+                    head_r.markdown(
+                        f"<div style='text-align:right'><span style='background:{bg};"
+                        f"color:{fg};padding:0.15rem 0.5rem;border-radius:0.3rem;"
+                        f"font-size:0.75rem;font-weight:700;text-transform:uppercase'>"
+                        f"{item['status_label']}</span></div>",
+                        unsafe_allow_html=True,
+                    )
+                    left, right = st.columns(2)
+                    with left:
+                        st.markdown(f"**Paper:** {item['paper_title']}")
+                        st.caption(item["paper_detail"])
+                    with right:
+                        st.markdown(f"**Ours:** {item['ours_title']}")
+                        st.caption(item["ours_detail"])
+                        if item.get("code_pointers"):
+                            st.markdown(
+                                "**Code:** "
+                                + " · ".join(f"`{p}`" for p in item["code_pointers"])
+                            )
+                        if item.get("webapp_pointers"):
+                            st.markdown(
+                                "**Webapp:** "
+                                + " · ".join(
+                                    f"[{link['label']}]({link['href']})"
+                                    for link in item["webapp_pointers"]
+                                )
+                            )
+                    if item.get("field_map"):
+                        st.markdown("**Field map — paper (TRNA) vs our substitute**")
+                        st.dataframe(
+                            pd.DataFrame(item["field_map"]).rename(
+                                columns={
+                                    "field": "Field needed",
+                                    "paper_source": "Paper source",
+                                    "our_substitute": "Our substitute",
+                                    "status": "Status",
+                                }
+                            ),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
 
         _anchor("pv-7a")
         metrics = st.columns(4)

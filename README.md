@@ -47,14 +47,15 @@ The project is past the "can we pull data?" stage and into "can we pull it relia
 
 ### What Works Today
 
-**Streamlit app (`app.py`)** — six tabs:
+**Streamlit app (`app.py`)** — seven tabs:
 
-1. **Data Explorer** — single-ticker queries across Refinitiv, WRDS/CRSP, Yahoo, and RavenPack with combined price charts, news coverage, sentiment panes, and raw schema inspection.
-2. **Batch Pipeline (Top-1K)** — launch, monitor, and inspect bulk fetches for all 1,000 universe tickers; live status banner, cache snapshot, per-provider failure breakdown, and per-ticker manifest table.
+1. **One stock — inspect & retrieve** — single-ticker queries across Refinitiv, WRDS/CRSP, Yahoo, and RavenPack with combined price charts, news coverage, sentiment panes, and provider tables.
+2. **Many stocks — retrieve & store** — launch, monitor, and inspect bulk fetches for all 1,000 universe tickers; live status banner, cache snapshot, per-provider failure breakdown, and per-ticker manifest table.
 3. **PhraseBank HF Baseline** — Hugging Face DistilBERT benchmark on Financial PhraseBank: dataset dashboard (gold labels, box + p50 probability charts), training metrics, and checkpoint details.
 4. **RavenPack Baseline Eval** — score the PhraseBank checkpoint on cached RavenPack headlines (out-of-domain): accuracy, macro-F1, confusion matrices, and mismatch samples.
-5. **Sentiment Lab** — fine-tuning workflow for the news-sentiment model (TRNA substitute): RavenPack article browser, PhraseBank/RavenPack training, headline scoring, and compute-device report.
-6. **Paper Validation (2003-2014)** — bundled universe CSV and validation charts without a live WRDS connection.
+5. **RavenPack Fine-Tuning** — multi-ticker RavenPack training, checkpoint comparison, and OOD baskets (also in FastAPI `/finetune`).
+6. **Sentiment Lab** — fine-tuning workflow for the news-sentiment model (TRNA substitute): RavenPack article browser, PhraseBank training, headline scoring, and compute-device report.
+7. **Paper Validation (2003-2014)** — paper-inputs vs substitutes map, CRSP universe checks, and top-20 volume/price charts.
 
 **Batch caching** — `scripts/run_batch_pipeline.py` writes one directory per ticker under:
 
@@ -141,6 +142,7 @@ code does. Keep it updated as part of every commit (see
 | 2026-07-17 | **Refinitiv full-story workflow and Data Explorer rendering fixes** — migrated the selectable Refinitiv headline/full-story reader to FastAPI, added compatibility handling for the LSEG SDK with newer `httpx`, and persist every fetched story as a readable ticker-scoped text file whose relative and absolute paths appear beside the article. Fixed blank HTMX-inserted Plotly charts by loading Plotly once in the page shell, and restyled the dense Refinitiv daily-news chart with high-contrast bars. *Decision:* distinguish the cached headline Parquet path from the on-demand full-story file path in the UI. *Why:* users need to verify both where the source headline data lives and exactly where each retrieved article body was saved. |
 | 2026-07-18 | **Five-stock model + three-basket strict OOD benchmark** — downloaded headline-bearing RavenPack exports and jointly fine-tuned the PhraseBank checkpoint on AAPL, MSFT, JPM, XOM, and JNJ (171,701 train / 24,741 validation / 35,100 test rows; zero story-ID or normalized-headline leakage). Fixed pooled loading across historical `story_id`/`article_date` and fresh `rp_story_id`/`article_time` schemas, exposed temporal split windows in Section 5, and corrected checkpoint fingerprints to hash the actual saved weights rather than inherited provenance. Added three disjoint evaluation-only baskets—BAC/INTC/GE/F/PFE, CSCO/WFC/GM/VZ/CMCSA, and BMY/TSN/CSX/EBAY/MS—with 54,365 total 2013–2014 test headlines. Section 5 now renders grouped macro-F1/accuracy charts and a 15-stock heatmap, then reports the unweighted three-basket average: PhraseBank **34.8%**, AAPL-only **46.3%**, five-stock **59.8%** macro-F1 (five-stock **+25.0 points** vs PhraseBank); average accuracy was 37.3%, 58.5%, and 67.8%. *Decision:* average three independently composed OOD baskets rather than rely on one stock selection, while retaining basket/ticker audit tables. *Why:* the broader, graph-first benchmark makes cross-stock generalization easier to interpret and less sensitive to one evaluation universe. |
 | 2026-07-19 | **Twenty-stock pooled model + reproducible four-checkpoint benchmark UX** — jointly fine-tuned the PhraseBank checkpoint on the preceding five stocks plus C, GS, AIG, ORCL, QCOM, HPQ, IBM, T, WMT, KO, MCD, AMZN, CAT, BA, and CVX (503,502 train / 54,204 validation / 81,020 test; zero story-ID/headline overlap), preserving the earlier model at `data/models/ravenpack_distilbert_5stock/`. The completed 20-stock checkpoint reached **70.6% validation macro-F1** and **68.1% test macro-F1**. Section 5 now distinguishes and hashes all four checkpoints (PhraseBank, AAPL-only, five-stock, twenty-stock), evaluates them against the same three strictly disjoint OOD baskets, and persistently caches tables/Plotly charts by checkpoint SHA, basket definition, and source-file fingerprint. Added horizontal metric bars to both audit tables and six collapsible documentation panels: a full research data contract/notebook summary plus subsection-specific goals, paths, schemas, procedures, assumptions, and risks. *Decision:* use content-addressed benchmark caching and explicit file/schema provenance rather than opaque UI state. *Why:* reruns should be fast but automatically invalidate after model/data changes, and every displayed result should be interpretable and reproducible directly from the web app. |
+| 2026-08-01 | **Paper Validation replication map + clearer data-retrieval UX** — added Paper Validation **7·0** (collapsible side-by-side Song et al. inputs vs our substitutes, with live Batch cache counts, TRNA field map, code/webapp pointers); expanded `docs/data_pull_validation.md` inventory; renamed tabs **One stock — inspect & retrieve** and **Many stocks — retrieve & store**; restyled section-nav chips, fixed hash scrolling (including Data Explorer placeholders before Load data), and clarified subsection labels. Also surfaced a Section 5 research-results synopsis from saved checkpoint `metrics.json` (with tests). *Decision:* keep routes `/data-explorer` and `/batch` stable while renaming only the user-facing labels. *Why:* make the TRNA→RavenPack/DistilBERT gap and the one-stock vs N-stock retrieval split obvious without hunting docs. |
 
 ### Immediate Next Steps
 
@@ -304,11 +306,11 @@ Hugging Face Spaces.
 
 The app has three top-level tabs:
 
-- **Data Explorer**: one ticker/date-range form that can query Refinitiv, WRDS/CRSP, Yahoo Finance, and RavenPack together.
-- **Batch Pipeline (Top-1K)**: launch and monitor bulk fetches for the full CRSP top-volume universe; inspect cache coverage, per-provider failure reasons, and per-ticker manifests.
-- **Paper Validation (2003-2014)**: bundled validation charts for the CRSP top-volume universe saved under `app_data/`.
+- **One stock — inspect & retrieve**: one ticker/date-range form that can query Refinitiv, WRDS/CRSP, Yahoo Finance, and RavenPack together.
+- **Many stocks — retrieve & store**: launch and monitor bulk fetches for the full CRSP top-volume universe; inspect cache coverage, per-provider failure reasons, and per-ticker manifests.
+- **Paper Validation (2003-2014)**: paper-inputs vs substitutes map plus bundled CRSP validation charts under `app_data/`.
 
-In **Data Explorer**, enter a ticker such as `AAPL`, choose a start and end date, select the data sources to query, and click **Retrieve Dashboard Data**. Results are split into panes:
+In **One stock — inspect & retrieve**, enter a ticker such as `AAPL`, choose a start and end date, select the data sources to query, and click **Load data**. Results are split into panes:
 
 - **Overview**: combined price chart and a sentiment snapshot when RavenPack data is available.
 - **Prices**: provider-specific price charts and tables for Refinitiv, WRDS/CRSP, and Yahoo Finance.
@@ -327,10 +329,10 @@ See `docs/fastapi_migration_plan.md` for the tab-by-tab migration status.
 
 **Ported so far:**
 
-- **Tab 1 — Data Explorer** → `/data-explorer` (cache-first ticker/date query,
+- **Tab 1 — One stock — inspect & retrieve** → `/data-explorer` (cache-first ticker/date query,
   provider status, price/news/sentiment charts, and raw provider tables; optional
   live refresh across Refinitiv, WRDS/CRSP, Yahoo, and RavenPack).
-- **Tab 2 — Batch Pipeline (Top-1K)** → `/batch` (runner controls with live
+- **Tab 2 — Many stocks — retrieve & store** → `/batch` (runner controls with live
   progress polling, cached-data snapshot, failure reasons by provider, CRSP
   delisting reasons, cash-merger exits, filterable per-ticker status table).
 - **Tab 3 — PhraseBank HF Baseline** → `/phrasebank` (dataset dashboard, training
@@ -454,7 +456,7 @@ Yahoo Finance is best-effort. Some hosted or sandboxed networks block Yahoo's HT
 3. **Inspect RavenPack sentiment**: select RavenPack sentiment; use the **Sentiment** pane to review article-level sentiment scores, daily/weekly averages, event text, and classification fields.
 4. **Debug provider schemas**: use **Raw Data** to inspect returned columns and row counts before writing a notebook or batch pipeline.
 5. **Validate bundled paper-window artifacts**: open **Paper Validation (2003-2014)** to review the committed CRSP top-volume universe and top-20 validation plots without querying WRDS.
-6. **Bulk-cache the full universe**: open **Batch Pipeline (Top-1K)**, configure providers and date range (2003-01-01 to 2014-12-31), launch the batch, and use the cache snapshot and failure-reason tabs to track progress across all 1,000 tickers.
+6. **Bulk-cache the full universe**: open **Many stocks — retrieve & store**, configure providers and date range (2003-01-01 to 2014-12-31), launch the batch, and use the cache snapshot and failure-reason tabs to track progress across all 1,000 tickers.
 
 ### Batch Pipeline
 

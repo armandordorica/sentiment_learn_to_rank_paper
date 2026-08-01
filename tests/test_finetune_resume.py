@@ -247,6 +247,28 @@ def test_comparison_models_keep_five_and_twenty_stock_checkpoints_distinct(tmp_p
     assert models[3]["trained_tickers"] == rp.DEFAULT_TWENTY_STOCK_TICKERS
 
 
+def test_research_paper_results_reads_saved_checkpoint_metrics(tmp_path, monkeypatch):
+    models_root = tmp_path / "data" / "models"
+    payloads = {
+        "ravenpack_distilbert_best.bak-20260705-checkpoint": (100, 0.50, 0.49),
+        "ravenpack_distilbert_5stock": (200, 0.66, 0.62),
+        "ravenpack_distilbert_best": (300, 0.71, 0.68),
+    }
+    for model_id, (rows, val_f1, test_f1) in payloads.items():
+        path = models_root / model_id
+        path.mkdir(parents=True)
+        (path / "metrics.json").write_text(json.dumps({
+            "labeled_rows": rows,
+            "validation": {"eval_f1": val_f1, "eval_accuracy": val_f1 + 0.01},
+            "test": {"eval_f1": test_f1, "eval_accuracy": test_f1 + 0.02},
+        }))
+    monkeypatch.setattr(rp, "PROJECT_ROOT", tmp_path)
+
+    summary = rp.research_paper_results()
+    assert [row["labeled_rows"] for row in summary["rows"]] == [100, 200, 300]
+    assert summary["twenty_vs_five_test_f1_points"] == pytest.approx(6.0)
+
+
 def test_three_basket_ood_benchmark_averages_baskets_and_builds_graphs(monkeypatch):
     monkeypatch.setattr(rp, "DEFAULT_OOD_BASKETS", {
         "Basket 1": ["AAA"], "Basket 2": ["BBB"], "Basket 3": ["CCC"],

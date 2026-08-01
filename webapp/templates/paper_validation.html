@@ -1,12 +1,160 @@
 {% extends "base.html" %}
 {% block title %}7 — Paper Validation{% endblock %}
-{% block content %}<div class="card validation-page"><h1>Paper Validation <span class="muted">2003–2014</span></h1>
-<p class="muted">Sanity checks for the CRSP candidate universe and the top-20 stocks selected by average daily share volume.</p>
-{% if error %}<div class="alert alert-error">{{ error }}</div>{% else %}
-<nav class="section-nav"><a href="#summary">7A Universe summary</a><a href="#top20">7B Top 20 by volume</a><a href="#volume">7C Monthly volume</a><a href="#prices">7D Monthly prices</a></nav>
-<section id="summary"><h2>7A Universe summary</h2><div class="metric-row"><div class="metric"><span class="metric-label">Rows</span><span class="metric-value">{{ '{:,}'.format(summary.rows) }}</span></div><div class="metric"><span class="metric-label">Unique PERMNOs</span><span class="metric-value">{{ '{:,}'.format(summary.unique_permnos) }}</span></div><div class="metric"><span class="metric-label">Top 20 rows</span><span class="metric-value">{{ summary.top20_rows }}</span></div><div class="metric"><span class="metric-label">Date range</span><span class="metric-value compact">{{ summary.date_range }}</span></div></div>
-<div class="check-list">{% for item in checks %}<div class="check-item {{ 'check-pass' if item.passed else 'check-fail' }}"><span>{{ '✓' if item.passed else '✕' }}</span>{{ item.check }}</div>{% endfor %}</div></section>
-<section id="top20"><h2>7B Top 20 by average daily share volume</h2><div class="chart-cell">{{ top20_chart|safe }}</div><div class="table-scroll"><table class="data-table"><thead><tr>{% for col in top20_columns %}<th>{{ col|replace('_',' ')|title }}</th>{% endfor %}</tr></thead><tbody>{% for row in top20_rows %}<tr>{% for col in top20_columns %}<td>{{ row[col] }}</td>{% endfor %}</tr>{% endfor %}</tbody></table></div></section>
-<section id="volume"><h2>7C Monthly trading volume over time</h2><div class="chart-cell">{{ volume_chart|safe }}</div></section>
-<section id="prices"><h2>7D Monthly open, close, and average price</h2><label for="price-ticker">Top-20 ticker</label><select id="price-ticker" name="ticker" hx-get="/paper-validation/prices" hx-target="#price-chart" hx-trigger="change" hx-indicator="#price-loading">{% for ticker in tickers %}<option value="{{ ticker }}">{{ ticker }}</option>{% endfor %}</select><span id="price-loading" class="htmx-indicator muted"> Loading…</span><div id="price-chart" hx-get="/paper-validation/prices?ticker={{ tickers[0] }}" hx-trigger="load"></div></section>
-{% endif %}</div>{% endblock %}
+{% block content %}
+<div class="card validation-page">
+  <h1>Paper Validation <span class="muted">2003–2014</span></h1>
+  <p class="muted">
+    Sanity checks for the CRSP candidate universe and a side-by-side map of
+    Song et al. (2017) data inputs versus what this repo already fulfills.
+  </p>
+  {% if error %}
+  <div class="alert alert-error">{{ error }}</div>
+  {% else %}
+  <nav class="section-nav" aria-label="Paper Validation sections">
+    <a href="#replication">7·0 · Paper inputs vs our substitutes</a>
+    <a href="#summary">7A · CRSP universe checks</a>
+    <a href="#top20">7B · Top-20 volume ranking</a>
+    <a href="#volume">7C · Monthly volume chart</a>
+    <a href="#prices">7D · Monthly price chart</a>
+  </nav>
+
+  <section id="replication">
+    <details class="replication-disclosure" open>
+      <summary>
+        <h2>7·0 Paper data inputs vs what we have</h2>
+        <span class="muted disclosure-hint">Click to collapse / expand</span>
+      </summary>
+      <div class="replication-disclosure-body">
+    <p class="muted">
+      Each row is one paper requirement. Left = Song et al. (2017). Right = this
+      repo’s substitute, with code paths and webapp links.
+    </p>
+    {% if replication_error %}
+    <div class="alert alert-error">Could not load live batch counts: {{ replication_error }}</div>
+    {% endif %}
+    <div class="replication-list">
+      {% for item in replication_inputs %}
+      <article class="replication-card status-{{ item.status }}">
+        <header class="replication-card-head">
+          <span class="replication-status status-{{ item.status }}">{{ item.status_label }}</span>
+          <span class="muted">Input {{ loop.index }}</span>
+        </header>
+        <div class="replication-grid">
+          <div class="replication-col paper-col">
+            <h3>{{ item.paper_title }}</h3>
+            <p>{{ item.paper_detail | md_inline_code }}</p>
+          </div>
+          <div class="replication-col ours-col">
+            <h3>{{ item.ours_title }}</h3>
+            <p>{{ item.ours_detail | md_inline_code }}</p>
+            {% if item.code_pointers %}
+            <div class="pointer-block">
+              <span class="pointer-label">Code</span>
+              <ul class="pointer-list">
+                {% for path in item.code_pointers %}
+                <li><code>{{ path }}</code></li>
+                {% endfor %}
+              </ul>
+            </div>
+            {% endif %}
+            {% if item.webapp_pointers %}
+            <div class="pointer-block">
+              <span class="pointer-label">Webapp</span>
+              <ul class="pointer-list">
+                {% for link in item.webapp_pointers %}
+                <li><a href="{{ link.href }}">{{ link.label }}</a></li>
+                {% endfor %}
+              </ul>
+            </div>
+            {% endif %}
+          </div>
+        </div>
+        {% if item.field_map %}
+        <div class="field-map-wrap">
+          <span class="pointer-label">Field map — paper (TRNA) vs our substitute</span>
+          <div class="table-scroll">
+            <table class="data-table field-map-table">
+              <thead>
+                <tr>
+                  <th>Field needed</th>
+                  <th>Paper source</th>
+                  <th>Our substitute</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for row in item.field_map %}
+                <tr>
+                  <td>{{ row.field | md_inline_code }}</td>
+                  <td>{{ row.paper_source | md_inline_code }}</td>
+                  <td>{{ row.our_substitute | md_inline_code }}</td>
+                  <td><span class="field-status status-{{ row.status|lower }}">{{ row.status }}</span></td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        {% endif %}
+      </article>
+      {% endfor %}
+    </div>
+      </div>
+    </details>
+  </section>
+
+  <section id="summary">
+    <h2>7A Universe summary</h2>
+    <div class="metric-row">
+      <div class="metric"><span class="metric-label">Rows</span><span class="metric-value">{{ '{:,}'.format(summary.rows) }}</span></div>
+      <div class="metric"><span class="metric-label">Unique PERMNOs</span><span class="metric-value">{{ '{:,}'.format(summary.unique_permnos) }}</span></div>
+      <div class="metric"><span class="metric-label">Top 20 rows</span><span class="metric-value">{{ summary.top20_rows }}</span></div>
+      <div class="metric"><span class="metric-label">Date range</span><span class="metric-value compact">{{ summary.date_range }}</span></div>
+    </div>
+    <div class="check-list">
+      {% for item in checks %}
+      <div class="check-item {{ 'check-pass' if item.passed else 'check-fail' }}">
+        <span>{{ '✓' if item.passed else '✕' }}</span>{{ item.check }}
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section id="top20">
+    <h2>7B Top 20 by average daily share volume</h2>
+    <div class="chart-cell">{{ top20_chart|safe }}</div>
+    <div class="table-scroll">
+      <table class="data-table">
+        <thead><tr>{% for col in top20_columns %}<th>{{ col|replace('_',' ')|title }}</th>{% endfor %}</tr></thead>
+        <tbody>
+          {% for row in top20_rows %}
+          <tr>{% for col in top20_columns %}<td>{{ row[col] }}</td>{% endfor %}</tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="volume">
+    <h2>7C Monthly trading volume over time</h2>
+    <div class="chart-cell">{{ volume_chart|safe }}</div>
+  </section>
+
+  <section id="prices">
+    <h2>7D Monthly open, close, and average price</h2>
+    <label for="price-ticker">Top-20 ticker</label>
+    <select id="price-ticker" name="ticker"
+            hx-get="/paper-validation/prices" hx-target="#price-chart"
+            hx-trigger="change" hx-indicator="#price-loading">
+      {% for ticker in tickers %}
+      <option value="{{ ticker }}">{{ ticker }}</option>
+      {% endfor %}
+    </select>
+    <span id="price-loading" class="htmx-indicator muted"> Loading…</span>
+    <div id="price-chart"
+         hx-get="/paper-validation/prices?ticker={{ tickers[0] }}"
+         hx-trigger="load"></div>
+  </section>
+  {% endif %}
+</div>
+{% endblock %}

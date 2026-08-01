@@ -231,6 +231,46 @@ def comparison_models() -> list[dict[str, Any]]:
     return models
 
 
+def research_paper_results() -> dict[str, Any]:
+    """Saved checkpoint results used by the paper-style Section 5 synopsis."""
+    candidates = [
+        ("ravenpack_distilbert_best.bak-20260705-checkpoint", "AAPL-only", "1 stock"),
+        ("ravenpack_distilbert_5stock", "Pooled five-stock", "5 stocks"),
+        ("ravenpack_distilbert_best", "Pooled twenty-stock", "20 stocks"),
+    ]
+    rows = []
+    for model_id, title, universe in candidates:
+        metrics_path = PROJECT_ROOT / "data" / "models" / model_id / "metrics.json"
+        try:
+            metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+            validation = metrics["validation"]
+            test = metrics["test"]
+        except (OSError, json.JSONDecodeError, KeyError, TypeError):
+            continue
+        rows.append({
+            "id": model_id,
+            "title": title,
+            "universe": universe,
+            "path": str(metrics_path.relative_to(PROJECT_ROOT)),
+            "labeled_rows": metrics.get("labeled_rows"),
+            "validation_f1": validation.get("eval_f1"),
+            "validation_accuracy": validation.get("eval_accuracy"),
+            "test_f1": test.get("eval_f1"),
+            "test_accuracy": test.get("eval_accuracy"),
+        })
+    by_id = {row["id"]: row for row in rows}
+    five = by_id.get("ravenpack_distilbert_5stock")
+    twenty = by_id.get("ravenpack_distilbert_best")
+    return {
+        "rows": rows,
+        "twenty_vs_five_test_f1_points": (
+            (twenty["test_f1"] - five["test_f1"]) * 100
+            if twenty and five and twenty["test_f1"] is not None and five["test_f1"] is not None
+            else None
+        ),
+    }
+
+
 def compare_checkpoints(
     tickers: list[str], model_ids: list[str] | None = None, *, job: Any | None = None,
 ) -> dict[str, Any]:
