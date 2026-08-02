@@ -10,7 +10,9 @@
     {% set status = namespace(
       ticker=coverage.ticker,
       files_on_disk=ns.body.files_on_disk,
-      progress=ns.body.pull_progress
+      bytes_human=none,
+      progress=ns.body.pull_progress,
+      per_ticker=[]
     ) %}
   {% endif %}
 {% endif %}
@@ -18,9 +20,14 @@
 {% set ticker_q = (status.ticker if status and status.ticker else (coverage.ticker if coverage is defined else "AAPL")) %}
 {% set running = prog and prog.status in ["starting", "running"] %}
 {% set status_dom_id = status_dom_id if status_dom_id is defined else "story-cache-status" %}
+{% set pct = prog.pct_run if prog and prog.pct_run is defined else 0 %}
+{% set pct_overall = prog.pct_overall if prog and prog.pct_overall is defined else pct %}
+{% set window_start = (status.window_start if status and status.window_start else (prog.window_start if prog else "")) %}
+{% set window_end = (status.window_end if status and status.window_end else (prog.window_end if prog else "")) %}
 <div id="{{ status_dom_id }}"
+     class="story-cache-status"
      {% if running %}
-     hx-get="/data-explorer/cache-stories/status?ticker={{ ticker_q }}&dom_id={{ status_dom_id }}"
+     hx-get="/data-explorer/cache-stories/status?ticker={{ ticker_q }}&dom_id={{ status_dom_id }}{% if window_start %}&start_date={{ window_start }}{% endif %}{% if window_end %}&end_date={{ window_end }}{% endif %}"
      hx-trigger="load delay:2s"
      hx-swap="outerHTML"
      {% endif %}>
@@ -32,10 +39,21 @@
         · failed {{ prog.failed or 0 }}
         · {{ prog.processed or 0 }}/{{ prog.pending_this_run or 0 }} this run
         · {{ prog.elapsed_s or 0 }}s
-        · {{ "{:,}".format(status.files_on_disk) }} bodies on disk for {{ ticker_q }}.
+        · {{ "{:,}".format(status.files_on_disk) }} bodies
+        {% if status.bytes_human %} ({{ status.bytes_human }}){% elif prog.bytes_human %} ({{ prog.bytes_human }}){% endif %}
+        for {{ ticker_q }}.
         Click <strong>Check cache only</strong> to refresh the inventory.
       </div>
-    {% elif prog.status in ["stopped", "error", "failed"] %}
+    {% elif prog.status in ["paused", "halted", "stopped"] %}
+      <div class="alert alert-warn">
+        Full-story pull <strong>{{ prog.status }}</strong>
+        {% if prog.stop_reason %} · {{ prog.stop_reason }}{% endif %}
+        · {{ prog.processed or 0 }}/{{ prog.pending_this_run or 0 }} this run
+        · {{ "{:,}".format(prog.files_on_disk or status.files_on_disk or 0) }} bodies
+        · {{ prog.bytes_human or status.bytes_human or "—" }}
+        · Load selected again to resume (existing bodies are skipped).
+      </div>
+    {% elif prog.status in ["error", "failed"] %}
       <div class="alert alert-error">
         Full-story pull <strong>{{ prog.status }}</strong>
         · fetched {{ prog.fetched or 0 }} · failed {{ prog.failed or 0 }}
@@ -43,17 +61,148 @@
         {% if prog.error %} · {{ prog.error }}{% endif %}
       </div>
     {% else %}
-      <div class="alert alert-info">
-        Full-story pull <strong>{{ prog.status or "running" }}</strong>
-        · on disk {{ "{:,}".format(status.files_on_disk) }}
-        · fetched {{ prog.fetched or 0 }}
-        · failed {{ prog.failed or 0 }}
-        · processed {{ prog.processed or 0 }}/{{ prog.pending_this_run or 0 }}
-        · {{ prog.elapsed_s or 0 }}s
-        {% if running %}<br><span class="muted">Auto-refreshing every 2s…</span>{% endif %}
+      <div class="alert alert-info story-pull-live">
+        <div class="story-pull-headline">
+          Full-story pull <strong>{{ prog.status or "running" }}</strong>
+          · {{ "%.1f"|format(pct_overall) }}% overall
+          · {{ "%.1f"|format(pct) }}% this run
+        </div>
+        <div class="progress-track story-progress-track" aria-label="Pull progress">
+          <div class="progress-fill" style="width: {{ pct if pct < 100 else 100 }}%"></div>
+        </div>
+        <p class="muted story-pull-metrics">
+          {{ "{:,}".format(prog.processed or 0) }} / {{ "{:,}".format(prog.pending_this_run or 0) }} this run
+          · {{ "{:,}".format(prog.overall_done or prog.files_on_disk or status.files_on_disk or 0) }} / {{ "{:,}".format(prog.total_headlines or 0) }} headlines
+          · fetched {{ prog.fetched or 0 }} · failed {{ prog.failed or 0 }}
+          · {{ prog.rate_per_min or 0 }} stories/min
+          · ETA {{ prog.eta_human or "—" }}
+          · elapsed {{ prog.elapsed_s or 0 }}s
+        </p>
+        <p class="muted story-pull-metrics">
+          Disk for {{ ticker_q }}:
+          <strong>{{ prog.bytes_human or status.bytes_human or "—" }}</strong>
+          ({{ "{:,}".format(prog.files_on_disk or status.files_on_disk or 0) }} files)
+          · added this run {{ prog.bytes_added_human or "—" }}
+          · ~{{ "{:,}".format(prog.avg_bytes_per_story or status.avg_bytes or 0) }} B/story
+          · projected if finished {{ prog.projected_total_human or "—" }}
+        </p>
+        {% if running %}
+          <div class="story-pull-actions">
+            <form hx-post="/data-explorer/cache-stories/control"
+                  hx-target="#{{ status_dom_id }}"
+                  hx-swap="outerHTML"
+                  style="display:inline">
+              <input type="hidden" name="ticker" value="{{ ticker_q }}">
+              <input type="hidden" name="action" value="pause">
+              <input type="hidden" name="dom_id" value="{{ status_dom_id }}">
+              <button type="submit" class="btn btn-secondary btn-small">Pause after current story</button>
+            </form>
+            <form hx-post="/data-explorer/cache-stories/control"
+                  hx-target="#{{ status_dom_id }}"
+                  hx-swap="outerHTML"
+                  style="display:inline"
+                  hx-confirm="Halt the full-story pull after the current article? You can resume later.">
+              <input type="hidden" name="ticker" value="{{ ticker_q }}">
+              <input type="hidden" name="action" value="halt">
+              <input type="hidden" name="dom_id" value="{{ status_dom_id }}">
+              <button type="submit" class="btn btn-secondary btn-small">Halt</button>
+            </form>
+            <span class="muted">Auto-refreshing every 2s…</span>
+          </div>
+        {% endif %}
       </div>
     {% endif %}
   {% else %}
     <p class="muted">No pull has been started yet for this ticker.</p>
+  {% endif %}
+
+  {% if status and status.day_grids %}
+    <div class="story-day-grids">
+      <h4>Day progress grid</h4>
+      <div class="story-day-legend">
+        <span><i class="day-swatch day-gray"></i> not done</span>
+        <span><i class="day-swatch day-yellow"></i> in progress</span>
+        <span><i class="day-swatch day-green shade-1"></i><i class="day-swatch day-green shade-3"></i><i class="day-swatch day-green shade-5"></i> loaded (light→dark by count)</span>
+        <span><i class="day-swatch day-blue"></i> no articles that day</span>
+        <span><i class="day-swatch day-red shade-1"></i><i class="day-swatch day-red shade-3"></i><i class="day-swatch day-red shade-5"></i> failed (light→dark by failures)</span>
+      </div>
+      {% for grid in status.day_grids %}
+        <details class="story-day-grid-block" {% if grid.ticker == ticker_q %}open{% endif %}>
+          <summary>
+            <strong>{{ grid.ticker }}</strong>
+            · {{ grid.start }} → {{ grid.end }}
+            · {{ grid.counts.green or 0 }} green
+            · {{ grid.counts.yellow or 0 }} yellow
+            · {{ grid.counts.gray or 0 }} gray
+            · {{ grid.counts.blue or 0 }} blue
+            · {{ grid.counts.red or 0 }} red
+          </summary>
+          <p class="story-day-hover-detail muted" data-empty="Hover a day square for date and article counts.">
+            Hover a day square for date and article counts.
+          </p>
+          {% for year in grid.years %}
+            <div class="story-day-year-block">
+              <div class="story-day-year-heading">{{ year.year }}</div>
+              {% for month in year.months %}
+                <div class="story-day-month">
+                  <div class="story-day-month-label" title="{{ month.label_full }}">{{ month.label }}</div>
+                  <div class="story-day-month-body">
+                    <div class="story-day-row" role="list" aria-label="{{ grid.ticker }} {{ month.label_full }}">
+                      {% for day in month.days %}
+                        <button type="button"
+                                class="day-cell day-{{ day.status }}{% if day.shade %} shade-{{ day.shade }}{% endif %}{% if day.is_month_start %} day-month-start{% endif %}"
+                                title="{{ day.title }}"
+                                data-tip="{{ day.tip_attr | safe }}"
+                                data-day="{{ day.day }}"
+                                aria-label="{{ day.title }}"
+                                onmouseenter="var p=this.closest('.story-day-grid-block').querySelector('.story-day-hover-detail'); if(p){ p.textContent=this.getAttribute('data-tip'); p.classList.add('is-active'); }"
+                                onfocus="var p=this.closest('.story-day-grid-block').querySelector('.story-day-hover-detail'); if(p){ p.textContent=this.getAttribute('data-tip'); p.classList.add('is-active'); }"></button>
+                      {% endfor %}
+                    </div>
+                    <div class="story-day-ruler" aria-hidden="true">
+                      {% for day in month.days %}
+                        {% if day.day == 1 or day.day == 8 or day.day == 15 or day.day == 22 or day.day == 29 %}
+                          <span class="day-ruler-mark" style="--day-offset: {{ loop.index0 }}">{{ day.day }}</span>
+                        {% endif %}
+                      {% endfor %}
+                    </div>
+                  </div>
+                </div>
+              {% endfor %}
+            </div>
+          {% endfor %}
+        </details>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  {% if status and status.per_ticker %}
+    <details class="story-storage-details" {% if running %}open{% endif %}>
+      <summary>
+        Storage so far
+        {% if status.all_tickers_bytes_human %}
+          · all tickers {{ status.all_tickers_bytes_human }}
+        {% endif %}
+      </summary>
+      <table class="data-table compact">
+        <thead>
+          <tr><th>Ticker</th><th>Bodies</th><th>Size</th><th>Avg / body</th></tr>
+        </thead>
+        <tbody>
+          {% for row in status.per_ticker %}
+            <tr {% if row.ticker == ticker_q %}class="row-highlight"{% endif %}>
+              <td><strong>{{ row.ticker }}</strong></td>
+              <td>{{ "{:,}".format(row.files) }}</td>
+              <td>{{ row.bytes_human }}</td>
+              <td>{{ "{:,}".format(row.avg_bytes) }} B</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <p class="muted">
+        Rough AAPL full-window projection: ~27k bodies × current avg size.
+        Scale from the row above as more tickers are filled.
+      </p>
+    </details>
   {% endif %}
 </div>

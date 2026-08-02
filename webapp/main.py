@@ -200,6 +200,7 @@ def data_explorer_query(
     end_date: str = Form(default=de.DEFAULT_END),
     action: str = Form(default="load"),
     pull_ids: list[str] = Form(default=[]),
+    pull_fields: list[str] = Form(default=[]),
     # Backward-compatible aliases from older forms
     use_refinitiv: bool = Form(default=False),
     use_wrds: bool = Form(default=False),
@@ -208,6 +209,8 @@ def data_explorer_query(
     include_refinitiv_news: bool = Form(default=False),
 ) -> HTMLResponse:
     selected = list(pull_ids or [])
+    if pull_fields:
+        selected = de.inventory.product_ids_from_field_tokens(pull_fields)
     if not selected:
         # Legacy checkbox fallback
         if use_refinitiv:
@@ -387,13 +390,41 @@ def data_explorer_cache_stories_status(
     request: Request,
     ticker: str = Query(default="AAPL"),
     dom_id: str = Query(default="story-cache-status"),
+    start_date: str = Query(default=""),
+    end_date: str = Query(default=""),
 ) -> HTMLResponse:
-    status = de.full_story_cache_status(ticker)
+    status = de.full_story_cache_status(
+        ticker,
+        start=start_date or None,
+        end=end_date or None,
+    )
     return templates.TemplateResponse(
         request,
         "partials/story_cache_status.html",
         {"story_cache_status": status, "status_dom_id": dom_id},
     )
+
+
+@app.post("/data-explorer/cache-stories/control", response_class=HTMLResponse)
+def data_explorer_cache_stories_control(
+    request: Request,
+    ticker: str = Form(default="AAPL"),
+    action: str = Form(default="pause"),
+    dom_id: str = Form(default="story-cache-status"),
+) -> HTMLResponse:
+    try:
+        status = de.request_full_story_pull_control(ticker, action)
+        # Keep polling while still running so the bar updates until pause lands.
+        return templates.TemplateResponse(
+            request,
+            "partials/story_cache_status.html",
+            {"story_cache_status": status, "status_dom_id": dom_id},
+        )
+    except Exception as exc:  # noqa: BLE001
+        return HTMLResponse(
+            f'<div class="alert alert-error"><strong>Could not {action} story pull:</strong> {exc}</div>',
+            status_code=200,
+        )
 
 
 @app.post("/data-explorer/ravenpack-article", response_class=HTMLResponse)

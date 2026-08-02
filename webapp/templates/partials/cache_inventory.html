@@ -6,7 +6,7 @@
   <table class="data-table inventory-table">
     <thead>
       <tr>
-        <th>Service</th>
+        <th>Product</th>
         <th>Fields</th>
         <th>Status</th>
         <th>Rows / detail</th>
@@ -14,15 +14,32 @@
       </tr>
     </thead>
     <tbody>
-      {% for p in inv.products %}
-        <tr class="inv-{{ p.status }}">
-          <td>{{ p.service }} · {{ p.label }}{% if p.overnight %} <span class="muted">(overnight)</span>{% endif %}</td>
-          <td><code>{{ p.fields|join(', ') }}</code></td>
-          <td><span class="inv-badge inv-badge-{{ p.status }}">{{ p.status }}</span></td>
-          <td>{% if p.detail %}{{ p.detail }}{% else %}{{ "{:,}".format(p.rows) }}{% endif %}</td>
-          <td class="muted">{{ p.message }}</td>
-        </tr>
-      {% endfor %}
+      {% if inv.product_groups %}
+        {% for group in inv.product_groups %}
+          <tr class="inv-group-header">
+            <td colspan="5"><strong>{{ group.service }}</strong></td>
+          </tr>
+          {% for p in group.products %}
+            <tr class="inv-{{ p.status }}">
+              <td>{{ p.label }}{% if p.overnight %} <span class="muted">(overnight)</span>{% endif %}</td>
+              <td><code>{{ p.fields|join(', ') }}</code></td>
+              <td><span class="inv-badge inv-badge-{{ p.status }}">{{ p.status }}</span></td>
+              <td>{% if p.detail %}{{ p.detail }}{% else %}{{ "{:,}".format(p.rows) }}{% endif %}</td>
+              <td class="muted">{{ p.message }}</td>
+            </tr>
+          {% endfor %}
+        {% endfor %}
+      {% else %}
+        {% for p in inv.products %}
+          <tr class="inv-{{ p.status }}">
+            <td>{{ p.service }} · {{ p.label }}{% if p.overnight %} <span class="muted">(overnight)</span>{% endif %}</td>
+            <td><code>{{ p.fields|join(', ') }}</code></td>
+            <td><span class="inv-badge inv-badge-{{ p.status }}">{{ p.status }}</span></td>
+            <td>{% if p.detail %}{{ p.detail }}{% else %}{{ "{:,}".format(p.rows) }}{% endif %}</td>
+            <td class="muted">{{ p.message }}</td>
+          </tr>
+        {% endfor %}
+      {% endif %}
     </tbody>
   </table>
 </div>

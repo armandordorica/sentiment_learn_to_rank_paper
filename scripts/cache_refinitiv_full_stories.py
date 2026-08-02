@@ -96,10 +96,12 @@ def main() -> int:
         pending_n = payload.get("pending_this_run", 0)
         if processed == 0 or processed % 25 == 0 or payload.get("status") != "running":
             print(
-                f"  [{payload.get('status')}] fetched={payload.get('fetched')} "
-                f"failed={payload.get('failed')} "
+                f"  [{payload.get('status')}] "
+                f"{payload.get('pct_run', 0)}% run · {payload.get('pct_overall', 0)}% overall · "
+                f"fetched={payload.get('fetched')} failed={payload.get('failed')} "
                 f"processed={processed}/{pending_n} "
-                f"elapsed={payload.get('elapsed_s')}s",
+                f"{payload.get('rate_per_min', 0)}/min · ETA {payload.get('eta_human', '—')} · "
+                f"{payload.get('bytes_human', '?')} on disk",
                 flush=True,
             )
 
@@ -112,6 +114,8 @@ def main() -> int:
         sleep_s=args.sleep,
         max_failures=args.max_failures,
         progress_callback=on_progress,
+        window_start=args.start,
+        window_end=args.end,
     )
     print(
         f"Done: fetched={summary['fetched']} failed={summary['failed']} "

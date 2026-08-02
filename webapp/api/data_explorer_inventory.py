@@ -99,6 +99,52 @@ DEFAULT_SELECTED = [
 ]
 
 
+def group_pull_products(products: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """Group catalog rows by ``service`` (API source), preserving catalog order."""
+    groups: list[dict[str, Any]] = []
+    index: dict[str, dict[str, Any]] = {}
+    for product in products or PULL_PRODUCTS:
+        service = str(product.get("service") or "Other")
+        if service not in index:
+            group = {"service": service, "products": []}
+            index[service] = group
+            groups.append(group)
+        index[service]["products"].append(product)
+    return groups
+
+
+def default_selected_fields(selected_product_ids: list[str] | None = None) -> list[str]:
+    """``product_id::field`` tokens for every field of the default-selected products."""
+    wanted = set(selected_product_ids or DEFAULT_SELECTED)
+    tokens: list[str] = []
+    for product in PULL_PRODUCTS:
+        if product["id"] not in wanted:
+            continue
+        for field in product["fields"]:
+            tokens.append(f"{product['id']}::{field}")
+    return tokens
+
+
+def product_ids_from_field_tokens(tokens: list[str]) -> list[str]:
+    """Map checked ``product_id::field`` tokens to unique product ids (catalog order)."""
+    selected_fields: set[str] = set()
+    for token in tokens or []:
+        text = str(token or "").strip()
+        if not text:
+            continue
+        if "::" in text:
+            product_id, _field = text.split("::", 1)
+        else:
+            # Allow bare product ids for backward compatibility.
+            product_id = text
+        selected_fields.add(product_id)
+    ordered: list[str] = []
+    for product in PULL_PRODUCTS:
+        if product["id"] in selected_fields:
+            ordered.append(product["id"])
+    return ordered
+
+
 def _filter_window(df: pd.DataFrame, time_col: str, start: str, end: str) -> pd.DataFrame:
     if df.empty or time_col not in df.columns:
         return df.iloc[0:0].copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
@@ -257,6 +303,7 @@ def inspect_inventory(
         "end_date": end,
         "cache_dir": str(cache_dir) if cache_dir else None,
         "products": products,
+        "product_groups": group_pull_products(products),
         "ready_count": ready,
         "total_count": len(products),
         "summary": (

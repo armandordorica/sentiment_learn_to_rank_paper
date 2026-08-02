@@ -64,18 +64,53 @@
       </div>
 
       <h4>Services &amp; fields to load</h4>
-      <p class="muted">Unchecked products are ignored. Ready products are not re-fetched on <strong>Load selected</strong>.</p>
-      <div class="check-grid pull-product-grid">
-        {% for product in pull_products %}
-          <label class="pull-product-option">
-            <input type="checkbox" name="pull_ids" value="{{ product.id }}"
-                   {% if product.id in default_selected %}checked{% endif %}>
-            <span>
-              <strong>{{ product.service }} · {{ product.label }}</strong>
-              {% if product.overnight %}<em class="muted">overnight</em>{% endif %}
-              <small class="muted">{{ product.fields|join(', ') }}</small>
-            </span>
-          </label>
+      <p class="muted">
+        Grouped by API source. Check individual fields to retrieve.
+        A product loads if any of its fields are checked. Ready products are not re-fetched on <strong>Load selected</strong>.
+      </p>
+      <div class="pull-global-actions">
+        <button type="button" class="btn btn-secondary btn-small"
+                onclick="document.querySelectorAll('#explorer-load-form input[name=pull_fields]').forEach(function(el){ el.checked=false; })">
+          Unselect all sources
+        </button>
+      </div>
+      <div class="pull-source-list">
+        {% for group in pull_product_groups %}
+          <section class="pull-source-group" data-pull-group="{{ loop.index0 }}">
+            <header class="pull-source-header">
+              <h5>{{ group.service }}</h5>
+              <div class="pull-group-actions">
+                <button type="button" class="btn btn-secondary btn-small"
+                        onclick="this.closest('.pull-source-group').querySelectorAll('input[name=pull_fields]').forEach(function(el){ el.checked=true; })">
+                  Select all
+                </button>
+                <button type="button" class="btn btn-secondary btn-small"
+                        onclick="this.closest('.pull-source-group').querySelectorAll('input[name=pull_fields]').forEach(function(el){ el.checked=false; })">
+                  Unselect all
+                </button>
+              </div>
+            </header>
+            <div class="pull-product-subsections">
+              {% for product in group.products %}
+                <div class="pull-product-subsection">
+                  <div class="pull-product-subheader">
+                    <strong>{{ product.label }}</strong>
+                    {% if product.overnight %}<em class="muted">overnight</em>{% endif %}
+                  </div>
+                  <div class="pull-field-grid">
+                    {% for field in product.fields %}
+                      {% set token = product.id ~ '::' ~ field %}
+                      <label class="pull-field-option">
+                        <input type="checkbox" name="pull_fields" value="{{ token }}"
+                               {% if token in default_selected_fields %}checked{% endif %}>
+                        <code>{{ field }}</code>
+                      </label>
+                    {% endfor %}
+                  </div>
+                </div>
+              {% endfor %}
+            </div>
+          </section>
         {% endfor %}
       </div>
 

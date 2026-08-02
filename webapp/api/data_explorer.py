@@ -26,11 +26,18 @@ from sentiment_ltr.data.ravenpack_match import (  # noqa: E402
 )
 from sentiment_ltr.data.refinitiv_queries import fetch_refinitiv_story  # noqa: E402
 from sentiment_ltr.data.refinitiv_story_cache import (  # noqa: E402
+    build_story_day_grid,
     digest_from_story_filename,
     digests_on_disk,
     find_cached_story_path,
+    format_bytes,
+    list_story_cache_stats,
     read_progress as read_story_pull_progress,
+    read_pull_pid,
+    request_pull_control,
+    story_dir_stats,
     story_path as cached_story_path,
+    write_pull_pid,
     write_story_file,
 )
 from webapp.api import data_explorer_inventory as inventory  # noqa: E402
@@ -80,7 +87,9 @@ def page_defaults() -> dict[str, Any]:
             "ravenpack": wrds_ready,
         },
         "pull_products": inventory.PULL_PRODUCTS,
+        "pull_product_groups": inventory.group_pull_products(),
         "default_selected": inventory.DEFAULT_SELECTED,
+        "default_selected_fields": inventory.default_selected_fields(),
     }
 
 
@@ -1358,6 +1367,10 @@ def start_full_story_cache_job(
     story_dir = FULL_STORY_DIR / ticker
     story_dir.mkdir(parents=True, exist_ok=True)
     progress_path = story_dir / "_pull_progress.json"
+    # Clear any stale pause/halt request from a prior run.
+    from sentiment_ltr.data.refinitiv_story_cache import clear_pull_control
+
+    clear_pull_control(PROJECT_ROOT, ticker)
     # Mark queued immediately so the UI does not show a stale prior "completed".
     progress_path.write_text(
         json.dumps(
@@ -1388,6 +1401,7 @@ def start_full_story_cache_job(
         stderr=subprocess.STDOUT,
         start_new_session=True,
     )
+    write_pull_pid(PROJECT_ROOT, ticker, proc.pid)
     # Reap the child so short smoke-test jobs do not leave a zombie PID.
     threading.Thread(target=proc.wait, name=f"story-pull-wait-{ticker}", daemon=True).start()
     return {
@@ -1399,13 +1413,101 @@ def start_full_story_cache_job(
     }
 
 
-def full_story_cache_status(ticker: str) -> dict[str, Any]:
+def request_full_story_pull_control(ticker: str, action: str) -> dict[str, Any]:
+    """Ask a running full-story pull to pause or halt after the current article."""
+    ticker = live_data.clean_ticker(ticker) or ticker.upper()
+    path = request_pull_control(PROJECT_ROOT, ticker, action)
+    status = full_story_cache_status(ticker)
+    status["control_path"] = str(path)
+    status["control_action"] = action
+    return status
+
+
+def full_story_cache_status(
+    ticker: str,
+    *,
+    start: str | None = None,
+    end: str | None = None,
+) -> dict[str, Any]:
     ticker = live_data.clean_ticker(ticker) or ticker.upper()
     progress = read_story_pull_progress(PROJECT_ROOT, ticker) or {}
-    n_files = len(digests_on_disk(PROJECT_ROOT, ticker))
+    disk = story_dir_stats(PROJECT_ROOT, ticker)
+    n_files = int(disk["files"])
+    pid = progress.get("pid") or read_pull_pid(PROJECT_ROOT, ticker)
+    all_tickers = list_story_cache_stats(PROJECT_ROOT)
+    total_bytes = sum(int(r["bytes"]) for r in all_tickers)
+    window_start = start or progress.get("window_start") or DEFAULT_START
+    window_end = end or progress.get("window_end") or DEFAULT_END
+    day_grid = None
+    day_grids: list[dict[str, Any]] = []
+    try:
+        cached = load_cached(ticker, str(window_start), str(window_end))
+        news = (
+            cached["providers"].get("refinitiv", {}).get("news")
+            if cached
+            else None
+        )
+        if news is None:
+            news = pd.DataFrame()
+        day_grid = build_story_day_grid(
+            PROJECT_ROOT,
+            ticker,
+            news,
+            start=str(window_start),
+            end=str(window_end),
+            current_date=progress.get("current_story_date"),
+            pull_running=str(progress.get("status") or "") in {"starting", "running"},
+        )
+        day_grids.append(day_grid)
+        # Other tickers that have an active/prior pull progress window.
+        root = FULL_STORY_DIR
+        if root.is_dir():
+            for path in sorted(root.iterdir()):
+                other = path.name.upper()
+                if not path.is_dir() or other == ticker:
+                    continue
+                other_prog = read_story_pull_progress(PROJECT_ROOT, other) or {}
+                if not other_prog:
+                    continue
+                o_start = other_prog.get("window_start") or window_start
+                o_end = other_prog.get("window_end") or window_end
+                other_cached = load_cached(other, str(o_start), str(o_end))
+                other_news = (
+                    other_cached["providers"].get("refinitiv", {}).get("news")
+                    if other_cached
+                    else pd.DataFrame()
+                )
+                if other_news is None:
+                    other_news = pd.DataFrame()
+                day_grids.append(
+                    build_story_day_grid(
+                        PROJECT_ROOT,
+                        other,
+                        other_news,
+                        start=str(o_start),
+                        end=str(o_end),
+                        current_date=other_prog.get("current_story_date"),
+                        pull_running=str(other_prog.get("status") or "")
+                        in {"starting", "running"},
+                    )
+                )
+    except Exception:
+        day_grid = None
+        day_grids = []
     return {
         "ticker": ticker,
         "files_on_disk": n_files,
+        "bytes_on_disk": disk["bytes"],
+        "bytes_human": disk["bytes_human"],
+        "avg_bytes": disk["avg_bytes"],
         "progress": progress,
+        "pid": pid,
         "log_path": str(FULL_STORY_DIR / ticker / "_pull.log"),
+        "per_ticker": all_tickers,
+        "all_tickers_bytes": total_bytes,
+        "all_tickers_bytes_human": format_bytes(total_bytes),
+        "day_grid": day_grid,
+        "day_grids": day_grids,
+        "window_start": window_start,
+        "window_end": window_end,
     }

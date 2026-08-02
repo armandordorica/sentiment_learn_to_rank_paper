@@ -13,6 +13,44 @@ def test_build_inventory_aapl_paper_window_ready_products():
     assert by_id["ravenpack_articles"]["rows"] > 100000
     # Full bodies are not fully cached yet
     assert by_id["refinitiv_full_stories"]["status"] in {"missing", "partial"}
+    groups = {g["service"]: g for g in inv["product_groups"]}
+    assert "Refinitiv" in groups
+    assert len(groups["Refinitiv"]["products"]) == 3
+    assert [p["label"] for p in groups["Refinitiv"]["products"]] == [
+        "Prices",
+        "Headlines",
+        "Full story bodies",
+    ]
+
+
+def test_group_pull_products_orders_by_service():
+    from webapp.api import data_explorer_inventory as inv
+
+    groups = inv.group_pull_products()
+    assert [g["service"] for g in groups] == [
+        "Refinitiv",
+        "WRDS/CRSP",
+        "Yahoo",
+        "RavenPack",
+    ]
+
+
+def test_product_ids_from_field_tokens():
+    from webapp.api import data_explorer_inventory as inv
+
+    ids = inv.product_ids_from_field_tokens([
+        "refinitiv_prices::close_price",
+        "refinitiv_prices::volume",
+        "ravenpack_articles::headline",
+        "refinitiv_full_stories::full_story_body",
+    ])
+    assert ids == [
+        "refinitiv_prices",
+        "refinitiv_full_stories",
+        "ravenpack_articles",
+    ]
+    assert "refinitiv_prices::date" in inv.default_selected_fields()
+    assert "refinitiv_full_stories::full_story_body" not in inv.default_selected_fields()
 
 
 def test_selective_load_check_reports_existing_without_result():
