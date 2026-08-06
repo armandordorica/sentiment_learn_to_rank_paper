@@ -32,11 +32,13 @@ from sentiment_ltr.data.refinitiv_story_cache import (  # noqa: E402
     find_cached_story_path,
     format_bytes,
     list_story_cache_stats,
+    load_pacer_state,
     read_progress as read_story_pull_progress,
     read_pull_pid,
     request_pull_control,
     story_dir_stats,
     story_path as cached_story_path,
+    summarize_pacer_bandit,
     write_pull_pid,
     write_story_file,
 )
@@ -1344,7 +1346,7 @@ def start_full_story_cache_job(
     end: str,
     *,
     limit: int | None = None,
-    sleep_s: float = 0.25,
+    sleep_s: float = 0.5,
 ) -> dict[str, Any]:
     """Launch ``scripts/cache_refinitiv_full_stories.py`` as a detached process."""
     import json
@@ -1352,15 +1354,30 @@ def start_full_story_cache_job(
     import threading
     from datetime import datetime, timezone
 
+    from sentiment_ltr.data.story_quota_settings import load_story_quota_settings
+
     ticker = live_data.clean_ticker(ticker) or ticker.upper()
+    cfg = load_story_quota_settings(PROJECT_ROOT)
     script = PROJECT_ROOT / "scripts" / "cache_refinitiv_full_stories.py"
+    min_sleep = float(cfg.min_sleep_s)
     cmd = [
         sys.executable,
         str(script),
         "--ticker", ticker,
         "--start", start,
         "--end", end,
-        "--sleep", str(sleep_s),
+        "--sleep", str(min_sleep),
+        "--min-sleep", str(min_sleep),
+        "--max-sleep", "180",
+        "--pacer", "thompson",
+        "--max-failures", "100",
+        "--max-scope-failures", "5",
+        "--rate-limit-retries", "40",
+        "--cooloff-after-rl", "6",
+        "--cooloff-s", "900",
+        "--max-per-day", str(int(cfg.max_per_day)),
+        "--overnight",
+        "--overnight-pause-s", "1200",
     ]
     if limit is not None:
         cmd.extend(["--limit", str(int(limit))])
@@ -1494,6 +1511,7 @@ def full_story_cache_status(
     except Exception:
         day_grid = None
         day_grids = []
+    bandit = summarize_pacer_bandit(load_pacer_state(PROJECT_ROOT, ticker))
     return {
         "ticker": ticker,
         "files_on_disk": n_files,
@@ -1510,4 +1528,5 @@ def full_story_cache_status(
         "day_grids": day_grids,
         "window_start": window_start,
         "window_end": window_end,
+        "bandit": bandit,
     }

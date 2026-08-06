@@ -12,6 +12,7 @@
   <nav class="section-nav" aria-label="Multi-stock batch sections">
     <a href="#bp-2a">2A · Launch / monitor batch</a>
     <a href="#bp-2b">2B · What’s already cached</a>
+    <a href="#bp-2f">2F · Story quota automation</a>
     <a href="#bp-2c">2C · Why providers failed</a>
     <a href="#bp-2d">2D · CRSP delisting returns</a>
     <a href="#bp-2e">2E · Cash-merger exit prices</a>
@@ -80,7 +81,18 @@
       <div class="progress-track" title="{{ "{:,}".format(snapshot.n_cached) }} tickers have at least one cached manifest">
         <div class="progress-fill" style="width: {{ "%.1f"|format(snapshot.cached_frac * 100) }}%"></div>
       </div>
-      <p class="muted">{{ "{:,}".format(snapshot.n_cached) }} tickers have at least one cached manifest · {{ "{:,}".format(snapshot.n_complete) }} fully complete ({{ "%.1f%%"|format(snapshot.pct_complete) }} of universe)</p>
+      <p class="muted">{{ "{:,}".format(snapshot.n_cached) }} tickers have at least one cached manifest · {{ "{:,}".format(snapshot.n_complete) }} fully complete ({{ "%.1f%%"|format(snapshot.pct_complete) }} of universe). Complete means WRDS + Yahoo + RavenPack + Refinitiv prices all returned ok — not the paper’s news filter, and not full wire bodies.</p>
+      {% if snapshot.news_threshold and not snapshot.news_threshold.empty %}
+      <p class="muted">
+        Paper-style news-threshold set (≥1 RavenPack article/week):
+        <strong>{{ "{:,}".format(snapshot.news_threshold.n_names) }}</strong> names
+        · usable Refinitiv headlines
+        <strong>{{ "{:,}".format(snapshot.news_threshold.n_with_headlines) }}</strong>
+        · still need headline backfill
+        <strong>{{ "{:,}".format(snapshot.news_threshold.n_missing_headlines) }}</strong>
+        · artifact <code>{{ snapshot.news_threshold.path }}</code>
+      </p>
+      {% endif %}
 
       <p><strong>Provider coverage</strong> — across all cached tickers</p>
       <div class="table-scroll">
@@ -96,6 +108,20 @@
           </tbody>
         </table>
       </div>
+    {% endif %}
+  </section>
+
+  <section id="bp-2f">
+    <h3>2F · Story quota automation</h3>
+    <p class="muted">
+      Defaults for the shared Refinitiv full-story budget across many tickers.
+      The panel shows live status; use <strong>Edit settings</strong> only when you
+      need to change the daily cap, pace, or hourly wake-up minute.
+    </p>
+    {% if q is defined and q %}
+      {% include "partials/story_quota_settings.html" %}
+    {% else %}
+      <div class="alert alert-info">Story-quota panel unavailable — restart the webapp to load the latest Batch Pipeline code.</div>
     {% endif %}
   </section>
 

@@ -14,9 +14,10 @@ import os
 import signal
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.express as px
@@ -32,6 +33,26 @@ from sentiment_ltr.data import live_data  # noqa: E402
 from sentiment_ltr.data.provider_reason_codes import (  # noqa: E402
     enrich_provider_status_records,
     reason_label,
+)
+from sentiment_ltr.data.story_quota_settings import (  # noqa: E402
+    DEFAULT_MAX_PER_DAY,
+    DEFAULT_MIN_SLEEP_S,
+    apply_story_quota_cron,
+    installed_story_quota_cron_line,
+    load_story_quota_settings,
+    normalize_settings,
+    parse_cron_minute,
+    save_story_quota_settings,
+    settings_path,
+)
+from sentiment_ltr.data.story_quota_scheduler import (  # noqa: E402
+    live_story_pull_tickers,
+    load_ticker_queue,
+    story_quota_snapshot,
+)
+from sentiment_ltr.data.refinitiv_story_cache import (  # noqa: E402
+    full_story_root,
+    read_progress,
 )
 from sentiment_ltr.data.crsp_delisting import (  # noqa: E402
     DELISTING_CACHE_PATH,
@@ -54,6 +75,7 @@ BATCH_PID_FILE = TOP1K_OUTPUT_DIR / "batch.pid"
 BATCH_LOG_FILE = TOP1K_OUTPUT_DIR / "batch_runner.log"
 BATCH_RUNNER_SCRIPT = PROJECT_ROOT / "scripts" / "run_batch_pipeline.py"
 TOP1K_UNIVERSE_PATH = PROJECT_ROOT / "app_data" / "crsp_top_volume_universe.csv"
+NEWS_THRESHOLD_PATH = PROJECT_ROOT / "app_data" / "ravenpack_news_threshold_universe.csv"
 
 UNIVERSE_SIZE = 1_000
 PROVIDER_NAMES = ("wrds", "yahoo", "ravenpack", "refinitiv")
@@ -396,7 +418,11 @@ def _load_universe() -> pd.DataFrame:
 
 def snapshot(mdf: pd.DataFrame) -> dict[str, Any]:
     if mdf.empty:
-        return {"empty": True, "universe_size": UNIVERSE_SIZE}
+        return {
+            "empty": True,
+            "universe_size": UNIVERSE_SIZE,
+            "news_threshold": news_threshold_snapshot(),
+        }
     n_cached = len(mdf)
     n_complete = int((mdf["status"] == "complete").sum())
     n_partial = int((mdf["status"] == "partial").sum())
@@ -426,6 +452,36 @@ def snapshot(mdf: pd.DataFrame) -> dict[str, Any]:
         "pct_complete": 100 * n_complete / UNIVERSE_SIZE,
         "cached_frac": n_cached / UNIVERSE_SIZE,
         "coverage": coverage,
+        "news_threshold": news_threshold_snapshot(),
+    }
+
+
+def news_threshold_snapshot() -> dict[str, Any]:
+    if not NEWS_THRESHOLD_PATH.is_file():
+        return {"empty": True, "path": str(NEWS_THRESHOLD_PATH)}
+    try:
+        frame = pd.read_csv(NEWS_THRESHOLD_PATH)
+    except Exception:
+        return {"empty": True, "path": str(NEWS_THRESHOLD_PATH)}
+    if frame.empty:
+        return {"empty": True, "n_names": 0, "path": str(NEWS_THRESHOLD_PATH)}
+    if "has_usable_refinitiv_headlines" in frame.columns:
+        flags = frame["has_usable_refinitiv_headlines"]
+        if flags.dtype != bool:
+            flags = flags.astype(str).str.lower().isin(["true", "1", "yes"])
+        n_headlines = int(flags.fillna(False).sum())
+    else:
+        n_headlines = 0
+    return {
+        "empty": False,
+        "n_names": int(len(frame)),
+        "n_with_headlines": n_headlines,
+        "n_missing_headlines": int(len(frame) - n_headlines),
+        "path": (
+            str(NEWS_THRESHOLD_PATH.relative_to(PROJECT_ROOT))
+            if NEWS_THRESHOLD_PATH.is_relative_to(PROJECT_ROOT)
+            else str(NEWS_THRESHOLD_PATH)
+        ),
     }
 
 
@@ -913,3 +969,338 @@ def form_defaults() -> dict[str, Any]:
         "use_refinitiv": True,
         "creds_ok": creds,
     }
+
+
+# ── 2F Story quota automation ─────────────────────────────────────────────────
+
+
+STORY_QUEUE_PATH = PROJECT_ROOT / "app_data" / "story_pull_queue.txt"
+DAILY_QUOTA_LOG = (
+    PROJECT_ROOT / "data" / "raw" / "data_explorer_full_stories" / "_daily_quota.log"
+)
+
+
+def _cron_human_summary(*, enabled: bool, minute: int, installed: bool) -> dict[str, Any]:
+    minute = int(minute)
+    stamp = f":{minute:02d}"
+    if not enabled:
+        plain = "Hourly watchdog is off."
+        detail = "Automation will not auto-check the queue on the hour."
+    else:
+        plain = f"Once every hour at {stamp} local Mac time (24 checks/day)."
+        detail = (
+            "Each check starts the next queued ticker only if no story job is live "
+            "and daily quota remains; otherwise it logs and exits."
+        )
+    if enabled and not installed:
+        detail += " Not installed in crontab yet — use Edit → Save & apply."
+    elif enabled and installed:
+        detail += " Installed in this Mac’s crontab."
+    elif (not enabled) and installed:
+        detail += " An old cron line is still installed — Edit to remove it."
+    return {
+        "enabled": enabled,
+        "minute": minute,
+        "stamp": stamp,
+        "plain": plain,
+        "detail": detail,
+        "expression": f"{minute} * * * *" if enabled else "(disabled)",
+        "checks_per_day": 24 if enabled else 0,
+    }
+
+
+def _next_hourly_cron_fire(minute: int, *, now: datetime | None = None) -> datetime:
+    """Next local-time fire for ``M * * * *`` (macOS cron uses the system timezone)."""
+    current = (now or datetime.now().astimezone()).astimezone()
+    minute = max(0, min(59, int(minute)))
+    candidate = current.replace(minute=minute, second=0, microsecond=0)
+    if candidate <= current:
+        candidate = candidate + timedelta(hours=1)
+    return candidate
+
+
+def _format_run_times(when: datetime) -> dict[str, str]:
+    utc = when.astimezone(timezone.utc)
+    eastern = when.astimezone(ZoneInfo("America/New_York"))
+    # EST or EDT depending on date
+    et_name = eastern.tzname() or "ET"
+    return {
+        "local": when.isoformat(timespec="minutes"),
+        "local_human": when.strftime("%Y-%m-%d %H:%M %Z"),
+        "utc": utc.strftime("%Y-%m-%d %H:%M UTC"),
+        "eastern": eastern.strftime(f"%Y-%m-%d %H:%M {et_name}"),
+        "eastern_tz": et_name,
+    }
+
+
+def _story_queue_rows(
+    queue: list[str],
+    *,
+    live: list[str],
+    universe_path: Path,
+) -> dict[str, Any]:
+    """Annotate the full pull queue with ready / waiting / done / running status."""
+    meta: dict[str, dict[str, Any]] = {}
+    if universe_path.is_file():
+        try:
+            frame = pd.read_csv(universe_path)
+        except Exception:
+            frame = pd.DataFrame()
+        if not frame.empty and "ticker" in frame.columns:
+            for _, row in frame.iterrows():
+                ticker = str(row.get("ticker") or "").upper().strip()
+                if not ticker:
+                    continue
+                usable = row.get("has_usable_refinitiv_headlines")
+                if not isinstance(usable, (bool, int)):
+                    usable = str(usable).lower() in {"true", "1", "yes"}
+                meta[ticker] = {
+                    "volume_rank": row.get("volume_rank"),
+                    "headline_rows": int(row.get("refinitiv_headline_rows") or 0),
+                    "usable": bool(usable),
+                }
+
+    live_set = {str(t).upper() for t in live}
+    story_root = full_story_root(PROJECT_ROOT)
+    rows: list[dict[str, Any]] = []
+    next_ticker: str | None = None
+    counts = {"running": 0, "ready": 0, "needs_headlines": 0, "done": 0}
+
+    for position, ticker in enumerate(queue, start=1):
+        info = meta.get(ticker, {})
+        usable = bool(info.get("usable"))
+        headline_rows = int(info.get("headline_rows") or 0)
+        progress = read_progress(PROJECT_ROOT, ticker) or {}
+        pct = float(progress.get("pct_overall") or 0)
+        status_raw = str(progress.get("status") or "")
+        bodies = 0
+        ticker_dir = story_root / ticker
+        if ticker_dir.is_dir():
+            bodies = sum(
+                1
+                for path in ticker_dir.iterdir()
+                if path.is_file() and path.suffix == ".txt" and not path.name.startswith("_")
+            )
+
+        if ticker in live_set:
+            state = "running"
+        elif status_raw == "completed" or pct >= 99.9:
+            state = "done"
+        elif usable and headline_rows > 0 and bodies >= max(1, int(headline_rows * 0.995)):
+            state = "done"
+        elif usable:
+            state = "ready"
+        else:
+            state = "needs_headlines"
+
+        if state == "ready" and next_ticker is None and ticker not in live_set:
+            state = "next"
+            next_ticker = ticker
+
+        if state == "running":
+            counts["running"] += 1
+        elif state == "done":
+            counts["done"] += 1
+        elif state in {"ready", "next"}:
+            counts["ready"] += 1
+        else:
+            counts["needs_headlines"] += 1
+
+        rows.append(
+            {
+                "position": position,
+                "ticker": ticker,
+                "volume_rank": info.get("volume_rank"),
+                "headline_rows": headline_rows,
+                "bodies": bodies,
+                "pct_overall": pct,
+                "state": state,
+                "state_label": {
+                    "running": "Running",
+                    "next": "Next up",
+                    "ready": "Ready",
+                    "needs_headlines": "Needs headlines",
+                    "done": "Done",
+                }.get(state, state),
+            }
+        )
+
+    if live and next_ticker is None:
+        for row in rows:
+            if row["state"] == "ready":
+                row["state"] = "next"
+                row["state_label"] = "Next up"
+                next_ticker = row["ticker"]
+                break
+
+    return {
+        "rows": rows,
+        "next_ticker": next_ticker or (live[0] if live else None),
+        "counts": {
+            "total": len(rows),
+            "ready": counts["ready"],
+            "needs_headlines": counts["needs_headlines"],
+            "done": counts["done"],
+            "running": counts["running"],
+        },
+    }
+
+
+def story_quota_context(
+    *,
+    message: str | None = None,
+    error: str | None = None,
+    editing: bool = False,
+) -> dict[str, Any]:
+    cfg = load_story_quota_settings(PROJECT_ROOT)
+    snap = story_quota_snapshot(PROJECT_ROOT, max_per_day=cfg.max_per_day)
+    queue = load_ticker_queue(STORY_QUEUE_PATH)
+    live = live_story_pull_tickers(PROJECT_ROOT)
+    installed = installed_story_quota_cron_line()
+    installed_minute = parse_cron_minute(installed)
+    approx_rps = round(1.0 / float(cfg.min_sleep_s), 2) if cfg.min_sleep_s else None
+    log_tail = None
+    if DAILY_QUOTA_LOG.is_file():
+        try:
+            lines = DAILY_QUOTA_LOG.read_text(encoding="utf-8", errors="replace").splitlines()
+            log_tail = "\n".join(lines[-12:])
+        except OSError:
+            log_tail = None
+    cron_matches = (
+        installed is not None
+        and cfg.cron_enabled
+        and installed_minute == cfg.cron_minute
+    )
+    cron_saved = _cron_human_summary(
+        enabled=bool(cfg.cron_enabled),
+        minute=int(cfg.cron_minute),
+        installed=cron_matches,
+    )
+    effective_minute = (
+        int(installed_minute)
+        if installed_minute is not None
+        else int(cfg.cron_minute)
+    )
+    cron_live = _cron_human_summary(
+        enabled=installed is not None,
+        minute=effective_minute,
+        installed=installed is not None,
+    )
+    if installed is None:
+        cron_live = {
+            **_cron_human_summary(enabled=False, minute=cfg.cron_minute, installed=False),
+            "plain": "No story-quota cron line is installed on this Mac.",
+            "detail": "Use Edit if you want the hourly watchdog installed.",
+            "expression": "(not installed)",
+            "checks_per_day": 0,
+        }
+
+    next_run = None
+    if installed is not None:
+        fire = _next_hourly_cron_fire(effective_minute)
+        next_run = {
+            "enabled": True,
+            **_format_run_times(fire),
+        }
+    elif cfg.cron_enabled:
+        fire = _next_hourly_cron_fire(int(cfg.cron_minute))
+        next_run = {
+            "enabled": False,
+            "pending_install": True,
+            **_format_run_times(fire),
+        }
+
+    pull_status = {
+        "running": bool(live),
+        "tickers": live,
+        "label": (
+            f"Running now: {', '.join(live)}"
+            if live
+            else "Idle — no full-story pull is running"
+        ),
+    }
+    queue_plan = _story_queue_rows(
+        queue,
+        live=live,
+        universe_path=NEWS_THRESHOLD_PATH,
+    )
+
+    return {
+        "settings": cfg.as_dict(),
+        "settings_path": str(settings_path(PROJECT_ROOT).relative_to(PROJECT_ROOT)),
+        "queue_path": str(STORY_QUEUE_PATH.relative_to(PROJECT_ROOT)),
+        "queue": queue,
+        "queue_plan": queue_plan,
+        "n_queue": len(queue),
+        "live_tickers": live,
+        "pull_status": pull_status,
+        "quota": {
+            "remaining": snap.remaining,
+            "calendar_used": snap.calendar_used,
+            "rolling_used": snap.rolling_used,
+            "blocking": snap.blocking,
+            "wait_until": snap.wait_until_local,
+            "max_per_day": snap.max_per_window,
+        },
+        "approx_rps": approx_rps,
+        "cron_saved": cron_saved,
+        "cron_live": cron_live,
+        "next_run": next_run,
+        "cron_installed_line": installed,
+        "cron_installed": installed is not None,
+        "cron_matches_settings": cron_matches,
+        "defaults": {
+            "max_per_day": DEFAULT_MAX_PER_DAY,
+            "min_sleep_s": DEFAULT_MIN_SLEEP_S,
+        },
+        "editing": bool(editing),
+        "log_tail": log_tail,
+        "message": message,
+        "error": error,
+    }
+
+
+def save_story_quota_automation(
+    *,
+    max_per_day: int,
+    min_sleep_s: float,
+    cron_enabled: bool,
+    cron_minute: int,
+    apply_cron: bool = True,
+) -> dict[str, Any]:
+    settings = normalize_settings(
+        max_per_day=max_per_day,
+        min_sleep_s=min_sleep_s,
+        cron_enabled=cron_enabled,
+        cron_minute=cron_minute,
+    )
+    saved = save_story_quota_settings(PROJECT_ROOT, settings)
+    cron_info: dict[str, Any] = {}
+    cron_error: str | None = None
+    if apply_cron:
+        try:
+            cron_info = apply_story_quota_cron(PROJECT_ROOT, saved)
+        except Exception as exc:  # noqa: BLE001
+            cron_error = str(exc)
+    ctx = story_quota_context(
+        message=(
+            f"Saved. Daily budget={saved.max_per_day:,} stories · "
+            f"pause={saved.min_sleep_s}s between calls · "
+            + (
+                f"watchdog once every hour at :{saved.cron_minute:02d} "
+                f"(24 checks/day)."
+                if saved.cron_enabled
+                else "hourly watchdog off."
+            )
+            + (
+                " Live story jobs keep their launch-time budget until restarted."
+                if live_story_pull_tickers(PROJECT_ROOT)
+                else ""
+            )
+        ),
+        error=cron_error,
+        editing=bool(cron_error),
+    )
+    ctx["cron_apply"] = cron_info
+    return ctx
+

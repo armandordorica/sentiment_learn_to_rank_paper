@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -159,6 +160,7 @@ def fetch_ticker_headlines(
     end_date: str,
     *,
     max_headlines_per_chunk: int = 10_000,
+    sleep_s: float = 0.0,
     ld_module: Any | None = None,
 ) -> tuple[pd.DataFrame, str]:
     """Fetch deduplicated headlines for a ticker across a long date range."""
@@ -192,6 +194,8 @@ def fetch_ticker_headlines(
                     )
                     if not frame.empty:
                         chunk_frames.append(frame)
+                    if sleep_s:
+                        time.sleep(float(sleep_s))
             except Exception as exc:
                 errors.append(f"{ric}: {exc}")
                 continue
@@ -255,6 +259,7 @@ def build_news_coverage_result(
     end_date: str,
     *,
     max_headlines_per_chunk: int = 10_000,
+    sleep_s: float = 0.0,
     ld_module: Any | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, NewsCoverageSummary, str]:
     """Fetch headlines and return app-ready daily counts plus summary metrics."""
@@ -264,6 +269,7 @@ def build_news_coverage_result(
         start_date,
         end_date,
         max_headlines_per_chunk=max_headlines_per_chunk,
+        sleep_s=sleep_s,
         ld_module=ld_module,
     )
     daily = daily_article_counts(headlines, start_date, end_date)

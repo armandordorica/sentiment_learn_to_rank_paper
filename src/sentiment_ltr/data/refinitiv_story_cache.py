@@ -11,25 +11,321 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import random
 import re
 import time
-from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 import pandas as pd
 
+from sentiment_ltr.data.refinitiv_errors import (
+    is_refinitiv_rate_limit_error,
+    is_refinitiv_scope_error,
+)
 from sentiment_ltr.data.refinitiv_queries import fetch_refinitiv_story
 
 PROJECT_ROOT_DEFAULT = Path(__file__).resolve().parents[3]
 FULL_STORY_DIR_NAME = Path("data") / "raw" / "data_explorer_full_stories"
+PACER_STATE_NAME = "_pacer_bandit.json"
+
+
+def _logspace_arms(lo: float, hi: float, n: int = 10) -> list[float]:
+    """Build discrete wait-time arms between ``lo`` and ``hi`` (seconds)."""
+    lo_f = float(lo)
+    hi_f = float(hi)
+    if hi_f < lo_f:
+        lo_f, hi_f = hi_f, lo_f
+    n = max(1, int(n))
+    if n == 1 or abs(hi_f - lo_f) < 1e-12:
+        return [round(lo_f, 6)]
+    if lo_f <= 0.0:
+        positive = _logspace_arms(max(hi_f * 0.01, 0.05), hi_f, max(1, n - 1))
+        return [0.0] + positive
+    ratio = (hi_f / lo_f) ** (1.0 / (n - 1))
+    return [round(lo_f * (ratio**i), 6) for i in range(n)]
+
+
+@dataclass
+class AdaptivePacer:
+    """Online delay controller for live ``get_story`` calls.
+
+    LSEG does not publish a stable news QPS, so wait times are learned from
+    429 / success feedback:
+
+    - ``thompson`` (default when adaptive): multi-armed bandit over log-spaced
+      wait arms using Beta-Bernoulli Thompson sampling — an RL / bandit policy
+      that explores short waits and exploits cooldowns that actually recover.
+    - ``aimd``: classic multiplicative increase on 429, ease down after successes.
+    - ``fixed``: constant ``sleep_s`` (also used when ``adaptive=False``).
+    """
+
+    sleep_s: float = 0.5
+    min_sleep_s: float = 0.25
+    max_sleep_s: float = 180.0
+    adaptive: bool = True
+    policy: str = "thompson"
+    n_arms: int = 10
+    success_streak: int = 0
+    rate_limit_hits: int = 0
+    arms: list[float] = field(default_factory=list)
+    alphas: list[float] = field(default_factory=list)
+    betas: list[float] = field(default_factory=list)
+    _pending_arm: int | None = field(default=None, repr=False)
+    _rng: random.Random = field(default_factory=random.Random, repr=False)
+
+    def __post_init__(self) -> None:
+        self.sleep_s = float(self.sleep_s)
+        self.min_sleep_s = float(self.min_sleep_s)
+        self.max_sleep_s = float(self.max_sleep_s)
+        if self.min_sleep_s > self.max_sleep_s:
+            self.min_sleep_s, self.max_sleep_s = self.max_sleep_s, self.min_sleep_s
+        self.sleep_s = min(self.max_sleep_s, max(self.min_sleep_s, self.sleep_s))
+        if not self.adaptive:
+            self.policy = "fixed"
+        else:
+            self.policy = str(self.policy or "thompson").strip().lower()
+            if self.policy not in {"thompson", "aimd", "fixed"}:
+                self.policy = "thompson"
+        self.n_arms = max(2, int(self.n_arms))
+        if not self.arms:
+            self.arms = _logspace_arms(self.min_sleep_s, self.max_sleep_s, self.n_arms)
+        else:
+            self.arms = [float(x) for x in self.arms]
+        n = len(self.arms)
+        if len(self.alphas) != n:
+            self.alphas = [1.0] * n
+        else:
+            self.alphas = [max(1e-3, float(a)) for a in self.alphas]
+        if len(self.betas) != n:
+            self.betas = [1.0] * n
+        else:
+            self.betas = [max(1e-3, float(b)) for b in self.betas]
+
+    def preferred_sleep_s(self) -> float:
+        """Mean of the arm with the highest posterior success probability."""
+        if not self.arms:
+            return float(self.sleep_s)
+        best_i = 0
+        best_mean = -1.0
+        for i, (a, b) in enumerate(zip(self.alphas, self.betas)):
+            mean = a / (a + b)
+            # Prefer shorter waits when posteriors are close.
+            score = mean - 0.01 * math.log1p(self.arms[i])
+            if score > best_mean:
+                best_mean = score
+                best_i = i
+        return float(self.arms[best_i])
+
+    def _select_thompson_arm(self) -> int:
+        best_i = 0
+        best_sample = -1.0
+        for i, (a, b) in enumerate(zip(self.alphas, self.betas)):
+            sample = self._rng.betavariate(float(a), float(b))
+            if sample > best_sample:
+                best_sample = sample
+                best_i = i
+        return best_i
+
+    def _credit_pending(self, success: bool) -> None:
+        if self._pending_arm is None:
+            return
+        idx = int(self._pending_arm)
+        if 0 <= idx < len(self.arms):
+            if success:
+                self.alphas[idx] = float(self.alphas[idx]) + 1.0
+            else:
+                self.betas[idx] = float(self.betas[idx]) + 1.0
+        self._pending_arm = None
+
+    def on_success(self) -> None:
+        self.success_streak += 1
+        self._credit_pending(success=True)
+        if self.policy == "fixed":
+            return
+        if self.policy == "thompson":
+            # Drift cruise delay toward the learned preferred wait, then ease down.
+            target = max(self.min_sleep_s, min(self.max_sleep_s, self.preferred_sleep_s()))
+            self.sleep_s = max(self.min_sleep_s, 0.7 * self.sleep_s + 0.3 * target)
+            if self.success_streak >= 3 and self.sleep_s > self.min_sleep_s:
+                self.sleep_s = max(self.min_sleep_s, self.sleep_s * 0.9)
+                self.success_streak = 0
+            return
+        # AIMD: ease toward the floor after a short success streak.
+        if self.success_streak >= 5 and self.sleep_s > self.min_sleep_s:
+            self.sleep_s = max(self.min_sleep_s, self.sleep_s * 0.9)
+            self.success_streak = 0
+
+    def on_rate_limit(self) -> None:
+        self.rate_limit_hits += 1
+        self.success_streak = 0
+        if self.policy == "fixed":
+            self.sleep_s = min(self.max_sleep_s, max(self.sleep_s, self.min_sleep_s * 4))
+            return
+        if self.policy == "thompson":
+            # Previous cooldown failed to clear the limit — debit that arm.
+            self._credit_pending(success=False)
+            idx = self._select_thompson_arm()
+            self._pending_arm = idx
+            self.sleep_s = float(self.arms[idx])
+            return
+        # AIMD: multiplicative increase with a floor step.
+        bumped = max(self.sleep_s * 2.0, self.sleep_s + 1.0, 2.0)
+        self.sleep_s = min(self.max_sleep_s, bumped)
+
+    def wait(self) -> None:
+        if self.sleep_s > 0:
+            time.sleep(float(self.sleep_s))
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "sleep_s": round(float(self.sleep_s), 3),
+            "min_sleep_s": float(self.min_sleep_s),
+            "max_sleep_s": float(self.max_sleep_s),
+            "adaptive": bool(self.adaptive),
+            "pacer_policy": self.policy,
+            "preferred_sleep_s": round(float(self.preferred_sleep_s()), 3),
+            "rate_limit_hits": int(self.rate_limit_hits),
+            "success_streak": int(self.success_streak),
+            "pending_arm_sleep_s": (
+                float(self.arms[self._pending_arm])
+                if self._pending_arm is not None and 0 <= self._pending_arm < len(self.arms)
+                else None
+            ),
+            "bandit_pulls": int(sum(a + b - 2.0 for a, b in zip(self.alphas, self.betas))),
+        }
+
+    def to_state(self) -> dict[str, Any]:
+        return {
+            "policy": self.policy,
+            "sleep_s": float(self.sleep_s),
+            "min_sleep_s": float(self.min_sleep_s),
+            "max_sleep_s": float(self.max_sleep_s),
+            "arms": list(self.arms),
+            "alphas": list(self.alphas),
+            "betas": list(self.betas),
+            "rate_limit_hits": int(self.rate_limit_hits),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    @classmethod
+    def from_state(
+        cls,
+        state: dict[str, Any] | None,
+        *,
+        sleep_s: float,
+        min_sleep_s: float,
+        max_sleep_s: float,
+        adaptive: bool = True,
+        policy: str = "thompson",
+        n_arms: int = 10,
+    ) -> AdaptivePacer:
+        state = state or {}
+        arms = state.get("arms") if isinstance(state.get("arms"), list) else None
+        pacer = cls(
+            sleep_s=float(state.get("sleep_s", sleep_s)),
+            min_sleep_s=min_sleep_s,
+            max_sleep_s=max_sleep_s,
+            adaptive=adaptive,
+            policy=str(state.get("policy") or policy),
+            n_arms=n_arms,
+            rate_limit_hits=int(state.get("rate_limit_hits") or 0),
+            arms=[float(x) for x in arms] if arms else [],
+            alphas=[float(x) for x in state.get("alphas") or []],
+            betas=[float(x) for x in state.get("betas") or []],
+        )
+        # If persisted arms do not match the current bounds, rebuild priors but
+        # keep the learned cruise sleep when it is in range.
+        expected = _logspace_arms(min_sleep_s, max_sleep_s, n_arms)
+        if arms and (
+            len(arms) != len(expected)
+            or any(abs(float(a) - float(b)) > 1e-3 for a, b in zip(arms, expected))
+        ):
+            pacer.arms = expected
+            pacer.alphas = [1.0] * len(expected)
+            pacer.betas = [1.0] * len(expected)
+        pacer.sleep_s = min(pacer.max_sleep_s, max(pacer.min_sleep_s, float(pacer.sleep_s)))
+        return pacer
 
 
 def full_story_root(project_root: Path | None = None) -> Path:
     root = Path(project_root) if project_root is not None else PROJECT_ROOT_DEFAULT
     return root / FULL_STORY_DIR_NAME
 
+
+def pacer_state_path(project_root: Path, ticker: str) -> Path:
+    return full_story_root(project_root) / str(ticker).upper().strip() / PACER_STATE_NAME
+
+
+def load_pacer_state(project_root: Path, ticker: str) -> dict[str, Any] | None:
+    path = pacer_state_path(project_root, ticker)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def save_pacer_state(project_root: Path, ticker: str, pacer: AdaptivePacer) -> None:
+    path = pacer_state_path(project_root, ticker)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(pacer.to_state(), indent=2) + "\n", encoding="utf-8")
+
+
+def summarize_pacer_bandit(state: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Turn persisted bandit JSON into a UI-friendly arm table.
+
+    ``wins`` / ``losses`` are posterior increments beyond the uniform Beta(1,1)
+    prior (so a fresh arm shows 0/0). ``p_success`` is the posterior mean
+    α/(α+β) — the model's current guess that waiting that long clears a 429.
+    """
+    if not isinstance(state, dict):
+        return None
+    arms = state.get("arms") or []
+    alphas = state.get("alphas") or []
+    betas = state.get("betas") or []
+    if not arms or len(arms) != len(alphas) or len(arms) != len(betas):
+        return None
+    rows: list[dict[str, Any]] = []
+    best_i = 0
+    best_score = -1.0
+    for i, (arm, a, b) in enumerate(zip(arms, alphas, betas)):
+        a_f = max(1e-3, float(a))
+        b_f = max(1e-3, float(b))
+        mean = a_f / (a_f + b_f)
+        score = mean - 0.01 * math.log1p(float(arm))
+        if score > best_score:
+            best_score = score
+            best_i = i
+        rows.append(
+            {
+                "arm_s": round(float(arm), 3),
+                "wins": max(0, int(round(a_f - 1.0))),
+                "losses": max(0, int(round(b_f - 1.0))),
+                "trials": max(0, int(round(a_f + b_f - 2.0))),
+                "p_success": round(mean, 3),
+                "alpha": round(a_f, 3),
+                "beta": round(b_f, 3),
+            }
+        )
+    for i, row in enumerate(rows):
+        row["preferred"] = i == best_i
+    return {
+        "policy": str(state.get("policy") or "thompson"),
+        "sleep_s": state.get("sleep_s"),
+        "preferred_sleep_s": rows[best_i]["arm_s"] if rows else None,
+        "rate_limit_hits": int(state.get("rate_limit_hits") or 0),
+        "updated_at": state.get("updated_at"),
+        "arms": rows,
+        "total_trials": int(sum(r["trials"] for r in rows)),
+        "total_wins": int(sum(r["wins"] for r in rows)),
+        "total_losses": int(sum(r["losses"] for r in rows)),
+    }
 
 def story_digest(story_id: str) -> str:
     return hashlib.sha256(str(story_id).encode("utf-8")).hexdigest()[:12]
@@ -517,6 +813,59 @@ def read_progress(project_root: Path, ticker: str) -> dict[str, Any] | None:
         return None
 
 
+def load_story_fetch_times(project_root: Path) -> list[datetime]:
+    """Successful ``get_story`` timestamps across all ticker manifests."""
+    root = full_story_root(project_root)
+    if not root.is_dir():
+        return []
+    times: list[datetime] = []
+    for ticker_dir in root.iterdir():
+        man = ticker_dir / "_manifest.jsonl"
+        if not ticker_dir.is_dir() or not man.is_file():
+            continue
+        try:
+            lines = man.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if row.get("status") != "fetched":
+                continue
+            ts = row.get("fetched_at")
+            if not ts:
+                continue
+            try:
+                dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00")).astimezone()
+            except ValueError:
+                continue
+            times.append(dt)
+    times.sort()
+    return times
+
+
+def count_story_fetches_on_local_day(
+    project_root: Path,
+    *,
+    day: Any | None = None,
+) -> int:
+    """Count successful ``get_story`` writes logged today across all tickers.
+
+    LSEG counts requests per Workspace instance per day (docs: 10,000/day),
+    aggregated across apps — so AAPL + MSFT share one budget.
+    """
+    target = day
+    if target is None:
+        target = datetime.now().astimezone().date()
+    elif hasattr(target, "date") and not isinstance(target, type(datetime.now().date())):
+        target = target.date()
+    return sum(1 for dt in load_story_fetch_times(project_root) if dt.date() == target)
+
+
 def headlines_needing_bodies(
     news: pd.DataFrame,
     project_root: Path,
@@ -548,8 +897,17 @@ def cache_refinitiv_stories(
     *,
     force: bool = False,
     limit: int | None = None,
-    sleep_s: float = 0.25,
+    sleep_s: float = 0.5,
+    min_sleep_s: float = 0.25,
+    max_sleep_s: float = 180.0,
+    adaptive: bool = True,
+    pacer_policy: str = "thompson",
     max_failures: int | None = 50,
+    max_scope_failures: int | None = 5,
+    rate_limit_retries: int = 40,
+    cooloff_after_rl: int = 6,
+    cooloff_s: float = 900.0,
+    max_requests_per_day: int | None = None,
     ld_module: Any | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     window_start: str | None = None,
@@ -561,8 +919,24 @@ def cache_refinitiv_stories(
     unless ``force`` is True. Progress is written to ``_pull_progress.json``.
     Write ``_pull_control.json`` with ``{"action":"pause"}`` or ``{"action":"halt"}``
     to stop after the current story (resume by starting another pull).
+
+    Rate limits (HTTP 429) are retried with a learned delay (Thompson-sampling
+    bandit by default; AIMD optional) and do **not** count toward
+    ``max_failures``. After ``cooloff_after_rl`` consecutive 429s without a
+    success, the pull takes a longer ``cooloff_s`` pause (default 15 min) before
+    trying again — useful overnight when the API needs to reset. Bandit state
+    persists in ``_pacer_bandit.json``. Workspace docs cap news at about
+    **5 req/s** and **10,000 req/day** across all apps on the same desktop
+    session; ``max_requests_per_day`` (default 9,800) pauses when *either*
+    the local calendar day or the rolling 24h window is exhausted. Missing
+    API scopes stop early after ``max_scope_failures``.
     """
     import os
+
+    from sentiment_ltr.data.story_quota_settings import default_max_per_day
+
+    if max_requests_per_day is None:
+        max_requests_per_day = int(default_max_per_day(project_root))
 
     ticker = str(ticker).upper().strip()
     pending = headlines_needing_bodies(news, project_root, ticker, force=force)
@@ -594,6 +968,7 @@ def cache_refinitiv_stories(
     results: list[StoryPullResult] = []
     fetched = 0
     failed = 0
+    scope_failures = 0
     cached_hits = already
     started = datetime.now(timezone.utc).isoformat()
     t0 = time.monotonic()
@@ -606,6 +981,23 @@ def cache_refinitiv_stories(
     final_status = "completed"
     stop_reason: str | None = None
     current_story_date: str | None = None
+    policy = "fixed" if not adaptive else str(pacer_policy or "thompson")
+    pacer = AdaptivePacer.from_state(
+        load_pacer_state(project_root, ticker),
+        sleep_s=sleep_s,
+        min_sleep_s=min_sleep_s,
+        max_sleep_s=max_sleep_s,
+        adaptive=adaptive,
+        policy=policy,
+    )
+    fetch_times = load_story_fetch_times(project_root)
+    quota_progress: dict[str, Any] = {}
+
+    def _persist_pacer() -> None:
+        try:
+            save_pacer_state(project_root, ticker, pacer)
+        except OSError:
+            pass
 
     def _metrics(extra: dict[str, Any] | None = None) -> dict[str, Any]:
         processed = fetched + failed
@@ -639,6 +1031,7 @@ def cache_refinitiv_stories(
             "pending_this_run": pending_n,
             "fetched": fetched,
             "failed": failed,
+            "scope_failures": scope_failures,
             "processed": processed,
             "remaining": remaining,
             "pct_run": pct_run,
@@ -658,6 +1051,21 @@ def cache_refinitiv_stories(
             "projected_total_human": format_bytes(projected_total),
             "files_at_start": files_at_start,
             "story_dir": str(full_story_root(project_root) / ticker),
+            "requests_today": sum(
+                1
+                for dt in fetch_times
+                if dt.astimezone().date() == datetime.now().astimezone().date()
+            ),
+            "requests_rolling_24h": sum(
+                1
+                for dt in fetch_times
+                if dt.astimezone() > datetime.now().astimezone() - timedelta(hours=24)
+            ),
+            "max_requests_per_day": (
+                int(max_requests_per_day) if max_requests_per_day is not None else None
+            ),
+            **quota_progress,
+            **pacer.snapshot(),
             **(extra or {}),
         }
         return payload
@@ -669,9 +1077,37 @@ def cache_refinitiv_stories(
             progress_callback(payload)
         return payload
 
+    def _user_stop() -> str | None:
+        ctrl = read_pull_control(project_root, ticker) or {}
+        action = str(ctrl.get("action") or "").lower()
+        if action in {"pause", "halt", "stop"}:
+            clear_pull_control(project_root, ticker)
+            return action
+        return None
+
+    def _sleep_interruptible(seconds: float, *, status: str) -> str | None:
+        """Sleep in short chunks; return pause/halt action if requested."""
+        deadline = time.monotonic() + max(0.0, float(seconds))
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            action = _user_stop()
+            if action:
+                return action
+            _emit(
+                {
+                    "last_status": status,
+                    "waiting_s": round(remaining, 1),
+                    "cooloff_s": float(cooloff_s),
+                }
+            )
+            time.sleep(min(5.0, remaining))
+
     try:
         _emit()
-        for idx, row in pending.iterrows():
+        rl_since_success = 0
+        for _, row in pending.iterrows():
             story_id = str(row.get("storyId") or "").strip()
             headline = str(row.get("headline") or "")
             story_time = row.get("date") if "date" in pending.columns else None
@@ -687,6 +1123,10 @@ def cache_refinitiv_stories(
             )
             item_t0 = time.monotonic()
             _emit({"last_story_id": story_id, "last_status": "fetching"})
+            text = ""
+            status = "failed"
+            error: str | None = None
+            live_attempt = existing is None or force
             try:
                 if existing is not None and existing.exists() and not force:
                     text = existing.read_text(encoding="utf-8")
@@ -694,27 +1134,154 @@ def cache_refinitiv_stories(
                     cached_hits += 1
                     path = existing
                 else:
-                    text = fetch_refinitiv_story(project_root, story_id, ld_module=ld)
-                    write_story_file(
-                        path,
-                        story_id=story_id,
-                        headline=headline,
-                        ticker=ticker,
-                        text=text,
-                        story_time=story_time,
-                    )
-                    status = "fetched"
-                    fetched += 1
+                    if max_requests_per_day is not None:
+                        from sentiment_ltr.data.story_quota_scheduler import (
+                            quota_snapshot_from_times,
+                        )
+
+                        while True:
+                            snap = quota_snapshot_from_times(
+                                fetch_times,
+                                max_per_day=int(max_requests_per_day),
+                            )
+                            if snap.remaining > 0:
+                                quota_progress = {
+                                    **snap.as_progress(),
+                                    "quota_blocking": None,
+                                    "quota_wait_until": None,
+                                    "waiting_s": 0.0,
+                                }
+                                break
+                            quota_progress = snap.as_progress()
+                            raw_wait = float(snap.wait_s) if snap.wait_s else 60.0
+                            wait_s = min(max(1.0, raw_wait), 1800.0)
+                            _emit(
+                                {
+                                    "last_story_id": story_id,
+                                    "last_status": "daily_quota",
+                                    **quota_progress,
+                                    "waiting_s": round(wait_s, 1),
+                                }
+                            )
+                            action = _sleep_interruptible(wait_s, status="daily_quota")
+                            if action:
+                                final_status = "paused" if action == "pause" else "halted"
+                                stop_reason = f"user {action}"
+                                _emit({"status": final_status, "stop_reason": stop_reason})
+                                summary = _metrics(
+                                    {
+                                        "status": final_status,
+                                        "stop_reason": stop_reason,
+                                        "finished_at": datetime.now(timezone.utc).isoformat(),
+                                    }
+                                )
+                                _write_progress(project_root, ticker, summary)
+                                if progress_callback:
+                                    progress_callback(summary)
+                                return summary
+                            fetch_times = load_story_fetch_times(project_root)
+                    attempt = 0
+                    while True:
+                        attempt += 1
+                        try:
+                            text = fetch_refinitiv_story(project_root, story_id, ld_module=ld)
+                            write_story_file(
+                                path,
+                                story_id=story_id,
+                                headline=headline,
+                                ticker=ticker,
+                                text=text,
+                                story_time=story_time,
+                            )
+                            status = "fetched"
+                            fetched += 1
+                            fetch_times.append(datetime.now().astimezone())
+                            rl_since_success = 0
+                            pacer.on_success()
+                            _persist_pacer()
+                            break
+                        except Exception as exc:  # noqa: BLE001
+                            if is_refinitiv_rate_limit_error(exc):
+                                pacer.on_rate_limit()
+                                _persist_pacer()
+                                rl_since_success += 1
+                                _emit(
+                                    {
+                                        "last_story_id": story_id,
+                                        "last_status": "rate_limited",
+                                        "last_error": str(exc)[:240],
+                                        "rate_limit_attempt": attempt,
+                                        "waiting_s": round(float(pacer.sleep_s), 3),
+                                        "rl_since_success": rl_since_success,
+                                    }
+                                )
+                                if attempt >= max(1, int(rate_limit_retries)):
+                                    failed += 1
+                                    status = "failed"
+                                    error = (
+                                        f"rate_limited_exhausted after {attempt} tries: {exc}"
+                                    )[:500]
+                                    break
+                                # Long pause after a burst of 429s so overnight
+                                # pulls can wait for quota to reset, then resume.
+                                use_cooloff = (
+                                    int(cooloff_after_rl) > 0
+                                    and float(cooloff_s) > 0
+                                    and rl_since_success >= int(cooloff_after_rl)
+                                    and rl_since_success % int(cooloff_after_rl) == 0
+                                )
+                                wait_s = float(cooloff_s) if use_cooloff else float(pacer.sleep_s)
+                                wait_status = "cooling_off" if use_cooloff else "rate_limited"
+                                if use_cooloff:
+                                    _emit(
+                                        {
+                                            "last_story_id": story_id,
+                                            "last_status": "cooling_off",
+                                            "last_error": str(exc)[:240],
+                                            "rate_limit_attempt": attempt,
+                                            "waiting_s": round(wait_s, 1),
+                                            "rl_since_success": rl_since_success,
+                                        }
+                                    )
+                                action = _sleep_interruptible(wait_s, status=wait_status)
+                                if action:
+                                    final_status = "paused" if action == "pause" else "halted"
+                                    stop_reason = f"user {action}"
+                                    _emit({"status": final_status, "stop_reason": stop_reason})
+                                    summary = _metrics(
+                                        {
+                                            "status": final_status,
+                                            "stop_reason": stop_reason,
+                                            "finished_at": datetime.now(timezone.utc).isoformat(),
+                                        }
+                                    )
+                                    _write_progress(project_root, ticker, summary)
+                                    if progress_callback:
+                                        progress_callback(summary)
+                                    return summary
+                                continue
+                            if is_refinitiv_scope_error(exc):
+                                scope_failures += 1
+                                failed += 1
+                                status = "failed"
+                                error = str(exc)[:500]
+                                break
+                            failed += 1
+                            status = "failed"
+                            error = str(exc)[:500]
+                            break
                 result = StoryPullResult(
                     story_id=story_id,
                     headline=headline,
                     status=status,
-                    path=str(path),
-                    n_chars=len(text),
+                    path=str(path) if status != "failed" else None,
+                    n_chars=len(text) if status != "failed" else 0,
+                    error=error,
                     elapsed_s=round(time.monotonic() - item_t0, 3),
                 )
             except Exception as exc:  # noqa: BLE001
                 failed += 1
+                live_attempt = True
                 result = StoryPullResult(
                     story_id=story_id,
                     headline=headline,
@@ -731,24 +1298,33 @@ def cache_refinitiv_stories(
                     "fetched_at": datetime.now(timezone.utc).isoformat(),
                 },
             )
-            # Update often enough for a live progress bar (every story).
             _emit({"last_story_id": story_id, "last_status": result.status})
+            if max_scope_failures is not None and scope_failures >= int(max_scope_failures):
+                final_status = "stopped"
+                stop_reason = (
+                    f"hit max_scope_failures={max_scope_failures} "
+                    "(missing trapi.data.news.read / desktop session)"
+                )
+                _emit({"status": final_status, "stop_reason": stop_reason})
+                break
             if max_failures is not None and failed >= int(max_failures):
                 final_status = "stopped"
                 stop_reason = f"hit max_failures={max_failures}"
                 _emit({"status": final_status, "stop_reason": stop_reason})
                 break
-            ctrl = read_pull_control(project_root, ticker) or {}
-            action = str(ctrl.get("action") or "").lower()
-            if action in {"pause", "halt", "stop"}:
-                clear_pull_control(project_root, ticker)
+            action = _user_stop()
+            if action:
                 final_status = "paused" if action == "pause" else "halted"
                 stop_reason = f"user {action}"
                 _emit({"status": final_status, "stop_reason": stop_reason})
                 break
-            if result.status == "fetched" and sleep_s > 0:
-                time.sleep(float(sleep_s))
+            if live_attempt:
+                pacer.wait()
     finally:
+        try:
+            save_pacer_state(project_root, ticker, pacer)
+        except OSError:
+            pass
         if opened_here and ld is not None:
             try:
                 ld.close_session()
@@ -767,6 +1343,7 @@ def cache_refinitiv_stories(
     if progress_callback:
         progress_callback(summary)
     return summary
+
 
 
 def _format_eta(eta_s: int | None) -> str:

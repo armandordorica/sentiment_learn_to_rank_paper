@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 from typing import Any, Literal
 
+from sentiment_ltr.data.refinitiv_errors import is_refinitiv_rate_limit_error
 from sentiment_ltr.data.secrets import get_env_or_secret
 
 
@@ -223,6 +224,15 @@ def open_platform_session(
     return session
 
 
+def _desktop_session_is_open(session: Any) -> bool:
+    """Return True when the desktop session reports an opened state."""
+    for attr in ("open_state", "state"):
+        value = str(getattr(session, attr, "") or "").lower()
+        if "opened" in value and "closed" not in value:
+            return True
+    return False
+
+
 def open_workspace_session(
     project_root: Path,
     ld_module: Any,
@@ -243,6 +253,13 @@ def open_workspace_session(
                 "If desktop keeps failing, cloud fallback will be attempted when LSEG_USERNAME and "
                 "LSEG_PASSWORD are configured."
             ) from exc
+        # Rate limits mean the desktop proxy is up — do not fall back to cloud (which often
+        # lacks trapi.data.news.read and breaks full-story pulls).
+        if is_refinitiv_rate_limit_error(exc) and _desktop_session_is_open(session):
+            return session
+        if _desktop_session_is_open(session):
+            # Session opened; probe failed for a non-auth reason. Keep desktop.
+            return session
         raise RuntimeError(
             "LSEG desktop session did not open. Keep Workspace running and signed in, then verify "
             "your App Key in APPKEY."

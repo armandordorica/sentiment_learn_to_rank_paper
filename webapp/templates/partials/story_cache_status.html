@@ -78,6 +78,49 @@
           · ETA {{ prog.eta_human or "—" }}
           · elapsed {{ prog.elapsed_s or 0 }}s
         </p>
+        {% if prog.last_status == "daily_quota" %}
+          <p class="muted story-pull-metrics">
+            Workspace quota
+            {% if prog.quota_blocking == "rolling_24h" %}
+              (rolling 24h)
+            {% elif prog.quota_blocking == "calendar_day" %}
+              (local calendar day)
+            {% else %}
+              (tighter of calendar day / rolling 24h)
+            {% endif %}
+            — today <strong>{{ "{:,}".format(prog.requests_today or 0) }}</strong>
+            · last 24h <strong>{{ "{:,}".format(prog.requests_rolling_24h or 0) }}</strong>
+            / {{ "{:,}".format(prog.max_requests_per_day or 9800) }}.
+            Waiting <strong>{{ prog.waiting_s or "?" }}s</strong>
+            {% if prog.quota_wait_until %} until {{ prog.quota_wait_until }}{% endif %}.
+          </p>
+        {% elif prog.last_status == "cooling_off" or prog.last_status == "overnight_pause" %}
+          <p class="muted story-pull-metrics">
+            {% if prog.last_status == "overnight_pause" %}
+              Overnight pause — waiting <strong>{{ prog.waiting_s or "?" }}s</strong> before the next session
+            {% else %}
+              Cooling off after repeated HTTP 429s — waiting <strong>{{ prog.waiting_s or "?" }}s</strong>
+              then retrying
+            {% endif %}
+            {% if prog.rate_limit_attempt %} · attempt {{ prog.rate_limit_attempt }}{% endif %}
+            · policy {{ prog.pacer_policy or "—" }}
+          </p>
+        {% elif prog.last_status == "rate_limited" %}
+          <p class="muted story-pull-metrics">
+            Rate-limited (HTTP 429) — waiting <strong>{{ prog.waiting_s or prog.sleep_s or "?" }}s</strong>
+            before retry
+            {% if prog.rate_limit_attempt %} · attempt {{ prog.rate_limit_attempt }}{% endif %}
+            {% if prog.pacer_policy %} · policy {{ prog.pacer_policy }}{% endif %}
+            {% if prog.preferred_sleep_s is defined and prog.preferred_sleep_s is not none %} · learned prefer ~{{ prog.preferred_sleep_s }}s{% endif %}
+            · {{ prog.rate_limit_hits or 0 }} hits this run
+          </p>
+        {% elif prog.pacer_policy %}
+          <p class="muted story-pull-metrics">
+            Pacer {{ prog.pacer_policy }} · sleep {{ prog.sleep_s or "?" }}s
+            {% if prog.preferred_sleep_s is defined and prog.preferred_sleep_s is not none %} · learned prefer ~{{ prog.preferred_sleep_s }}s{% endif %}
+            · {{ prog.rate_limit_hits or 0 }} rate-limit hits
+          </p>
+        {% endif %}
         <p class="muted story-pull-metrics">
           Disk for {{ ticker_q }}:
           <strong>{{ prog.bytes_human or status.bytes_human or "—" }}</strong>
@@ -114,6 +157,49 @@
     {% endif %}
   {% else %}
     <p class="muted">No pull has been started yet for this ticker.</p>
+  {% endif %}
+
+  {% if status and status.bandit and status.bandit.arms %}
+    <details class="story-bandit" {% if running %}open{% endif %}>
+      <summary>
+        Thompson wait learner
+        · prefer ~{{ status.bandit.preferred_sleep_s }}s
+        · {{ status.bandit.total_wins }} wins / {{ status.bandit.total_losses }} losses
+        across {{ status.bandit.arms|length }} wait arms
+      </summary>
+      <p class="muted">
+        Each row is a candidate cooldown after HTTP 429.
+        <strong>Wins</strong> = that wait was followed by a successful fetch;
+        <strong>losses</strong> = still rate-limited afterward.
+        <strong>P(ok)</strong> is the current posterior guess.
+        Highlighted row is the preferred arm (highest P(ok), slight bias to shorter waits).
+      </p>
+      <table class="story-bandit-table">
+        <thead>
+          <tr>
+            <th>Wait (s)</th>
+            <th>Wins</th>
+            <th>Losses</th>
+            <th>Trials</th>
+            <th>P(ok)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for arm in status.bandit.arms %}
+            <tr class="{% if arm.preferred %}is-preferred{% endif %}">
+              <td>{{ arm.arm_s }}{% if arm.preferred %} ← prefer{% endif %}</td>
+              <td>{{ arm.wins }}</td>
+              <td>{{ arm.losses }}</td>
+              <td>{{ arm.trials }}</td>
+              <td>{{ "%.0f"|format(arm.p_success * 100) }}%</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% if status.bandit.updated_at %}
+        <p class="muted">Updated {{ status.bandit.updated_at }} · {{ status.bandit.rate_limit_hits }} rate-limit hits recorded in bandit state</p>
+      {% endif %}
+    </details>
   {% endif %}
 
   {% if status and status.day_grids %}

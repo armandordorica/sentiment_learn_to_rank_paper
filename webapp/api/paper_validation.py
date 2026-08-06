@@ -163,8 +163,9 @@ def replication_inputs(*, universe_rows: int | None = None) -> list[dict[str, An
             f"Our median avg articles/week ≈ {news['median_avg_per_week']:.1f} "
             f"vs paper Table 1 median {news['paper_median']:.0f} "
             f"(RavenPack ≫ TRNA density). "
-            "Final committed ~512-name universe CSV is not written yet — "
-            "partials are mostly delisted / Yahoo-Refinitiv gaps with WRDS still ok."
+            "Committed proxy list: `app_data/ravenpack_news_threshold_universe.csv` "
+            "(rebuild via `scripts/build_news_threshold_universe.py`). "
+            "Partials are mostly delisted / Yahoo-Refinitiv gaps with WRDS still ok."
         )
     else:
         news_ours = _batch_line()
@@ -226,7 +227,10 @@ def replication_inputs(*, universe_rows: int | None = None) -> list[dict[str, An
             "ours_detail": news_ours,
             "code_pointers": [
                 "src/sentiment_ltr/data/news_coverage.py",
-                "scripts/run_batch_pipeline.py",
+                "src/sentiment_ltr/data/batch_universe.py",
+                "scripts/build_news_threshold_universe.py",
+                "scripts/backfill_refinitiv_headlines.py",
+                "app_data/ravenpack_news_threshold_universe.csv",
                 "data/raw/data_explorer_top1k/by_ticker/rank_XXXX_TICKER/",
             ],
             "webapp_pointers": [

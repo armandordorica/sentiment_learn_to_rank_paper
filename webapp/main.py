@@ -465,8 +465,39 @@ def batch_page(request: Request) -> HTMLResponse:
         "ticker_view": bp.ticker_table(mdf),
         "tickers": bp.ticker_options(mdf),
         "storage": bp.storage_context(),
+        "q": bp.story_quota_context(),
     })
     return templates.TemplateResponse(request, "batch_pipeline.html", ctx)
+
+
+@app.get("/batch/story-quota", response_class=HTMLResponse)
+def batch_story_quota(request: Request, edit: int = 0) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "partials/story_quota_settings.html",
+        {"q": bp.story_quota_context(editing=bool(edit))},
+    )
+
+
+@app.post("/batch/story-quota", response_class=HTMLResponse)
+def batch_story_quota_save(
+    request: Request,
+    max_per_day: int = Form(default=9800),
+    min_sleep_s: float = Form(default=0.3),
+    cron_minute: int = Form(default=5),
+    cron_enabled: bool = Form(default=False),
+    apply_cron: bool = Form(default=False),
+) -> HTMLResponse:
+    ctx = bp.save_story_quota_automation(
+        max_per_day=max_per_day,
+        min_sleep_s=min_sleep_s,
+        cron_enabled=cron_enabled,
+        cron_minute=cron_minute,
+        apply_cron=apply_cron,
+    )
+    return templates.TemplateResponse(
+        request, "partials/story_quota_settings.html", {"q": ctx}
+    )
 
 
 @app.get("/batch/status", response_class=HTMLResponse)

@@ -1,0 +1,270 @@
+<div id="story-quota-panel">
+  {% if q.message %}
+    <div class="alert alert-success">{{ q.message }}</div>
+  {% endif %}
+  {% if q.error %}
+    <div class="alert alert-error">Could not update Mac crontab: {{ q.error }}</div>
+  {% endif %}
+
+  <div class="metric-row">
+    <div class="metric"><span class="metric-label">Quota left today</span><span class="metric-value">{{ "{:,}".format(q.quota.remaining) }} / {{ "{:,}".format(q.quota.max_per_day) }}</span></div>
+    <div class="metric"><span class="metric-label">Used (calendar day)</span><span class="metric-value">{{ "{:,}".format(q.quota.calendar_used) }}</span></div>
+    <div class="metric"><span class="metric-label">Used (last 24h)</span><span class="metric-value">{{ "{:,}".format(q.quota.rolling_used) }}</span></div>
+    <div class="metric"><span class="metric-label">Tickers in queue</span><span class="metric-value">{{ "{:,}".format(q.n_queue) }}</span></div>
+  </div>
+
+  <div class="story-quota-status-card">
+    <div class="story-quota-status-head">
+      <h4>Status</h4>
+      {% if not q.editing %}
+        <button type="button" class="btn btn-secondary"
+                hx-get="/batch/story-quota?edit=1"
+                hx-target="#story-quota-panel"
+                hx-swap="outerHTML">Edit settings</button>
+      {% endif %}
+    </div>
+
+    <dl class="story-quota-status-list">
+      <div>
+        <dt>Story pull</dt>
+        <dd>
+          {% if q.pull_status.running %}
+            <span class="status-pill status-pill-live">Running</span>
+            {{ q.pull_status.tickers | join(", ") }}
+            <span class="muted">— cron will not start a second job</span>
+          {% else %}
+            <span class="status-pill status-pill-idle">Idle</span>
+            no full-story pull is running
+          {% endif %}
+        </dd>
+      </div>
+      <div>
+        <dt>Hourly watchdog</dt>
+        <dd>
+          {% if q.cron_installed %}
+            <span class="status-pill status-pill-live">Scheduled</span>
+            {{ q.cron_live.plain }}
+          {% elif q.settings.cron_enabled %}
+            <span class="status-pill status-pill-warn">Not installed</span>
+            saved settings want a watchdog, but crontab has no line yet
+          {% else %}
+            <span class="status-pill status-pill-idle">Off</span>
+            hourly auto-check is disabled
+          {% endif %}
+        </dd>
+      </div>
+      <div>
+        <dt>Next cron check</dt>
+        <dd>
+          {% if q.next_run and q.cron_installed %}
+            <strong>{{ q.next_run.utc }}</strong>
+            <span class="muted">which is</span>
+            <strong>{{ q.next_run.eastern }}</strong>
+            <span class="muted">(Mac local {{ q.next_run.local_human }})</span>
+          {% elif q.next_run and q.next_run.pending_install %}
+            Would be <strong>{{ q.next_run.utc }}</strong>
+            / <strong>{{ q.next_run.eastern }}</strong>
+            after crontab is installed
+          {% else %}
+            —
+          {% endif %}
+        </dd>
+      </div>
+      <div>
+        <dt>Defaults in effect</dt>
+        <dd>
+          Daily budget <strong>{{ "{:,}".format(q.settings.max_per_day) }}</strong> story bodies
+          · pause <strong>{{ q.settings.min_sleep_s }}s</strong>
+          {% if q.approx_rps %}(~{{ q.approx_rps }} req/s){% endif %}
+          · schedule <code>{{ q.cron_saved.expression }}</code>
+        </dd>
+      </div>
+      {% if q.quota.blocking %}
+      <div>
+        <dt>Quota wait</dt>
+        <dd>
+          Blocked on <strong>{{ q.quota.blocking }}</strong>
+          {% if q.quota.wait_until %} until {{ q.quota.wait_until }}{% endif %}
+        </dd>
+      </div>
+      {% endif %}
+      <div>
+        <dt>Next in queue</dt>
+        <dd>
+          {% if q.queue_plan and q.queue_plan.next_ticker %}
+            <strong>{{ q.queue_plan.next_ticker }}</strong>
+            <span class="muted">
+              · {{ "{:,}".format(q.queue_plan.counts.ready) }} ready with headlines
+              · {{ "{:,}".format(q.queue_plan.counts.needs_headlines) }} waiting on headline backfill
+              · {{ "{:,}".format(q.queue_plan.counts.done) }} done
+              · {{ "{:,}".format(q.queue_plan.counts.total) }} total
+            </span>
+          {% else %}
+            —
+          {% endif %}
+        </dd>
+      </div>
+    </dl>
+
+    {% if q.queue_plan and q.queue_plan.rows %}
+    <details class="story-quota-queue" open>
+      <summary>
+        <strong>Full story pull queue</strong>
+        ({{ "{:,}".format(q.queue_plan.counts.total) }} tickers ·
+        ready {{ "{:,}".format(q.queue_plan.counts.ready) }} ·
+        needs headlines {{ "{:,}".format(q.queue_plan.counts.needs_headlines) }})
+      </summary>
+      <p class="muted">
+        Order is the news-threshold universe by volume rank (MSFT held first while incomplete).
+        Cron walks this list and skips names still missing usable Refinitiv headlines.
+        File: <code>{{ q.queue_path }}</code>
+      </p>
+      <div class="table-scroll story-quota-queue-scroll">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Ticker</th>
+              <th>Status</th>
+              <th>Rank</th>
+              <th>Headlines</th>
+              <th>Bodies</th>
+              <th>% overall</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in q.queue_plan.rows %}
+              <tr class="queue-row-{{ row.state }}">
+                <td>{{ row.position }}</td>
+                <td><strong>{{ row.ticker }}</strong></td>
+                <td>
+                  <span class="status-pill status-pill-{{ row.state }}">{{ row.state_label }}</span>
+                </td>
+                <td>{% if row.volume_rank %}{{ row.volume_rank }}{% else %}—{% endif %}</td>
+                <td>{{ "{:,}".format(row.headline_rows) }}</td>
+                <td>{{ "{:,}".format(row.bodies) }}</td>
+                <td>{% if row.pct_overall %}{{ "%.1f"|format(row.pct_overall) }}%{% else %}—{% endif %}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </details>
+    {% endif %}
+
+    <p class="muted story-quota-footnote">
+      These are stable defaults — leave them alone unless you are changing Workspace budget
+      or the hourly wake-up minute. A pull that is already running keeps the budget it was
+      launched with until restarted.
+    </p>
+  </div>
+
+  {% if q.editing %}
+  <form hx-post="/batch/story-quota" hx-target="#story-quota-panel" hx-swap="outerHTML"
+        hx-indicator="#story-quota-spinner" id="story-quota-form" class="story-quota-edit">
+    <div class="story-quota-status-head">
+      <h4>Edit automation settings</h4>
+      <button type="button" class="btn btn-secondary"
+              hx-get="/batch/story-quota"
+              hx-target="#story-quota-panel"
+              hx-swap="outerHTML">Cancel</button>
+    </div>
+    <div class="form-grid">
+      <label>
+        Daily story-body budget
+        <input type="number" name="max_per_day" min="100" max="10000" step="100"
+               value="{{ q.settings.max_per_day }}" required>
+        <span class="field-help">
+          Max successful Refinitiv <code>get_story</code> calls per day across all tickers.
+          LSEG’s published ceiling is ~10,000; keep a cushion (e.g. 9,800).
+        </span>
+      </label>
+      <label>
+        Pause between story fetches (seconds)
+        <input type="number" name="min_sleep_s" min="0.05" max="5" step="0.05"
+               value="{{ q.settings.min_sleep_s }}" required>
+        <span class="field-help">
+          Cruise delay after each body. At {{ q.settings.min_sleep_s }}s ≈
+          <strong>{{ q.approx_rps }} req/s</strong> (LSEG allows ~5/s).
+        </span>
+      </label>
+      <label>
+        Cron minute (0–59)
+        <input type="number" name="cron_minute" min="0" max="59" step="1"
+               value="{{ q.settings.cron_minute }}" required
+               id="story-quota-cron-minute">
+        <span class="field-help" id="story-quota-cron-help">
+          Watchdog runs <strong>once every hour</strong> at
+          <strong>:{{ "%02d"|format(q.settings.cron_minute) }}</strong> Mac local time
+          (24 times/day).
+        </span>
+      </label>
+    </div>
+
+    <div class="check-grid">
+      <label>
+        <input type="checkbox" name="cron_enabled" value="true" id="story-quota-cron-enabled"
+          {% if q.settings.cron_enabled %}checked{% endif %}>
+        Enable hourly watchdog
+        <span class="field-help">When off, only manual / already-running pulls continue.</span>
+      </label>
+      <label>
+        <input type="checkbox" name="apply_cron" value="true" checked>
+        Update Mac crontab when I save
+        <span class="field-help">Writes or removes the crontab line so the schedule takes effect.</span>
+      </label>
+    </div>
+
+    <p class="muted" id="story-quota-preview">
+      After save:
+      <strong id="story-quota-preview-text">
+        {% if q.settings.cron_enabled %}
+          once every hour at :{{ "%02d"|format(q.settings.cron_minute) }} (24 checks/day)
+        {% else %}
+          watchdog off
+        {% endif %}
+      </strong>
+    </p>
+
+    <button class="btn btn-primary" type="submit">Save &amp; apply</button>
+    <span id="story-quota-spinner" class="htmx-indicator muted"> Saving…</span>
+  </form>
+
+  <script>
+    (function () {
+      var minuteInput = document.getElementById("story-quota-cron-minute");
+      var enabledInput = document.getElementById("story-quota-cron-enabled");
+      var help = document.getElementById("story-quota-cron-help");
+      var preview = document.getElementById("story-quota-preview-text");
+      function pad(n) {
+        n = Math.max(0, Math.min(59, parseInt(n || "0", 10) || 0));
+        return (n < 10 ? "0" : "") + n;
+      }
+      function refresh() {
+        var mm = pad(minuteInput && minuteInput.value);
+        var on = enabledInput && enabledInput.checked;
+        if (help) {
+          help.innerHTML = on
+            ? ("Watchdog runs <strong>once every hour</strong> at <strong>:" + mm +
+               "</strong> Mac local time (24 times/day).")
+            : "Watchdog is off — cron will not auto-check the queue.";
+        }
+        if (preview) {
+          preview.textContent = on
+            ? ("once every hour at :" + mm + " (24 checks/day)")
+            : "watchdog off";
+        }
+      }
+      if (minuteInput) minuteInput.addEventListener("input", refresh);
+      if (enabledInput) enabledInput.addEventListener("change", refresh);
+    })();
+  </script>
+  {% endif %}
+
+  {% if q.log_tail %}
+    <details>
+      <summary><strong>Recent cron log</strong></summary>
+      <pre class="log-pre">{{ q.log_tail }}</pre>
+    </details>
+  {% endif %}
+</div>

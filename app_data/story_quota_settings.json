@@ -1,0 +1,7 @@
+{
+  "max_per_day": 9800,
+  "min_sleep_s": 0.3,
+  "cron_enabled": true,
+  "cron_minute": 5,
+  "updated_at": "2026-08-06T02:17:11+00:00"
+}
