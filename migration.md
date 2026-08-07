@@ -419,9 +419,21 @@ If APIs work but counts are tiny → AirDrop missed `data/`; re-copy or rsync `d
 
 ---
 
+## Public domain (Cloudflare)
+
+To serve the Mini webapp on a domain you bought in Cloudflare (HTTPS, no port
+forwarding), use a **named Cloudflare Tunnel**. Full steps:
+[`docs/cloudflare_hosting.md`](docs/cloudflare_hosting.md).
+
+Short version on the Mini: uvicorn on `127.0.0.1:8001` → `cloudflared tunnel`
+→ CNAME `app.yourdomain.com` → optional Cloudflare Access email gate.
+
+---
+
 ## References in-repo
 
 - `environment.yml` — conda env  
+- `docs/cloudflare_hosting.md` — Cloudflare Tunnel + domain hosting  
 - `app_data/story_quota_settings.json` — max/day, sleep, cron minute  
 - `app_data/story_pull_queue.txt` — multi-ticker story order  
 - `scripts/run_daily_story_quota.py` — hourly watchdog  
