@@ -237,6 +237,163 @@ Do not start a second story pull if one is already running elsewhere on the same
 
 ---
 
+## Install LSEG Workspace + verify credentials & transfer
+
+Do this **on the Mac Mini**, in Terminal or Cursor, from the project root.
+Activate the env first:
+
+```bash
+cd /path/to/Sentiment_learn_to_rank_paper
+conda activate sentiment-ltr-paper
+```
+
+### A. Install and sign into LSEG Workspace
+
+1. On the Mini, open a browser and download **LSEG Workspace** for Mac from your
+   firm/school portal or [https://www.lseg.com/en/data-analytics/products/workspace](https://www.lseg.com/en/data-analytics/products/workspace)
+   (use whatever download link your account normally uses on the laptop).
+2. Install the `.dmg` / app into **Applications**.
+3. Launch **Workspace**, sign in with the **same account** you use on the laptop.
+4. Leave Workspace **running and unlocked** while testing (desktop session mode
+   talks to the local Workspace process).
+5. Optional but recommended: in Workspace, confirm you can open a news/quote
+   panel for `AAPL.O` so the login is fully live.
+
+Do **not** keep an active overnight story pull on the laptop and the Mini at the
+same time against this login (shared ~10k/day news quota).
+
+### B. Confirm `.env` and LSEG Python package
+
+```bash
+# Must exist after AirDrop (dotfile — verify explicitly)
+ls -la .env
+grep -E '^(WRDS_|LSEG_|HF_)' .env | sed 's/=.*/=***/'   # names only, no secrets
+
+# Config file Workspace/desktop often uses (may be empty/placeholder)
+ls -la lseg-data.config.json 2>/dev/null || echo "(no lseg-data.config.json yet — desktop mode may still work)"
+
+# Ensure lseg-data is installed in this env
+python -c "import lseg.data as ld; print('lseg-data ok', getattr(ld, '__version__', '?'))" \
+  || pip install -r requirements-refinitiv.txt
+```
+
+`.env` fields (see `.env.example`):
+
+| Variable | Purpose |
+| --- | --- |
+| `WRDS_USERNAME` / `WRDS_PASSWORD` | WRDS / RavenPack-on-WRDS |
+| `LSEG_APP_KEY` / `LSEG_USERNAME` / `LSEG_PASSWORD` | Cloud platform fallback (optional if desktop works) |
+| `LSEG_CONFIG_PATH` | Usually `./lseg-data.config.json` |
+| `LSEG_SESSION_MODE` | Optional force; leave blank for auto desktop→platform |
+| `HF_TOKEN` | Hugging Face (fine-tunes) |
+
+### C. Test Refinitiv / Workspace (live)
+
+With Workspace signed in:
+
+```bash
+PYTHONPATH=src:. python scripts/test_refinitiv_connection.py
+```
+
+**Pass:** prints a small table for `AAPL.O` / `MSFT.O` (BID/ASK/Revenue) and exits 0.  
+**Fail:** session/config/scope error — fix Workspace login first; only then touch cloud keys in `.env`.
+
+Optional news/story smoke (uses the same desktop session; costs a few API calls):
+
+```bash
+PYTHONPATH=src:. python - <<'PY'
+from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv(Path('.env'))
+import lseg.data as ld
+from sentiment_ltr.data.refinitiv_session import open_refinitiv_session
+from sentiment_ltr.data.refinitiv_queries import fetch_refinitiv_story
+
+root = Path('.').resolve()
+open_refinitiv_session(root, ld)
+# One known-good path: headlines month sample via news helper is heavier;
+# just confirm get_data already worked above. Close cleanly:
+ld.close_session()
+print('session open/close ok')
+PY
+```
+
+### D. Test WRDS credentials
+
+```bash
+PYTHONPATH=src:. python - <<'PY'
+from pathlib import Path
+from dotenv import load_dotenv
+load_dotenv(Path('.env'))
+from sentiment_ltr.data.live_data import wrds_credentials_available, test_wrds_connection
+
+assert wrds_credentials_available(), 'WRDS_USERNAME/PASSWORD missing in .env'
+info = test_wrds_connection()
+print('WRDS ok — latest CRSP date:', info['latest_crsp_date'])
+print(info['sample_rows'])
+PY
+```
+
+### E. Verify the AirDrop / folder transfer
+
+```bash
+# Sizes should be in the same ballpark as the laptop (~9GB repo, multi-GB data)
+du -sh . data data/raw data/raw/data_explorer_top1k data/raw/data_explorer_full_stories
+
+# Top-1k batch cache present
+test -d data/raw/data_explorer_top1k/by_ticker && \
+  echo "top1k dirs:" $(find data/raw/data_explorer_top1k/by_ticker -maxdepth 1 -type d | wc -l)
+
+# Story bodies (AAPL should be ~27k files; MSFT partial OK)
+echo "AAPL bodies:" $(find data/raw/data_explorer_full_stories/AAPL -maxdepth 1 -name '*.txt' ! -name '_*' 2>/dev/null | wc -l)
+echo "MSFT bodies:" $(find data/raw/data_explorer_full_stories/MSFT -maxdepth 1 -name '*.txt' ! -name '_*' 2>/dev/null | wc -l)
+
+# Queue + settings
+wc -l app_data/story_pull_queue.txt
+cat app_data/story_quota_settings.json
+
+# Logs travelled with the folder
+ls -lh data/raw/data_explorer_full_stories/MSFT/_pull.log \
+      data/raw/data_explorer_full_stories/_daily_quota.log \
+      data/raw/data_explorer_top1k/batch_runner.log 2>/dev/null
+```
+
+Rough expectations from the laptop snapshot:
+
+| Check | Healthy look |
+| --- | --- |
+| `data/raw/data_explorer_top1k/by_ticker` | ~1000 `rank_*` dirs |
+| AAPL `*.txt` bodies | ~27,000 |
+| MSFT `*.txt` bodies | thousands (in progress on laptop; partial OK) |
+| `app_data/ravenpack_news_threshold_universe.csv` | ~537 rows |
+| `app_data/story_pull_queue.txt` | ~517 ticker lines (+ comments) |
+
+### F. Webapp smoke (optional but good)
+
+```bash
+caffeinate -is python -m uvicorn webapp.main:app --host 127.0.0.1 --port 8001
+# browser: http://127.0.0.1:8001/batch  and  /data-explorer
+```
+
+On **2F**, confirm queue counts and quota status load. On Data Explorer, load
+cached AAPL without hitting live APIs first (“cache” path).
+
+### G. Pass / fail summary
+
+| Test | Command / check | Pass means |
+| --- | --- | --- |
+| Transfer | `du` + AAPL/MSFT file counts | Caches present, not empty |
+| `.env` | `ls .env` + WRDS/LSEG keys set | Secrets arrived |
+| WRDS | `test_wrds_connection()` | Latest CRSP date prints |
+| Workspace + LSEG | `scripts/test_refinitiv_connection.py` | Price table prints |
+| Webapp | `/batch` loads | UI + 2F queue visible |
+
+If WRDS works but Refinitiv fails → Workspace install/login problem, not AirDrop.  
+If both fail → check `.env` and conda env.  
+If APIs work but counts are tiny → AirDrop missed `data/`; re-copy or rsync `data/`.
+
+---
+
 ## Quick smoke checklist
 
 - [ ] `conda activate sentiment-ltr-paper` works  
